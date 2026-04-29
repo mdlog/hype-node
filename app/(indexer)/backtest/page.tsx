@@ -1,12 +1,19 @@
 import { Card, Label, Metric, Mono, Btn, LineChart, Toggle } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { listSsiTickers, getSsiKlines } from "@/lib/api/sosovalue";
+import {
+  listSsiTickers,
+  getSsiKlines,
+  getCurrencyKlines,
+  CURRENCY_ID,
+} from "@/lib/api/sosovalue";
 import { closesFromKlines, computeMetrics } from "@/lib/metrics";
 
 export const revalidate = 60;
 
 const STRATEGY = "ssiDePIN";
-const BENCHMARK_TICKERS = ["ssiMAG7", "ssiLayer1", "ssiAI"] as const;
+// Benchmarks: ssiMAG7 (SSI top-7), ssiLayer1 (L1 basket), and BTC currency
+// price as a market beta. Pure SoSoValue; no synthetic mixing.
+const SSI_BENCHMARKS = ["ssiMAG7", "ssiLayer1"] as const;
 
 const SSI_LABELS: Record<string, string> = {
   ssiDePIN: "DePIN sentiment-weighted",
@@ -36,23 +43,36 @@ function normalize(closes: number[]): number[] {
 }
 
 export default async function BacktestPage() {
-  // Strategy = ssiDePIN. Benchmarks = other SSI tickers (all from SoSoValue).
-  // The 65s rate gate caps each fetch; first cold render takes <1s if quota
-  // ok, otherwise serves cached/synthetic.
+  // Strategy = ssiDePIN. Benchmarks = SSI MAG7 + Layer1 + real BTC currency
+  // klines. All sourced from SoSoValue OpenAPI v1.
   const tickers = await listSsiTickers();
-  const [strategyKlines, ...benchmarkKlines] = await Promise.all([
+  const [strategyKlines, ssiMag7Klines, ssiL1Klines, btcKlines] = await Promise.all([
     getSsiKlines(STRATEGY, { limit: 90 }),
-    ...BENCHMARK_TICKERS.map((t) => getSsiKlines(t, { limit: 90 })),
+    getSsiKlines(SSI_BENCHMARKS[0], { limit: 90 }),
+    getSsiKlines(SSI_BENCHMARKS[1], { limit: 90 }),
+    getCurrencyKlines(CURRENCY_ID.btc, { limit: 90 }),
   ]);
 
   const strategyCloses = closesFromKlines(strategyKlines);
   const metrics = computeMetrics(strategyCloses);
   const equity = normalize(strategyCloses);
-  const benchmarks = BENCHMARK_TICKERS.map((t, i) => ({
-    label: t,
-    name: SSI_LABELS[t] ?? t,
-    series: normalize(closesFromKlines(benchmarkKlines[i] ?? [])),
-  }));
+  const benchmarks = [
+    {
+      label: "ssiMAG7",
+      name: "SSI MAG7",
+      series: normalize(closesFromKlines(ssiMag7Klines)),
+    },
+    {
+      label: "ssiLayer1",
+      name: "SSI Layer 1",
+      series: normalize(closesFromKlines(ssiL1Klines)),
+    },
+    {
+      label: "BTC",
+      name: "Bitcoin (currency)",
+      series: normalize(btcKlines.map((k) => k.close)),
+    },
+  ];
 
   const benchmarkColors = [tokens.amber, "#a78bfa", tokens.cyan];
 

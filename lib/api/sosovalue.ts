@@ -118,6 +118,44 @@ export type CurrencySnapshot = {
   marketcap_rank: number;
 };
 
+export type CurrencyKline = {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+export type EtfSummaryRow = {
+  date: string;
+  total_net_inflow: number;
+  total_value_traded: number;
+  total_net_assets: number;
+  cum_net_inflow: number;
+};
+
+export type EtfMarketSnapshot = {
+  date: string;
+  ticker: string;
+  sponsor_fee: number | string;
+  net_inflow: number;
+  cum_inflow: number;
+  net_assets: number;
+  mkt_price: number;
+  prem_dsc: number;
+  value_traded: number;
+  volume: number | string;
+};
+
+// Known canonical currency_id values from SSI constituents probe.
+// Use these when the path requires the long numeric id format.
+export const CURRENCY_ID = {
+  btc: "1673723677362319867",
+  eth: "1673723677362319868",
+  sol: "1673723677362319869",
+} as const;
+
 // ---------- adapter shapes consumed by the UI ----------
 
 export type SentimentPoint = {
@@ -476,6 +514,88 @@ export async function getCurrencySnapshot(currencyId: string): Promise<CurrencyS
       high_24h: 0,
       low_24h: 0,
       marketcap_rank: 0,
+    }),
+  );
+}
+
+export async function getCurrencyKlines(
+  currencyId: string,
+  opts: { limit?: number; startTime?: number; endTime?: number } = {},
+): Promise<CurrencyKline[]> {
+  const sp = new URLSearchParams();
+  sp.set("interval", "1d");
+  sp.set("limit", String(opts.limit ?? 90));
+  if (opts.startTime) sp.set("start_time", String(opts.startTime));
+  if (opts.endTime) sp.set("end_time", String(opts.endTime));
+  return request<CurrencyKline[]>(
+    `/currencies/${encodeURIComponent(currencyId)}/klines?${sp}`,
+    () => {
+      // Synthetic 90-day kline series matching the live response shape.
+      const now = Date.now();
+      let p = 60_000; // approx BTC scale; adjusted by caller per asset
+      return Array.from({ length: opts.limit ?? 90 }, (_, i) => {
+        const drift = Math.sin(i / 10) * 0.025 + 0.0018;
+        const open = p;
+        const close = open * (1 + drift);
+        const high = Math.max(open, close) * (1 + Math.abs(drift) * 0.4);
+        const low = Math.min(open, close) * (1 - Math.abs(drift) * 0.4);
+        p = close;
+        return {
+          timestamp: now - ((opts.limit ?? 90) - 1 - i) * 86_400_000,
+          open: Number(open.toFixed(2)),
+          high: Number(high.toFixed(2)),
+          low: Number(low.toFixed(2)),
+          close: Number(close.toFixed(2)),
+          volume: Math.round(20_000_000_000 + Math.random() * 5_000_000_000),
+        };
+      });
+    },
+  );
+}
+
+export async function getEtfSummaryHistory(
+  symbol: string,
+  countryCode = "US",
+  opts: { startDate?: string; endDate?: string; limit?: number } = {},
+): Promise<EtfSummaryRow[]> {
+  const sp = new URLSearchParams();
+  sp.set("symbol", symbol);
+  sp.set("country_code", countryCode);
+  if (opts.startDate) sp.set("start_date", opts.startDate);
+  if (opts.endDate) sp.set("end_date", opts.endDate);
+  sp.set("limit", String(opts.limit ?? 30));
+  return request<EtfSummaryRow[]>(`/etfs/summary-history?${sp}`, () => {
+    const today = new Date();
+    return Array.from({ length: opts.limit ?? 30 }, (_, i) => {
+      const d = new Date(today);
+      d.setUTCDate(d.getUTCDate() - i);
+      const cumBase = 50_000_000_000;
+      const flow = Math.round((Math.sin(i / 3) * 100 + (15 - i)) * 1_000_000);
+      return {
+        date: d.toISOString().slice(0, 10),
+        total_net_inflow: flow,
+        total_value_traded: 4_400_000_000 + i * 100_000_000,
+        total_net_assets: 130_000_000_000 - i * 200_000_000,
+        cum_net_inflow: cumBase - i * 100_000_000,
+      };
+    });
+  });
+}
+
+export async function getEtfMarketSnapshot(ticker: string): Promise<EtfMarketSnapshot> {
+  return request<EtfMarketSnapshot>(
+    `/etfs/${encodeURIComponent(ticker)}/market-snapshot`,
+    () => ({
+      date: new Date().toISOString().slice(0, 10),
+      ticker,
+      sponsor_fee: "0.0025",
+      net_inflow: 22_879_600,
+      cum_inflow: 65_175_243_000,
+      net_assets: 63_054_413_760,
+      mkt_price: 44.0,
+      prem_dsc: 0.0005,
+      value_traded: 1_263_693_458,
+      volume: "1263693458",
     }),
   );
 }

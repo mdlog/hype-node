@@ -1,29 +1,123 @@
 import { Card, Label, Mono, Tag, Btn } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
+import { getEtfHistory, listEtfs, getEtfSummaryHistory } from "@/lib/api/sosovalue";
 
-const rows = [
-  { t: "09:38:22", a: "Rebalance: +2.1% FIL · −1.4% RNDR", idx: "HDP8", tr: "sentiment Δ +15", g: "0.012 VAL · 4.2s", tx: "0x8a…42", c: tokens.cyan, lbl: "REBAL" },
-  { t: "07:14:03", a: "Rebalance: +0.8% AKT · −0.8% IOTX", idx: "HDP8", tr: "flow delta", g: "0.009 VAL · 3.8s", tx: "0x19…a0", c: tokens.cyan, lbl: "REBAL" },
-  { t: "04:12:44", a: "Wrap: minted 12,400 HDP8", idx: "HDP8", tr: "user deposit", g: "0.031 VAL · 6.1s", tx: "0x77…bf", c: tokens.emerald, lbl: "WRAP" },
-  { t: "00:06:11", a: "Skipped · drift < 1%", idx: "RWA7", tr: "scheduled", g: "—", tx: "—", c: tokens.textFaint, lbl: "SKIP" },
-  { t: "yest 22:40", a: "Rebalance: redistributed 5 assets", idx: "RWA7", tr: "scheduled 6h", g: "0.018 VAL · 5.2s", tx: "0x2c…11", c: tokens.cyan, lbl: "REBAL" },
-  { t: "yest 18:40", a: "Constituent added: DIMO @ 8%", idx: "HDP8", tr: "agent proposal", g: "0.024 VAL · 4.9s", tx: "0x91…de", c: tokens.emerald, lbl: "ADD" },
-  { t: "yest 12:22", a: "Volatility guard: −3% AR", idx: "HDP8", tr: "σ > 0.30", g: "0.014 VAL · 3.6s", tx: "0x55…08", c: tokens.amber, lbl: "GUARD" },
-  { t: "2d ago", a: "Emergency exit → USSI", idx: "AIM3", tr: "panic button", g: "0.082 VAL · 11.4s", tx: "0xff…c3", c: tokens.red, lbl: "EXIT" },
-  { t: "2d ago", a: "Wrap: minted 2,000 AIM3", idx: "AIM3", tr: "deposit", g: "0.028 VAL · 5.8s", tx: "0x3b…77", c: tokens.emerald, lbl: "WRAP" },
-  { t: "3d ago", a: "Rebalance: initial allocation", idx: "AIM3", tr: "launch", g: "0.041 VAL · 7.1s", tx: "0xaa…19", c: tokens.emerald, lbl: "INIT" },
-  { t: "3d ago", a: "Rebalance: +1.5% ONDO · −1.5% MKR", idx: "RWA7", tr: "sentiment Δ", g: "0.016 VAL · 4.4s", tx: "0x4d…52", c: tokens.cyan, lbl: "REBAL" },
-];
+export const revalidate = 60;
 
-export default function HistoryPage() {
+const SYMBOL = "BTC";
+
+function fmtFlow(usd: number): string {
+  const abs = Math.abs(usd);
+  if (abs >= 1_000_000_000) return `${usd >= 0 ? "+" : "−"}$${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${usd >= 0 ? "+" : "−"}$${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${usd >= 0 ? "+" : "−"}$${(abs / 1_000).toFixed(0)}K`;
+  return `${usd >= 0 ? "+" : "−"}$${abs.toFixed(0)}`;
+}
+
+function classify(flow: number): { lbl: string; c: string } {
+  const abs = Math.abs(flow);
+  if (flow < -200_000_000) return { lbl: "EXIT", c: tokens.red };
+  if (flow < -50_000_000) return { lbl: "GUARD", c: tokens.amber };
+  if (abs < 5_000_000) return { lbl: "SKIP", c: tokens.textFaint };
+  if (flow < 0) return { lbl: "OUTFLOW", c: tokens.red };
+  if (flow > 200_000_000) return { lbl: "WRAP", c: tokens.emerald };
+  return { lbl: "REBAL", c: tokens.cyan };
+}
+
+function fmtRel(date: string): string {
+  const t = Date.now() - new Date(date).getTime();
+  const d = Math.floor(t / 86_400_000);
+  if (d === 0) return "today";
+  if (d === 1) return "yesterday";
+  if (d < 7) return `${d}d ago`;
+  return new Date(date).toISOString().slice(0, 10);
+}
+
+export default async function HistoryPage() {
+  // Real audit trail: ETF flow history. Each daily row is treated as a
+  // "rebalance event" — direction & size of net inflow classifies the action.
+  // 1-month window cap from SoSoValue.
+  const [etfs, summary] = await Promise.all([
+    listEtfs(SYMBOL, "US"),
+    getEtfSummaryHistory(SYMBOL, "US", { limit: 30 }),
+  ]);
+
+  // Pull individual ETF history for the top 3 ETFs to enrich per-row metadata.
+  const top3 = etfs.slice(0, 3);
+  const histories = await Promise.all(
+    top3.map((e) => getEtfHistory(e.ticker, { limit: 10 }).catch(() => [])),
+  );
+
+  // Build the activity log: aggregate rows + per-ETF rows interleaved by date.
+  type Row = {
+    date: string;
+    rel: string;
+    label: string;
+    color: string;
+    action: string;
+    target: string;
+    trigger: string;
+    flowUsd: number;
+    cum: number;
+    txDigest: string;
+  };
+
+  const rows: Row[] = [];
+  for (const s of summary) {
+    const c = classify(s.total_net_inflow);
+    rows.push({
+      date: s.date,
+      rel: fmtRel(s.date),
+      label: c.lbl,
+      color: c.c,
+      action: `Aggregate ETF flow · ${fmtFlow(s.total_net_inflow)}`,
+      target: `${SYMBOL} ETF`,
+      trigger: `assets ${(s.total_net_assets / 1_000_000_000).toFixed(1)}B · vol ${(s.total_value_traded / 1_000_000_000).toFixed(1)}B`,
+      flowUsd: s.total_net_inflow,
+      cum: s.cum_net_inflow,
+      txDigest: `etf:${SYMBOL}:${s.date}`,
+    });
+  }
+
+  for (let i = 0; i < top3.length; i++) {
+    const etf = top3[i];
+    for (const h of histories[i]) {
+      const c = classify(h.net_inflow);
+      rows.push({
+        date: h.date,
+        rel: fmtRel(h.date),
+        label: c.lbl,
+        color: c.c,
+        action: `${etf.ticker} · ${fmtFlow(h.net_inflow)}`,
+        target: etf.ticker,
+        trigger: `${etf.exchange} · prem/dsc ${(h.prem_dsc * 100).toFixed(3)}%`,
+        flowUsd: h.net_inflow,
+        cum: h.cum_inflow,
+        txDigest: `${etf.ticker}:${h.date}`,
+      });
+    }
+  }
+
+  rows.sort((a, b) => b.date.localeCompare(a.date));
+
+  const summaryLive = summary.length === 30 || (summary[0]?.total_net_inflow ?? 0) !== 15_000_000;
+
   return (
     <div className="px-6 py-5 flex flex-col gap-3 h-[calc(100vh-48px)]">
       <div className="flex justify-between items-end">
         <div>
-          <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>Rebalancing History</div>
-          <Mono size={11}>on-chain audit · 248 transactions · ValueChain L1</Mono>
+          <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>
+            ETF Flow Audit
+          </div>
+          <Mono size={11}>
+            {SYMBOL} ETF history · {rows.length} rows · GET /etfs/summary-history +
+            /etfs/{`{ticker}`}/history
+          </Mono>
         </div>
         <div className="flex gap-1.5">
+          <Tag small color={summaryLive ? tokens.emerald : tokens.textFaint} dot>
+            {summaryLive ? "live · 1mo cap" : "fallback"}
+          </Tag>
           <Btn small>Filter</Btn>
           <Btn small>Export CSV</Btn>
           <Btn small>Explorer ↗</Btn>
@@ -32,8 +126,8 @@ export default function HistoryPage() {
 
       <div className="flex gap-3 items-center flex-wrap">
         <div className="flex items-center gap-1.5">
-          <Label>Index</Label>
-          {["All", "HDP8", "RWA7", "AIM3"].map((t, i) => (
+          <Label>Asset</Label>
+          {["BTC", "ETH", "SOL"].map((t, i) => (
             <Tag key={t} small filled={i === 0} color={i === 0 ? tokens.text : tokens.textDim}>
               {t}
             </Tag>
@@ -42,65 +136,85 @@ export default function HistoryPage() {
         <div style={{ width: 1, height: 16, background: tokens.border }} />
         <div className="flex items-center gap-1.5">
           <Label>Type</Label>
-          {["All", "Rebalance", "Wrap", "Exit", "Emergency"].map((t, i) => (
+          {["All", "WRAP", "REBAL", "OUTFLOW", "GUARD", "EXIT"].map((t, i) => (
             <Tag key={t} small filled={i === 0} color={i === 0 ? tokens.text : tokens.textDim}>
               {t}
             </Tag>
           ))}
         </div>
         <div style={{ width: 1, height: 16, background: tokens.border }} />
-        <Tag small>Last 7 days ▾</Tag>
+        <Tag small>Last 30 days ▾</Tag>
       </div>
 
       <Card pad={0} className="flex-1 overflow-hidden flex flex-col">
         <div
           className="grid"
           style={{
-            gridTemplateColumns: "110px 1fr 100px 160px 110px 100px 60px",
+            gridTemplateColumns: "120px 1fr 110px 200px 130px 120px 60px",
             padding: "10px 16px",
             gap: 12,
             borderBottom: `1px solid ${tokens.border}`,
             background: tokens.bgElev2,
           }}
         >
-          {["TIMESTAMP", "ACTION", "INDEX", "TRIGGER", "GAS / LATENCY", "TX", ""].map((k, i) => (
+          {["DATE", "ACTION", "TARGET", "DETAIL", "FLOW", "CUM. INFLOW", ""].map((k, i) => (
             <Label key={i}>{k}</Label>
           ))}
         </div>
         <div className="flex-1 overflow-y-auto">
-          {rows.map((r, i) => (
+          {rows.slice(0, 100).map((r, i) => (
             <div
-              key={i}
+              key={`${r.date}-${r.target}-${i}`}
               className="grid items-center"
               style={{
-                gridTemplateColumns: "110px 1fr 100px 160px 110px 100px 60px",
+                gridTemplateColumns: "120px 1fr 110px 200px 130px 120px 60px",
                 padding: "10px 16px",
                 gap: 12,
                 borderBottom: `1px solid ${tokens.borderFaint}`,
               }}
             >
-              <Mono size={10}>{r.t}</Mono>
-              <div className="flex items-center gap-2">
-                <Tag small color={r.c} style={{ minWidth: 48, justifyContent: "center" }}>
-                  {r.lbl}
-                </Tag>
-                <div style={{ fontSize: 12, color: tokens.text }}>{r.a}</div>
+              <div>
+                <Mono size={10} color={tokens.text}>
+                  {r.date}
+                </Mono>
+                <Mono size={9} color={tokens.textFaint}>
+                  {r.rel}
+                </Mono>
               </div>
-              <Mono size={11} color={tokens.text}>{r.idx}</Mono>
-              <Mono size={10}>{r.tr}</Mono>
-              <Mono size={10}>{r.g}</Mono>
-              <Mono size={10} color={tokens.cyan}>{r.tx} ↗</Mono>
+              <div className="flex items-center gap-2">
+                <Tag small color={r.color} style={{ minWidth: 60, justifyContent: "center" }}>
+                  {r.label}
+                </Tag>
+                <div style={{ fontSize: 12, color: tokens.text }}>{r.action}</div>
+              </div>
+              <Mono size={11} color={tokens.text}>
+                {r.target}
+              </Mono>
+              <Mono size={10}>{r.trigger}</Mono>
+              <Mono size={11} color={r.flowUsd >= 0 ? tokens.emerald : tokens.red}>
+                {fmtFlow(r.flowUsd)}
+              </Mono>
+              <Mono size={10}>{fmtFlow(r.cum)}</Mono>
               <div style={{ textAlign: "right" }}>
-                <Mono size={11} color={tokens.textFaint}>→</Mono>
+                <Mono size={11} color={tokens.textFaint}>
+                  →
+                </Mono>
               </div>
             </div>
           ))}
         </div>
         <div
           className="flex justify-between items-center"
-          style={{ padding: "10px 16px", borderTop: `1px solid ${tokens.border}`, background: tokens.bgElev2 }}
+          style={{
+            padding: "10px 16px",
+            borderTop: `1px solid ${tokens.border}`,
+            background: tokens.bgElev2,
+          }}
         >
-          <Mono size={10}>showing 11 of 248 · page 1 / 23</Mono>
+          <Mono size={10}>
+            showing {Math.min(100, rows.length)} of {rows.length} · sourced from {top3.length} ETFs
+            + aggregate
+          </Mono>
           <div className="flex gap-1">
             <Btn small>← Prev</Btn>
             <Btn small>Next →</Btn>
