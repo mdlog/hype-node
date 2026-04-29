@@ -2,20 +2,33 @@
 
 import { Card, Mono, Tag, Toggle } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-const sectors = [
-  ["DePIN", true, tokens.emerald, "hot"],
-  ["RWA", true, tokens.emerald, null],
-  ["AI Agents", true, tokens.emerald, "hot"],
-  ["Restaking", true, tokens.emerald, null],
-  ["Solana DeFi", true, tokens.emerald, null],
-  ["Memes", false, tokens.textDim, null],
-  ["Gaming", false, tokens.textDim, null],
-  ["L2 Rollups", true, tokens.emerald, null],
-  ["Privacy", false, tokens.textDim, null],
-  ["BTC L2", true, tokens.emerald, "new"],
-] as const;
+const SSI_DISPLAY: Record<string, { label: string; flag: "hot" | "new" | null }> = {
+  ssiDePIN: { label: "DePIN", flag: "hot" },
+  ssiRWA: { label: "RWA", flag: null },
+  ssiAI: { label: "AI Agents", flag: "hot" },
+  ssiMeme: { label: "Memes", flag: null },
+  ssiGameFi: { label: "GameFi", flag: null },
+  ssiLayer1: { label: "Layer 1 majors", flag: null },
+  ssiLayer2: { label: "L2 rollups", flag: null },
+  ssiMAG7: { label: "Crypto MAG7", flag: null },
+  ssiPayFi: { label: "PayFi", flag: "new" },
+  ssiDeFi: { label: "DeFi blue-chip", flag: null },
+  ssiSocialFi: { label: "SocialFi", flag: "new" },
+  ssiCeFi: { label: "CeFi", flag: null },
+  ssiNFT: { label: "NFT", flag: null },
+};
+
+const FALLBACK_TICKERS = [
+  "ssiDePIN",
+  "ssiRWA",
+  "ssiAI",
+  "ssiMeme",
+  "ssiGameFi",
+  "ssiLayer1",
+  "ssiLayer2",
+];
 
 const thresholds = [
   { k: "News volume Δ", v: "+200%", prog: 0.5 },
@@ -27,10 +40,36 @@ const thresholds = [
 ];
 
 export default function ConfigPage() {
-  const [sectorState, setSectorState] = useState(
-    Object.fromEntries(sectors.map(([s, on]) => [s, on])) as Record<string, boolean>,
+  // Sector list pulled live from SoSoValue's /indices endpoint. Falls back to
+  // a deterministic set if the call fails (rate-limit / quota / no key).
+  const [tickers, setTickers] = useState<string[]>(FALLBACK_TICKERS);
+  const [sectorState, setSectorState] = useState<Record<string, boolean>>(
+    Object.fromEntries(FALLBACK_TICKERS.map((t, i) => [t, i < 4])),
   );
   const [agentOn, setAgentOn] = useState(true);
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ssi/list")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: string[]) => {
+        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
+        setTickers(rows);
+        setLive(rows.length >= 13);
+        setSectorState((prev) => {
+          const next: Record<string, boolean> = {};
+          rows.forEach((t, i) => {
+            next[t] = prev[t] ?? i < 5;
+          });
+          return next;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
@@ -40,7 +79,8 @@ export default function ConfigPage() {
             Agent Configuration
           </div>
           <Mono size={11}>
-            tune your autonomous publisher · agent drafts proposals · you approve before publish
+            {tickers.length} SoSoValue sectors loaded · GET /indices · agent drafts proposals · you
+            approve before publish
           </Mono>
         </div>
         <div className="flex items-center gap-2.5">
@@ -54,49 +94,71 @@ export default function ConfigPage() {
 
       <div className="grid grid-cols-3 gap-3">
         <Card pad={16}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Sectors to monitor</div>
-          <Mono size={10} className="block mb-3">agent scans these for hype signals</Mono>
-          {sectors.map(([s, , , flag]) => {
-            const on = sectorState[s as string];
-            return (
-              <div
-                key={s as string}
-                className="flex items-center justify-between"
-                style={{ padding: "8px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}
-              >
-                <div className="flex items-center gap-2">
-                  <div
-                    style={{
-                      fontSize: 12.5,
-                      color: on ? tokens.text : tokens.textDim,
-                      fontWeight: on ? 500 : 400,
-                    }}
-                  >
-                    {s}
+          <div className="flex justify-between items-center mb-1">
+            <div style={{ fontSize: 13, fontWeight: 600 }}>Sectors to monitor</div>
+            <Tag small color={live ? tokens.emerald : tokens.textFaint} dot>
+              {live ? "live · /indices" : "fallback"}
+            </Tag>
+          </div>
+          <Mono size={10} className="block mb-3">
+            agent scans these for hype signals
+          </Mono>
+          <div style={{ maxHeight: 460, overflowY: "auto" }}>
+            {tickers.map((t) => {
+              const display = SSI_DISPLAY[t] ?? { label: t, flag: null };
+              const on = sectorState[t] ?? false;
+              return (
+                <div
+                  key={t}
+                  className="flex items-center justify-between"
+                  style={{
+                    padding: "8px 0",
+                    borderBottom: `1px solid ${tokens.borderFaint}`,
+                  }}
+                >
+                  <div className="flex items-center gap-2">
+                    <div>
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          color: on ? tokens.text : tokens.textDim,
+                          fontWeight: on ? 500 : 400,
+                        }}
+                      >
+                        {display.label}
+                      </div>
+                      <Mono size={9} color={tokens.textFaint}>
+                        {t}
+                      </Mono>
+                    </div>
+                    {display.flag === "hot" && (
+                      <Tag small color={tokens.amber} dot>
+                        hot
+                      </Tag>
+                    )}
+                    {display.flag === "new" && (
+                      <Tag small color={tokens.cyan}>
+                        new
+                      </Tag>
+                    )}
                   </div>
-                  {flag === "hot" && (
-                    <Tag small color={tokens.amber} dot>
-                      hot
-                    </Tag>
-                  )}
-                  {flag === "new" && (
-                    <Tag small color={tokens.cyan}>
-                      new
-                    </Tag>
-                  )}
+                  <Toggle
+                    on={on}
+                    onChange={(next) =>
+                      setSectorState((p) => ({ ...p, [t]: next }))
+                    }
+                  />
                 </div>
-                <Toggle
-                  on={on}
-                  onChange={(next) => setSectorState((p) => ({ ...p, [s as string]: next }))}
-                />
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </Card>
 
         <Card pad={16}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Hype thresholds</div>
-          <Mono size={10} className="block mb-3.5">agent drafts when all conditions met</Mono>
+          <Mono size={10} className="block mb-3.5">
+            agent drafts when all conditions met
+          </Mono>
           {thresholds.map((t, i) => (
             <div key={i} className="mb-3.5">
               <div className="flex justify-between mb-1">
@@ -176,7 +238,9 @@ export default function ConfigPage() {
                 style={{ padding: "6px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}
               >
                 <Mono size={10}>{k}</Mono>
-                <Mono size={11} color={tokens.text}>{v}</Mono>
+                <Mono size={11} color={tokens.text}>
+                  {v}
+                </Mono>
               </div>
             ))}
           </Card>
@@ -196,7 +260,9 @@ export default function ConfigPage() {
                 style={{ padding: "6px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}
               >
                 <Mono size={10}>{k}</Mono>
-                <Mono size={11} color={tokens.text}>{v}</Mono>
+                <Mono size={11} color={tokens.text}>
+                  {v}
+                </Mono>
               </div>
             ))}
           </Card>
@@ -215,7 +281,9 @@ export default function ConfigPage() {
                 style={{ padding: "6px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}
               >
                 <Mono size={10}>{k}</Mono>
-                <Mono size={11} color={tokens.emerald}>{v}</Mono>
+                <Mono size={11} color={tokens.emerald}>
+                  {v}
+                </Mono>
               </div>
             ))}
           </Card>

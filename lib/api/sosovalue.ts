@@ -90,6 +90,34 @@ export type IndexConstituent = {
   weight: number;
 };
 
+export type SsiKline = {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+};
+
+export type SsiSnapshot = {
+  price: number;
+  "24h_change_pct": number;
+  "7day_roi": number;
+  "1month_roi": number;
+  "3month_roi": number;
+  "1year_roi": number;
+  ytd: number;
+};
+
+export type CurrencySnapshot = {
+  price: number;
+  change_pct_24h: number;
+  turnover_24h: number;
+  marketcap: number;
+  high_24h: number;
+  low_24h: number;
+  marketcap_rank: number;
+};
+
 // ---------- adapter shapes consumed by the UI ----------
 
 export type SentimentPoint = {
@@ -118,26 +146,129 @@ export type NewsItem = {
   ts: string;
 };
 
-// ---------- transport ----------
+// ---------- transport: rate limiter + persistent cache ----------
+//
+// The Demo tier of the SoSoValue API allows ONE request per minute, total —
+// across every endpoint, every caller. Without a coordinator we'd burn the
+// quota on the first cold render. This module-level singleton enforces:
+//
+//   1. Per-path in-memory cache with a long TTL (default 15 min). Once a path
+//      is warm, subsequent reads never touch the network until expiry.
+//   2. Global token bucket: minimum 60s between any two outbound calls,
+//      regardless of which endpoint they hit.
+//   3. In-flight dedup: parallel reads for the same path share one promise.
+//   4. Stale-on-failure: a 429 / network error returns the previous good
+//      payload (if any) rather than collapsing back to synthetic data.
+//
+// The state lives in `globalThis` so Next.js HMR + route handler isolation
+// don't recreate the limiter on every render.
+
+const MIN_GAP_MS = Number(process.env.SOSOVALUE_MIN_GAP_MS ?? 65_000); // 60s + safety margin
+const CACHE_TTL_MS = Number(process.env.SOSOVALUE_CACHE_TTL_MS ?? 15 * 60_000);
+// "Monthly quota exceeded" (code 402901) → back off 6h, not 65s.
+const QUOTA_BACKOFF_MS = Number(process.env.SOSOVALUE_QUOTA_BACKOFF_MS ?? 6 * 3600_000);
+
+type CacheEntry<T = unknown> = { data: T; expiresAt: number; updatedAt: number };
+
+type RateState = {
+  lastRequestAt: number;
+  quotaExhaustedUntil: number;
+  cache: Map<string, CacheEntry>;
+  inflight: Map<string, Promise<unknown>>;
+};
+
+const G = globalThis as unknown as { __sosoState?: RateState };
+const state: RateState = (G.__sosoState ??= {
+  lastRequestAt: 0,
+  quotaExhaustedUntil: 0,
+  cache: new Map(),
+  inflight: new Map(),
+});
+
+function isMonthlyQuotaError(msg?: string): boolean {
+  return /monthly quota/i.test(msg ?? "");
+}
+
+function fresh(entry: CacheEntry | undefined): boolean {
+  return !!entry && entry.expiresAt > Date.now();
+}
 
 async function request<T>(path: string, fallback: () => T): Promise<T> {
   if (!KEY) return fallback();
-  try {
-    // SoSoValue rate-limits aggressively (~1 req/sec on the trial tier).
-    // Cache 60s server-side so polling pages don't burn the quota.
-    const res = await fetch(`${BASE}${path}`, {
-      headers: { "x-soso-api-key": KEY, accept: "application/json" },
-      next: { revalidate: 60 },
-    });
-    if (!res.ok) throw new Error(`SoSoValue ${path} ${res.status}`);
-    const body = await res.json();
-    // The API wraps successful responses in a common envelope on some routes.
-    // Accept either bare arrays/objects or { data: ... }.
-    return (body && typeof body === "object" && "data" in body ? body.data : body) as T;
-  } catch (err) {
-    console.warn("[sosovalue] falling back to synthetic data:", (err as Error).message);
+
+  const cached = state.cache.get(path) as CacheEntry<T> | undefined;
+  if (fresh(cached)) return cached!.data;
+
+  // Hard backoff: monthly quota exhausted → don't touch the network.
+  if (Date.now() < state.quotaExhaustedUntil) {
+    return cached ? cached.data : fallback();
+  }
+
+  // Dedup parallel cold reads for the same path.
+  const existing = state.inflight.get(path) as Promise<T> | undefined;
+  if (existing) return existing;
+
+  // Rate-limit gate: if we'd violate the 60s gap, return whatever we have
+  // (stale cache → synthetic fallback). Don't queue — that would back up
+  // requests indefinitely under traffic.
+  const sinceLast = Date.now() - state.lastRequestAt;
+  if (sinceLast < MIN_GAP_MS) {
+    if (cached) return cached.data;
     return fallback();
   }
+
+  const promise = (async (): Promise<T> => {
+    state.lastRequestAt = Date.now();
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        headers: { "x-soso-api-key": KEY, accept: "application/json" },
+        cache: "no-store",
+      });
+      const text = await res.text();
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        throw new Error(`SoSoValue ${path} ${res.status} non-JSON: ${text.slice(0, 80)}`);
+      }
+      const envelope = body as { code?: number; message?: string; data?: unknown };
+      if (!res.ok || (envelope?.code !== undefined && envelope.code !== 0)) {
+        if (isMonthlyQuotaError(envelope?.message)) {
+          if (state.quotaExhaustedUntil < Date.now()) {
+            console.warn(
+              `[sosovalue] MONTHLY QUOTA EXHAUSTED · backing off ${Math.round(
+                QUOTA_BACKOFF_MS / 3600_000,
+              )}h (serving cached/synthetic data until reset)`,
+            );
+          }
+          state.quotaExhaustedUntil = Date.now() + QUOTA_BACKOFF_MS;
+        }
+        throw new Error(
+          `SoSoValue ${path} ${res.status} code=${envelope?.code} msg=${envelope?.message}`,
+        );
+      }
+      const data = ("data" in envelope ? envelope.data : body) as T;
+      state.cache.set(path, {
+        data,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+        updatedAt: Date.now(),
+      });
+      return data;
+    } catch (err) {
+      // Stay quiet on every retry once we're in monthly-quota backoff.
+      const message = (err as Error).message;
+      if (!isMonthlyQuotaError(message)) {
+        console.warn("[sosovalue]", message);
+      }
+      if (cached) return cached.data;
+      return fallback();
+    } finally {
+      state.inflight.delete(path);
+    }
+  })();
+
+  state.inflight.set(path, promise as Promise<unknown>);
+  return promise;
 }
 
 // ---------- raw endpoints ----------
@@ -263,6 +394,67 @@ export async function getSsiConstituents(ticker: string): Promise<IndexConstitue
     { currency_id: "1673723677362319868", symbol: "eth", weight: 0.22 },
     { currency_id: "1673723677362319869", symbol: "sol", weight: 0.12 },
   ]);
+}
+
+export async function getSsiSnapshot(ticker: string): Promise<SsiSnapshot> {
+  return request<SsiSnapshot>(
+    `/indices/${encodeURIComponent(ticker)}/market-snapshot`,
+    () => ({
+      price: 1.182,
+      "24h_change_pct": 0.0524,
+      "7day_roi": 0.082,
+      "1month_roi": 0.182,
+      "3month_roi": 0.341,
+      "1year_roi": 1.84,
+      ytd: 0.42,
+    }),
+  );
+}
+
+export async function getSsiKlines(
+  ticker: string,
+  opts: { interval?: "1d"; limit?: number; startTime?: number; endTime?: number } = {},
+): Promise<SsiKline[]> {
+  const sp = new URLSearchParams();
+  sp.set("interval", opts.interval ?? "1d");
+  sp.set("limit", String(opts.limit ?? 90));
+  if (opts.startTime) sp.set("start_time", String(opts.startTime));
+  if (opts.endTime) sp.set("end_time", String(opts.endTime));
+  return request<SsiKline[]>(`/indices/${encodeURIComponent(ticker)}/klines?${sp}`, () => {
+    // Synthetic 90-day klines shaped exactly like the live response.
+    const now = Date.now();
+    let p = 0.95;
+    return Array.from({ length: 90 }, (_, i) => {
+      const drift = Math.sin(i / 8) * 0.03 + 0.0024;
+      const open = p;
+      const close = open * (1 + drift);
+      const high = Math.max(open, close) * (1 + Math.abs(drift) * 0.4);
+      const low = Math.min(open, close) * (1 - Math.abs(drift) * 0.4);
+      p = close;
+      return {
+        timestamp: now - (89 - i) * 86_400_000,
+        open: Number(open.toFixed(4)),
+        high: Number(high.toFixed(4)),
+        low: Number(low.toFixed(4)),
+        close: Number(close.toFixed(4)),
+      };
+    });
+  });
+}
+
+export async function getCurrencySnapshot(currencyId: string): Promise<CurrencySnapshot> {
+  return request<CurrencySnapshot>(
+    `/currencies/${encodeURIComponent(currencyId)}/market-snapshot`,
+    () => ({
+      price: 0,
+      change_pct_24h: 0,
+      turnover_24h: 0,
+      marketcap: 0,
+      high_24h: 0,
+      low_24h: 0,
+      marketcap_rank: 0,
+    }),
+  );
 }
 
 // ---------- adapters used by the UI / API routes ----------

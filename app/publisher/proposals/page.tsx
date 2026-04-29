@@ -1,9 +1,63 @@
 import Link from "next/link";
 import { Card, Mono, Tag, Btn, HypeGauge } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
+import {
+  getSectorScores,
+  getSsiConstituents,
+  sectorToSsi,
+  type IndexConstituent,
+} from "@/lib/api/sosovalue";
+
+export const revalidate = 60;
+
+const palette = [
+  tokens.emerald,
+  tokens.cyan,
+  tokens.amber,
+  "#a78bfa",
+  "#34d399",
+  "#60a5fa",
+  "#fbbf24",
+  "#f472b6",
+];
+
+const TICKER_MAP: Record<string, string> = {
+  filecoin: "FIL",
+  render: "RNDR",
+  helium: "HNT",
+  arweave: "AR",
+  "akash-network": "AKT",
+  "theta-network": "THETA",
+  iota: "IOTA",
+  golem: "GLM",
+  livepeer: "LPT",
+  aethir: "ATH",
+  grass: "GRASS",
+  ondo: "ONDO",
+  mkr: "MKR",
+  usdy: "USDY",
+  btc: "BTC",
+  eth: "ETH",
+  sol: "SOL",
+  bnb: "BNB",
+  ada: "ADA",
+  avax: "AVAX",
+};
+
+function tickerOf(symbol: string): string {
+  return TICKER_MAP[symbol.toLowerCase()] ?? symbol.slice(0, 5).toUpperCase();
+}
+
+function fmtRelative(driftMin: number): string {
+  if (driftMin < 60) return `${driftMin}m ago`;
+  return `${Math.round(driftMin / 60)}h ago`;
+}
+
+type SectorScore = { sector: string; score: number; delta: number; news: number };
 
 type Proposal = {
   id: string;
+  ticker: string;
   sector: string;
   name: string;
   conf: number;
@@ -14,67 +68,73 @@ type Proposal = {
   highlight: boolean;
 };
 
-const proposals: Proposal[] = [
-  {
-    id: "depin-8",
-    sector: "DePIN",
-    name: "HYPE-DEPIN-8",
-    conf: 94,
-    trigger: "News Δ +340% · sentiment +92 · 11 assets clustered",
-    assets: [
-      ["FIL", 22],
-      ["RNDR", 18],
-      ["HNT", 15],
-      ["AR", 12],
-      ["AKT", 11],
-      ["IOTX", 9],
-      ["DIMO", 8],
-      ["ATH", 5],
-    ],
-    proj: "Est. subs: 70–120 · proj. 30d earnings $280–$480",
-    time: "drafted 6m ago · expires in 5h 54m",
-    highlight: true,
-  },
-  {
-    id: "rwa-tbill-5",
-    sector: "RWA",
-    name: "HYPE-RWA-TBILL-5",
-    conf: 76,
-    trigger: "Tokenized T-bill news +180% · Ondo + BlackRock headlines",
-    assets: [
-      ["ONDO", 30],
-      ["MKR", 22],
-      ["USDY", 18],
-      ["RLB", 16],
-      ["TPROT", 14],
-    ],
-    proj: "Est. subs: 40–80 · proj. 30d earnings $120–$260",
-    time: "drafted 1h ago · expires in 5h",
-    highlight: false,
-  },
-  {
-    id: "ai-agent-6",
-    sector: "AI Agents",
-    name: "HYPE-AI-AGENT-6",
-    conf: 68,
-    trigger: "Agent framework launches · Virtuals + AI16Z momentum",
-    assets: [
-      ["VIRTUAL", 24],
-      ["AI16Z", 20],
-      ["AIXBT", 18],
-      ["GAME", 14],
-      ["FAI", 13],
-      ["ARC", 11],
-    ],
-    proj: "Est. subs: 30–60 · proj. 30d earnings $80–$180",
-    time: "drafted 3h ago · expires in 3h",
-    highlight: false,
-  },
-];
+function buildProposal(
+  sec: SectorScore,
+  ticker: string,
+  constituents: IndexConstituent[],
+  age: number,
+  index: number,
+): Proposal {
+  // Confidence proxy: combines sector score (0–100) with breadth (constituent
+  // count) and clamps. Real agent confidence will replace this when wired.
+  const conf = Math.max(
+    20,
+    Math.min(99, Math.round(sec.score * 0.7 + Math.min(constituents.length, 12) * 2.5)),
+  );
+  const top = constituents.slice(0, 8).map((c) => [tickerOf(c.symbol), Math.round(c.weight * 100)] as [string, number]);
+  const subsLo = Math.max(20, Math.round(conf * 0.6));
+  const subsHi = subsLo + Math.round(conf * 0.5);
+  const earnLo = subsLo * 4;
+  const earnHi = subsHi * 4;
 
-const palette = [tokens.emerald, tokens.cyan, tokens.amber, "#a78bfa", "#34d399", "#60a5fa", "#fbbf24", "#f472b6"];
+  return {
+    id: ticker.toLowerCase().replace(/^ssi/, ""),
+    ticker,
+    sector: sec.sector,
+    name: `HYPE-${sec.sector.toUpperCase()}-${constituents.length}`,
+    conf,
+    trigger: `Sector score ${sec.score} · 24h Δ ${sec.delta >= 0 ? "+" : ""}${sec.delta} · ${
+      constituents.length
+    } SSI constituents`,
+    assets: top,
+    proj: `Est. subs: ${subsLo}–${subsHi} · proj. 30d earnings $${earnLo}–$${earnHi}`,
+    time: `drafted ${fmtRelative(age * (index + 1))} · expires in ${6 - index}h`,
+    highlight: index === 0 && sec.score >= 60,
+  };
+}
 
-export default function ProposalsPage() {
+const SECTOR_PRIORITY = ["DePIN", "RWA", "AI", "Meme", "GameFi", "DeFi", "Layer2", "Layer1"];
+
+export default async function ProposalsPage() {
+  // Auto-generate proposals from the top SoSoValue sectors. Strategy:
+  // 1. Fetch sector spotlight scores.
+  // 2. Filter to sectors with a known SSI ticker mapping.
+  // 3. For top 3, fetch live constituents and build a proposal card.
+  const sectors = await getSectorScores();
+  const eligible = sectors
+    .map((s) => ({ ...s, ticker: sectorToSsi(s.sector) }))
+    .filter((s): s is SectorScore & { ticker: string } => !!s.ticker)
+    .sort((a, b) => {
+      // Prefer narrative-aligned sectors first, then by score.
+      const aPri = SECTOR_PRIORITY.indexOf(a.sector);
+      const bPri = SECTOR_PRIORITY.indexOf(b.sector);
+      if (aPri !== -1 && bPri !== -1) return aPri - bPri;
+      if (aPri !== -1) return -1;
+      if (bPri !== -1) return 1;
+      return b.score - a.score;
+    })
+    .slice(0, 3);
+
+  const constituentLists = await Promise.all(
+    eligible.map((s) => getSsiConstituents(s.ticker).catch(() => [] as IndexConstituent[])),
+  );
+
+  const proposals: Proposal[] = eligible.map((s, i) =>
+    buildProposal(s, s.ticker, constituentLists[i], 6, i),
+  );
+
+  const live = sectors.length >= 13 && constituentLists.some((cs) => cs.length > 0);
+
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
       <div className="flex justify-between items-end">
@@ -83,19 +143,23 @@ export default function ProposalsPage() {
             Pending Proposals
           </div>
           <Mono size={11}>
-            3 drafts from agent awaiting your approval · each expires in 6h if untouched
+            {proposals.length} drafts derived from sector-spotlight + SSI constituents · expires in
+            6h if untouched
           </Mono>
         </div>
         <div className="flex gap-1.5">
+          <Tag small color={live ? tokens.emerald : tokens.textFaint} dot>
+            {live ? "live · /sector-spotlight + /indices" : "fallback"}
+          </Tag>
           <Btn small>Rejected (4)</Btn>
           <Btn small>Published (12)</Btn>
         </div>
       </div>
 
       <div className="flex flex-col gap-3 overflow-y-auto">
-        {proposals.map((p, i) => (
+        {proposals.map((p) => (
           <Card
-            key={i}
+            key={p.id}
             pad={0}
             style={{
               borderColor: p.highlight ? tokens.amber + "50" : tokens.border,
@@ -122,6 +186,9 @@ export default function ProposalsPage() {
                     </Tag>
                   )}
                   <Mono size={10}>{p.time}</Mono>
+                  <Mono size={10} color={tokens.textFaint}>
+                    · {p.ticker}
+                  </Mono>
                 </div>
                 <div
                   style={{
@@ -133,7 +200,9 @@ export default function ProposalsPage() {
                 >
                   {p.name}
                 </div>
-                <div style={{ fontSize: 12, color: tokens.textDim, marginBottom: 10, lineHeight: 1.4 }}>
+                <div
+                  style={{ fontSize: 12, color: tokens.textDim, marginBottom: 10, lineHeight: 1.4 }}
+                >
                   <span style={{ color: tokens.cyan }}>Trigger:</span> {p.trigger}
                 </div>
                 <div

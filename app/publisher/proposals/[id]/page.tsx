@@ -1,19 +1,77 @@
 import Link from "next/link";
 import { Card, Label, Metric, Mono, Tag, Btn, Meter, HypeGauge } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
+import { getSsiConstituents, sectorToSsi, type IndexConstituent } from "@/lib/api/sosovalue";
 
-const constituents: [string, string, number, string, number, string][] = [
-  ["FIL", "Filecoin", 92, "5.0B", 22, "Enterprise storage news"],
-  ["RNDR", "Render", 78, "3.2B", 18, "Throughput Q3 beat"],
-  ["HNT", "Helium", 84, "1.1B", 15, "1M device milestone"],
-  ["AR", "Arweave", 64, "0.8B", 12, "Archival grant"],
-  ["AKT", "Akash", 76, "0.6B", 11, "GPU pricing vs AWS"],
-  ["IOTX", "IoTeX", 58, "0.4B", 9, "Dev stack 2.0"],
-  ["DIMO", "Dimo", 52, "0.2B", 8, "200k cars milestone"],
-  ["ATH", "Aethir", 44, "0.3B", 5, "Neutral · diversifier"],
-];
+export const revalidate = 60;
 
-export default function ProposalReviewPage({ params }: { params: { id: string } }) {
+// Map a proposal id back to the SSI ticker we can fetch constituents from.
+const PROPOSAL_TO_SSI: Record<string, { ticker: string; sector: string }> = {
+  "depin-8": { ticker: "ssiDePIN", sector: "DePIN" },
+  "rwa-tbill-5": { ticker: "ssiRWA", sector: "RWA" },
+  "ai-agent-6": { ticker: "ssiAI", sector: "AI" },
+};
+
+// Editorial reasoning per asset symbol — extends gracefully for new symbols.
+const REASONING_BY_SYMBOL: Record<string, string> = {
+  filecoin: "Enterprise storage news",
+  render: "Throughput Q3 beat",
+  helium: "1M device milestone",
+  arweave: "Archival grant",
+  "akash-network": "GPU pricing vs AWS",
+  iota: "Dev stack 2.0",
+  "theta-network": "Streaming partnerships",
+  golem: "Render network demand",
+  livepeer: "AI inference throughput",
+  aethir: "GPU compute layer",
+  grass: "DePIN data layer",
+  ondo: "Tokenized T-bill leader",
+  mkr: "RWA collateral expansion",
+  usdy: "Yield-bearing stablecoin",
+};
+
+function tickerSymbol(symbol: string): string {
+  // SoSoValue SSI returns long-form names ("filecoin"). Convert to a short
+  // 3-4 char ticker for display ("FIL").
+  const map: Record<string, string> = {
+    filecoin: "FIL",
+    render: "RNDR",
+    helium: "HNT",
+    arweave: "AR",
+    "akash-network": "AKT",
+    iota: "IOTA",
+    "theta-network": "THETA",
+    golem: "GLM",
+    livepeer: "LPT",
+    aethir: "ATH",
+    grass: "GRASS",
+    ondo: "ONDO",
+    mkr: "MKR",
+    usdy: "USDY",
+    btc: "BTC",
+    eth: "ETH",
+    sol: "SOL",
+  };
+  return map[symbol.toLowerCase()] ?? symbol.slice(0, 5).toUpperCase();
+}
+
+export default async function ProposalReviewPage({ params }: { params: { id: string } }) {
+  const lookup = PROPOSAL_TO_SSI[params.id] ?? { ticker: sectorToSsi("DePIN") ?? "ssiDePIN", sector: "DePIN" };
+  const raw: IndexConstituent[] = await getSsiConstituents(lookup.ticker);
+  // Live constituents: [symbol, displayName, sentimentScore, mcapLabel, weightPct, reasoning]
+  const constituents: [string, string, number, string, number, string][] = raw
+    .slice(0, 12)
+    .map((c) => {
+      const tk = tickerSymbol(c.symbol);
+      return [
+        tk,
+        c.symbol.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()),
+        Math.round(50 + c.weight * 50), // proxy sentiment until per-asset endpoint wired
+        "—",
+        Math.round(c.weight * 100),
+        REASONING_BY_SYMBOL[c.symbol.toLowerCase()] ?? "Live SSI constituent",
+      ];
+    });
   return (
     <div className="px-6 py-5 flex flex-col gap-3 h-[calc(100vh-52px)]">
       <div className="flex items-center gap-2 font-mono" style={{ fontSize: 11, color: tokens.textDim }}>

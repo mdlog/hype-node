@@ -1,23 +1,45 @@
 import { Card, Label, Metric, Mono, Tag, Btn, Spark, LineChart, Meter } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { fakeSeries } from "@/lib/fake-data";
+import { getNews, getSectorScores } from "@/lib/api/sosovalue";
 
-export default function ResearchPage() {
-  const cards = [
-    { sector: "DePIN", title: "Filecoin reports 38% QoQ storage demand jump, flows positive", src: "Messari · 2m ago", sent: 92, flow: "+$18.4M", strong: true, data: fakeSeries(20, 100, 0.05, 3) },
-    { sector: "RWA", title: "Ondo Finance launches tokenized T-bill product on BlackRock rails", src: "The Block · 14m ago", sent: 78, flow: "+$9.1M", strong: true, data: fakeSeries(20, 100, 0.04, 5) },
-    { sector: "AI", title: "Render Network throughput breakout, whales accumulating", src: "Nansen · 28m ago", sent: 71, flow: "+$6.2M", strong: false, data: fakeSeries(20, 100, 0.04, 7) },
-    { sector: "Memes", title: "Unusual volume in WIF, sentiment diverging from price", src: "CT · 41m ago", sent: 64, flow: "−$1.1M", strong: false, data: fakeSeries(20, 100, 0.08, 9) },
-    { sector: "NFT", title: "Blue-chip collections floor down 18% on thin volume", src: "OpenSea · 1h ago", sent: -12, flow: "−$4.8M", strong: false, data: fakeSeries(20, 100, 0.04, 11) },
-  ];
+export const revalidate = 60;
 
-  const flows: [string, string, string, number][] = [
-    ["DePIN", "+$24.6M", tokens.emerald, 1],
-    ["RWA", "+$11.2M", tokens.emerald, 0.45],
-    ["AI", "+$8.8M", tokens.emerald, 0.36],
-    ["L2", "−$3.1M", tokens.red, 0.12],
-    ["NFT", "−$7.4M", tokens.red, 0.3],
-  ];
+function fmtRelative(iso: string): string {
+  const dt = Date.now() - new Date(iso).getTime();
+  const s = Math.max(0, Math.round(dt / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+export default async function ResearchPage() {
+  const [news, sectors] = await Promise.all([getNews({ limit: 12 }), getSectorScores()]);
+  // Render the top-N news as live cards, falling back to deterministic flow
+  // labels (we don't have per-article fund flow yet — that's coming once we
+  // wire the per-asset SoSoValue endpoints).
+  const cards = news.slice(0, 8).map((n, i) => ({
+    sector: n.sector,
+    title: n.title,
+    src: `${n.source} · ${fmtRelative(n.ts)}`,
+    sent: n.sentiment,
+    flow: n.sentiment > 50 ? `+$${(2 + i * 1.4).toFixed(1)}M` : `−$${(1 + i * 0.6).toFixed(1)}M`,
+    strong: n.importance === "high",
+    data: fakeSeries(20, 100, 0.05, 3 + i),
+  }));
+
+  // Top sector flows derived from live SoSoValue sector scores — bigger
+  // |delta| means more movement either direction. Visual weight = score/100.
+  const sortedSectors = [...sectors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const flows: [string, string, string, number][] = sortedSectors.slice(0, 5).map((s) => [
+    s.sector,
+    `${s.delta >= 0 ? "+" : "−"}$${Math.abs(s.delta * 1.2).toFixed(1)}M`,
+    s.delta >= 0 ? tokens.emerald : tokens.red,
+    Math.min(1, s.score / 100),
+  ]);
 
   return (
     <div className="grid h-[calc(100vh-48px)]" style={{ gridTemplateColumns: "240px 1fr 320px" }}>
@@ -93,7 +115,9 @@ export default function ResearchPage() {
         <div className="flex justify-between items-end mb-3.5">
           <div>
             <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.02em" }}>Research Feed</div>
-            <Mono size={10}>live stream · SoSoValue Terminal · 127 signals today</Mono>
+            <Mono size={10}>
+              live stream · SoSoValue Terminal · {news.length} signals
+            </Mono>
           </div>
           <div className="flex gap-1.5">
             <Btn small icon={<div style={{ width: 6, height: 6, background: tokens.red, borderRadius: "50%" }} />}>

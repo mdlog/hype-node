@@ -1,26 +1,19 @@
 import { Card, Mono, Tag, Btn, HypeGauge } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
+import { getNews, getSectorScores } from "@/lib/api/sosovalue";
 
-const gauges = [
-  { s: "DePIN", v: 92, d: "+38", news: "127" },
-  { s: "RWA", v: 78, d: "+21", news: "84" },
-  { s: "AI", v: 71, d: "+14", news: "142" },
-  { s: "Memes", v: 64, d: "+9", news: "218" },
-  { s: "DeFi", v: 52, d: "+2", news: "61" },
-  { s: "L2", v: 44, d: "−3", news: "47" },
-  { s: "Gaming", v: 31, d: "−8", news: "29" },
-  { s: "NFT", v: 18, d: "−14", news: "22" },
-];
+export const revalidate = 60;
 
-const news = [
-  { t: "2m", h: "Filecoin storage demand jumps 38% QoQ, enterprise contracts expand", s: "Messari", sent: 92, imp: "high" },
-  { t: "8m", h: "Helium network passes 1M devices, mobile subscriber growth accelerates", s: "The Block", sent: 84, imp: "high" },
-  { t: "14m", h: "Render Network Q3: 42% throughput increase, new AI studio partnerships", s: "Decrypt", sent: 78, imp: "med" },
-  { t: "22m", h: "Akash beats AWS on GPU spot pricing, ML workloads migrating", s: "CoinDesk", sent: 76, imp: "med" },
-  { t: "31m", h: "Arweave permaweb hits 200TB, archival grant program launches", s: "Bankless", sent: 64, imp: "med" },
-  { t: "48m", h: "IoTeX unveils DePIN developer stack 2.0", s: "Messari", sent: 58, imp: "low" },
-  { t: "1h", h: "Dimo vehicle network crosses 200k connected cars", s: "CT", sent: 52, imp: "low" },
-];
+function fmtRelative(iso: string): string {
+  const dt = Date.now() - new Date(iso).getTime();
+  const s = Math.max(0, Math.round(dt / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
 
 const events = [
   { t: "now", s: "DePIN", status: "Drafting proposal", c: tokens.amber, sub: "11 assets · score 92" },
@@ -31,7 +24,27 @@ const events = [
   { t: "18d ago", s: "Solana DeFi", status: "Published — SOL-DEFI-6", c: tokens.emerald, sub: "earned $248 · 52 subs" },
 ];
 
-export default function RadarPage() {
+export default async function RadarPage() {
+  const [liveNews, liveSectors] = await Promise.all([getNews({ limit: 10 }), getSectorScores()]);
+
+  // Live sector hype gauges. score = derived from change_pct_24h; news count
+  // is a heuristic until SoSoValue exposes per-sector article counts.
+  const gauges = liveSectors.slice(0, 8).map((s) => ({
+    s: s.sector,
+    v: s.score,
+    d: `${s.delta >= 0 ? "+" : ""}${s.delta}`,
+    news: String(s.news),
+  }));
+
+  // Live news stream — first article's sentiment tier classifies importance.
+  const news = liveNews.map((n) => ({
+    t: fmtRelative(n.ts),
+    h: n.title,
+    s: n.source,
+    sent: n.sentiment,
+    imp: n.importance,
+  }));
+
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
       <div className="flex justify-between items-end">

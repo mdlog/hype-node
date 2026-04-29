@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,7 +23,22 @@ from .tools import terminal
 
 load_dotenv()
 
-app = FastAPI(title="HypeNode Agent")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Start the LangGraph driver as a background task; cancel it on shutdown.
+    task = asyncio.create_task(_runner())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+app = FastAPI(title="HypeNode Agent", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -71,17 +87,23 @@ def _build_state_response() -> AgentState:
     )
 
 
-@app.on_event("startup")
-async def warmup() -> None:
-    asyncio.create_task(_runner())
-
-
 async def _runner() -> None:
-    """Background task that drives the LangGraph loop on a cadence."""
+    """Background task that drives the LangGraph loop on a cadence.
+
+    Cadence accounts for the SoSoValue Demo tier (1 req/min). The graph itself
+    hits at most one *fresh* SoSoValue endpoint per cycle thanks to the 15-min
+    in-memory cache in tools/terminal.py — everything else returns cached or
+    stale data without burning a token. We sleep 120s between cycles so the
+    rate gate never blocks the next call when we genuinely need fresh data.
+    """
     global TOOL_CALLS, DECISIONS, GAS_VAL
+    sectors_cycle = ["DePIN", "RWA", "AI", "Memes", "GameFi"]  # rotates through SSI indices
+    i = 0
     while True:
         try:
-            state = await GRAPH.ainvoke({"sector": "DePIN"})
+            sector = sectors_cycle[i % len(sectors_cycle)]
+            i += 1
+            state = await GRAPH.ainvoke({"sector": sector})
             LATEST_STATE.update(state)
             for entry in state.get("log", []):
                 LATEST_LOG.append(ReasoningEntry(**entry))
@@ -89,7 +111,6 @@ async def _runner() -> None:
             DECISIONS += 1
             for tx in state.get("sodex_txs") or []:
                 GAS_VAL += tx.get("gas_val", 0.0)
-            # cap log size
             if len(LATEST_LOG) > 250:
                 del LATEST_LOG[: len(LATEST_LOG) - 250]
         except Exception as exc:  # noqa: BLE001
@@ -100,7 +121,8 @@ async def _runner() -> None:
                     text=f"loop crash · {exc}",
                 )
             )
-        await asyncio.sleep(30)
+        # 120s = two SoSoValue token windows. Override with AGENT_LOOP_SEC.
+        await asyncio.sleep(int(os.getenv("AGENT_LOOP_SEC", "120")))
 
 
 @app.get("/health")

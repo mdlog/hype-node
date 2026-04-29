@@ -17,7 +17,9 @@ Endpoints used:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,19 +28,107 @@ import httpx
 BASE = os.getenv("SOSOVALUE_API_BASE", "https://openapi.sosovalue.com/openapi/v1")
 KEY = os.getenv("SOSOVALUE_API_KEY", "")
 
+# ---------- transport: rate limiter + persistent cache ----------
+#
+# Demo tier = 1 request per minute, total. Mirror the Node-side limiter:
+#   1. Per-path in-memory cache, default 15-minute TTL.
+#   2. Global gap of 65s between any two outbound calls.
+#   3. In-flight dedup: parallel callers share one task per path.
+#   4. Stale-on-failure / stale-on-rate-limit: prefer last good payload.
+
+MIN_GAP_SEC = float(os.getenv("SOSOVALUE_MIN_GAP_SEC", "65"))
+CACHE_TTL_SEC = float(os.getenv("SOSOVALUE_CACHE_TTL_SEC", str(15 * 60)))
+# When the API reports "Monthly quota exceeded" (code 402901 + that message),
+# back off for 6h instead of the 65s per-minute gap. Tunable.
+QUOTA_BACKOFF_SEC = float(os.getenv("SOSOVALUE_QUOTA_BACKOFF_SEC", str(6 * 3600)))
+
+_cache: dict[str, tuple[Any, float, float]] = {}  # path → (data, expires_at, updated_at)
+_inflight: dict[str, asyncio.Future[Any]] = {}
+_last_request_at = 0.0
+_quota_exhausted_until = 0.0  # epoch seconds; while > now() we skip the network
+_gate_lock = asyncio.Lock()
+
+
+def _fresh(entry: tuple[Any, float, float] | None) -> bool:
+    return entry is not None and entry[1] > time.time()
+
+
+def _is_monthly_quota_error(msg: str) -> bool:
+    return "monthly quota" in (msg or "").lower()
+
 
 async def _get(path: str) -> Any:
+    global _last_request_at, _quota_exhausted_until
+
     if not KEY:
         return None
+
+    cached = _cache.get(path)
+    if _fresh(cached):
+        return cached[0]
+
+    # Hard backoff: monthly quota exhausted → don't even try the network.
+    if time.time() < _quota_exhausted_until:
+        return cached[0] if cached else None
+
+    if path in _inflight:
+        return await _inflight[path]
+
+    async with _gate_lock:
+        gap = time.time() - _last_request_at
+        if gap < MIN_GAP_SEC:
+            wait = MIN_GAP_SEC - gap
+            if cached is not None:
+                age = int(time.time() - cached[2])
+                print(
+                    f"[terminal] rate-limit guard: serving stale {path} "
+                    f"(age {age}s, next slot in {int(wait)}s)"
+                )
+                return cached[0]
+            return None
+        _last_request_at = time.time()
+
+    fut: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+    _inflight[path] = fut
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(f"{BASE}{path}", headers={"x-soso-api-key": KEY})
-            r.raise_for_status()
+        try:
             body = r.json()
-            return body.get("data", body) if isinstance(body, dict) else body
+        except Exception:
+            raise RuntimeError(f"non-JSON {r.status_code}: {r.text[:80]}")
+        envelope_code = body.get("code") if isinstance(body, dict) else None
+        msg = body.get("message", "") if isinstance(body, dict) else r.text[:80]
+
+        if r.status_code != 200 or (envelope_code is not None and envelope_code != 0):
+            if _is_monthly_quota_error(msg):
+                # Don't log this every retry — once is enough.
+                if _quota_exhausted_until < time.time():
+                    print(
+                        f"[terminal] SoSoValue MONTHLY QUOTA EXHAUSTED · "
+                        f"backing off until "
+                        f"{time.strftime('%H:%M', time.localtime(time.time() + QUOTA_BACKOFF_SEC))} "
+                        f"(serving cached/synthetic data)"
+                    )
+                _quota_exhausted_until = time.time() + QUOTA_BACKOFF_SEC
+            raise RuntimeError(f"{r.status_code} code={envelope_code} msg={msg}")
+
+        data = body.get("data", body) if isinstance(body, dict) else body
+        _cache[path] = (data, time.time() + CACHE_TTL_SEC, time.time())
+        fut.set_result(data)
+        return data
     except Exception as exc:  # noqa: BLE001
-        print(f"[terminal] {path} failed: {exc}")
+        # Suppress per-retry noise once we're in monthly-quota backoff —
+        # otherwise the agent loop fills the log with the same line.
+        if not _is_monthly_quota_error(str(exc)):
+            print(f"[terminal] {path} failed: {exc}")
+        if cached is not None:
+            fut.set_result(cached[0])
+            return cached[0]
+        fut.set_result(None)
         return None
+    finally:
+        _inflight.pop(path, None)
 
 
 # ---------- raw endpoints ----------

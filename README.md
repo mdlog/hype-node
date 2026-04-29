@@ -124,6 +124,27 @@ When the key is missing every method falls back to deterministic synthetic data
 shaped exactly like the documented response so the UI / agent loop stays
 testable end-to-end.
 
+#### Rate limiting (Demo tier = 1 req/min)
+
+[lib/api/sosovalue.ts](lib/api/sosovalue.ts) and
+[agent-service/src/tools/terminal.py](agent-service/src/tools/terminal.py)
+each ship with a singleton rate limiter + 15-minute in-memory cache:
+
+- **65 s minimum gap** between outbound calls (across endpoints, across pages)
+- **In-flight dedup** so parallel cold reads share one fetch
+- **Stale-on-rate-limit / stale-on-failure** — old payload wins over a 429
+- Cache state lives in `globalThis` (Node) / module globals (Python) so it
+  survives Next.js route-handler isolation and HMR
+
+Tunable via env: `SOSOVALUE_MIN_GAP_MS` / `SOSOVALUE_CACHE_TTL_MS` (Node) and
+`SOSOVALUE_MIN_GAP_SEC` / `SOSOVALUE_CACHE_TTL_SEC` (Python). On a paid tier
+drop the gap to 1000 ms and the TTL to ~60 s for near-realtime data.
+
+The agent loop in [agent-service/src/main.py](agent-service/src/main.py)
+rotates through `["DePIN", "RWA", "AI", "Memes", "GameFi"]` one sector per
+cycle and sleeps `AGENT_LOOP_SEC` (default 120 s) between iterations so each
+cycle has at least one fresh SoSoValue token to spend.
+
 ### SoDEX REST v1
 
 Read-only endpoints (`/markets/*`, `/accounts/{addr}/*`) are public — no key.

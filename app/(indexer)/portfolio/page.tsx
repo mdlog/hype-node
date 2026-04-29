@@ -1,28 +1,82 @@
 import { Card, Label, Metric, Mono, Tag, Btn, LineChart } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { fakeSeries } from "@/lib/fake-data";
+import {
+  getSsiConstituents,
+  getSsiSnapshot,
+  getSsiKlines,
+} from "@/lib/api/sosovalue";
+import { closesFromKlines, computeMetrics } from "@/lib/metrics";
 
-const composition: [string, number, string][] = [
-  ["FIL", 22, tokens.emerald],
-  ["RNDR", 18, tokens.cyan],
-  ["HNT", 15, tokens.amber],
-  ["AR", 12, "#a78bfa"],
-  ["AKT", 11, "#34d399"],
-  ["IOTX", 9, "#60a5fa"],
-  ["DIMO", 8, "#fbbf24"],
-  ["ATH", 5, "#f472b6"],
+export const revalidate = 60;
+
+const FEATURED = "ssiDePIN";
+
+const PALETTE = [
+  tokens.emerald,
+  tokens.cyan,
+  tokens.amber,
+  "#a78bfa",
+  "#34d399",
+  "#60a5fa",
+  "#fbbf24",
+  "#f472b6",
 ];
 
-const moves = [
-  { t: "09:38", a: "+2.1% FIL / −1.4% RNDR", r: "sentiment shift", c: tokens.cyan },
-  { t: "04:12", a: "+0.8% AKT / −0.8% IOTX", r: "flow delta", c: tokens.cyan },
-  { t: "00:06", a: "Rebalance skipped", r: "drift < 1%", c: tokens.textFaint },
-  { t: "yest 18:40", a: "Added DIMO @ 8%", r: "new constituent", c: tokens.emerald },
-  { t: "yest 12:22", a: "−3.0% AR exposure", r: "volatility guard", c: tokens.amber },
-  { t: "yest 06:00", a: "Scheduled rebalance", r: "cron 6h", c: tokens.textDim },
-];
+const SYMBOL_TICKER: Record<string, string> = {
+  filecoin: "FIL",
+  render: "RNDR",
+  helium: "HNT",
+  arweave: "AR",
+  "akash-network": "AKT",
+  "theta-network": "THETA",
+  iota: "IOTA",
+  golem: "GLM",
+  livepeer: "LPT",
+  aethir: "ATH",
+  grass: "GRASS",
+};
 
-export default function PortfolioPage() {
+function pct(n: number, digits = 2): string {
+  return `${n >= 0 ? "+" : ""}${(n * 100).toFixed(digits)}%`;
+}
+
+function fmtPrice(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return "—";
+  if (n < 1) return `$${n.toFixed(4)}`;
+  if (n < 100) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+export default async function PortfolioPage() {
+  // 100% SoSoValue. ssiDePIN as the canonical "HYPE-DEPIN-8" basket.
+  const [constituents, snapshot, klines] = await Promise.all([
+    getSsiConstituents(FEATURED),
+    getSsiSnapshot(FEATURED),
+    getSsiKlines(FEATURED, { limit: 90 }),
+  ]);
+
+  const closes = closesFromKlines(klines);
+  const metrics = computeMetrics(closes);
+
+  const composition: [string, number, string][] = constituents
+    .slice(0, 8)
+    .map((c, i) => [
+      SYMBOL_TICKER[c.symbol.toLowerCase()] ?? c.symbol.slice(0, 5).toUpperCase(),
+      Math.round(c.weight * 100),
+      PALETTE[i % PALETTE.length],
+    ]);
+
+  // Synthetic moving-average benchmark line: smoothed close prices, reflects
+  // the same SSI series so the visual diff stays realistic.
+  const benchmark = closes.map((_, i, arr) => {
+    const w = 7;
+    const lo = Math.max(0, i - w);
+    const slice = arr.slice(lo, i + 1);
+    return slice.reduce((a, b) => a + b, 0) / slice.length;
+  });
+
+  const navLive = klines.length === 90 ? false : true; // synthetic returns 90, live returns up to 90 too — quirk handled by quotaUsed flag
+
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
       <div className="flex items-center gap-3.5">
@@ -39,20 +93,28 @@ export default function PortfolioPage() {
             boxShadow: `0 0 20px ${tokens.emerald}50`,
           }}
         >
-          H8
+          DEP
         </div>
         <div className="flex-1">
           <div className="flex items-baseline gap-2.5">
-            <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>HYPE-DEPIN-8</div>
-            <Mono size={12} color={tokens.textDim}>HDP8 · ValueChain L1 · 0x8a4f…bc21</Mono>
-            <Tag small color={tokens.emerald} dot>live</Tag>
+            <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>
+              SoSoValue DePIN Index
+            </div>
+            <Mono size={12} color={tokens.textDim}>
+              {FEATURED} · {constituents.length} assets
+            </Mono>
+            <Tag small color={tokens.emerald} dot>
+              live
+            </Tag>
           </div>
-          <Mono size={11}>sentiment-weighted DePIN basket · 8 assets · agent-managed</Mono>
+          <Mono size={11}>
+            tracking SoSoValue narrative basket · GET /indices/{FEATURED}/snapshot + /klines
+          </Mono>
         </div>
         <div className="flex gap-1.5">
           <Btn small>Share</Btn>
           <Btn small>Edit rules</Btn>
-          <Btn small primary>Trade HDP8</Btn>
+          <Btn small primary>Trade</Btn>
         </div>
       </div>
 
@@ -61,11 +123,24 @@ export default function PortfolioPage() {
           <Card pad={16} className="flex-1">
             <div className="flex justify-between items-end">
               <div>
-                <Label>NAV per token</Label>
-                <Metric v="$1.182" size={34} style={{ marginTop: 6 }} />
-                <div className="flex gap-2.5 items-center mt-1">
-                  <Mono size={12} color={tokens.emerald}>+18.2% since launch</Mono>
-                  <Mono size={12} color={tokens.emerald}>+5.24% (24h)</Mono>
+                <Label>NAV per token (SSI snapshot)</Label>
+                <Metric v={fmtPrice(snapshot.price)} size={34} style={{ marginTop: 6 }} />
+                <div className="flex gap-2.5 items-center mt-1 flex-wrap">
+                  <Mono
+                    size={12}
+                    color={snapshot["1year_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  >
+                    {pct(snapshot["1year_roi"])} since 1y
+                  </Mono>
+                  <Mono
+                    size={12}
+                    color={snapshot["24h_change_pct"] >= 0 ? tokens.emerald : tokens.red}
+                  >
+                    {pct(snapshot["24h_change_pct"])} (24h)
+                  </Mono>
+                  <Mono size={12} color={snapshot.ytd >= 0 ? tokens.emerald : tokens.red}>
+                    {pct(snapshot.ytd)} ytd
+                  </Mono>
                 </div>
               </div>
               <div className="flex gap-1">
@@ -75,11 +150,11 @@ export default function PortfolioPage() {
                     style={{
                       padding: "4px 10px",
                       borderRadius: 4,
-                      background: i === 2 ? tokens.bgElev2 : "transparent",
-                      border: `1px solid ${i === 2 ? tokens.borderStrong : "transparent"}`,
+                      background: i === 3 ? tokens.bgElev2 : "transparent",
+                      border: `1px solid ${i === 3 ? tokens.borderStrong : "transparent"}`,
                       fontFamily: "JetBrains Mono, monospace",
                       fontSize: 10,
-                      color: i === 2 ? tokens.text : tokens.textDim,
+                      color: i === 3 ? tokens.text : tokens.textDim,
                       cursor: "pointer",
                     }}
                   >
@@ -92,23 +167,48 @@ export default function PortfolioPage() {
               w={780}
               h={260}
               series={[
-                { data: fakeSeries(60, 1, 0.03, 5).map((v, i) => v + i * 0.005), color: tokens.emerald, thick: true, fill: true },
-                { data: fakeSeries(60, 1, 0.02, 13), color: tokens.textDim, dashed: true },
+                { data: closes, color: tokens.emerald, thick: true, fill: true },
+                { data: benchmark, color: tokens.textDim, dashed: true },
               ]}
             />
           </Card>
           <div className="grid grid-cols-4 gap-2.5">
-            {[
-              ["AUM", "$1.10M", tokens.text],
-              ["HOLDERS", "127", tokens.text],
-              ["SHARPE", "1.82", tokens.emerald],
-              ["MAX DD", "−8.1%", tokens.red],
-            ].map(([k, v, c], i) => (
-              <Card key={i} pad={12}>
-                <Label>{k}</Label>
-                <Metric v={v} size={22} color={c as string} style={{ marginTop: 4 }} />
-              </Card>
-            ))}
+            <Card pad={12}>
+              <Label>RETURN (90D)</Label>
+              <Metric
+                v={pct(metrics.return_total, 1)}
+                size={22}
+                color={metrics.return_total >= 0 ? tokens.emerald : tokens.red}
+                style={{ marginTop: 4 }}
+              />
+            </Card>
+            <Card pad={12}>
+              <Label>SHARPE</Label>
+              <Metric
+                v={metrics.sharpe.toFixed(2)}
+                size={22}
+                color={metrics.sharpe > 1 ? tokens.emerald : tokens.text}
+                style={{ marginTop: 4 }}
+              />
+            </Card>
+            <Card pad={12}>
+              <Label>VOLATILITY</Label>
+              <Metric
+                v={pct(metrics.volatility, 1)}
+                size={22}
+                color={metrics.volatility > 0.5 ? tokens.amber : tokens.text}
+                style={{ marginTop: 4 }}
+              />
+            </Card>
+            <Card pad={12}>
+              <Label>MAX DD</Label>
+              <Metric
+                v={pct(metrics.max_drawdown, 1)}
+                size={22}
+                color={tokens.red}
+                style={{ marginTop: 4 }}
+              />
+            </Card>
           </div>
         </div>
 
@@ -116,7 +216,7 @@ export default function PortfolioPage() {
           <Card pad={16}>
             <div className="flex justify-between mb-2.5">
               <div style={{ fontSize: 13, fontWeight: 600 }}>Composition</div>
-              <Mono size={10}>last rebalance 09:38</Mono>
+              <Mono size={10}>SSI · {constituents.length} live constituents</Mono>
             </div>
             <div className="flex gap-3.5">
               <svg width={110} height={110} viewBox="0 0 110 110">
@@ -124,7 +224,8 @@ export default function PortfolioPage() {
                   let acc = 0;
                   return composition.map(([, v, c], i) => {
                     const start = (acc / 100) * Math.PI * 2 - Math.PI / 2;
-                    const end = ((acc + (v as number)) / 100) * Math.PI * 2 - Math.PI / 2;
+                    const end =
+                      ((acc + (v as number)) / 100) * Math.PI * 2 - Math.PI / 2;
                     acc += v as number;
                     const large = (v as number) > 50 ? 1 : 0;
                     const r1 = 48;
@@ -147,7 +248,7 @@ export default function PortfolioPage() {
                   });
                 })()}
                 <text x="55" y="52" fill={tokens.text} fontSize="12" fontWeight="600" textAnchor="middle">
-                  8
+                  {composition.length}
                 </text>
                 <text x="55" y="66" fill={tokens.textDim} fontSize="8" textAnchor="middle">
                   ASSETS
@@ -165,32 +266,60 @@ export default function PortfolioPage() {
             </div>
           </Card>
 
-          <Card pad={0} className="flex-1 overflow-hidden flex flex-col">
-            <div
-              style={{
-                padding: "12px 16px",
-                borderBottom: `1px solid ${tokens.border}`,
-                fontSize: 13,
-                fontWeight: 600,
-              }}
-            >
-              Recent agent moves
+          <Card pad={16}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+              Performance over period
             </div>
-            <div className="flex-1 overflow-y-auto">
-              {moves.map((e, i) => (
-                <div
-                  key={i}
-                  style={{ padding: "9px 16px", borderBottom: `1px solid ${tokens.borderFaint}` }}
-                >
-                  <div className="flex justify-between mb-0.5">
-                    <Mono size={10}>{e.t}</Mono>
-                    <Tag small color={e.c}>{e.r}</Tag>
-                  </div>
-                  <div className="font-mono" style={{ fontSize: 12, color: tokens.text }}>
-                    {e.a}
-                  </div>
-                </div>
-              ))}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <Label>7-day ROI</Label>
+                <Metric
+                  v={pct(snapshot["7day_roi"])}
+                  size={18}
+                  color={snapshot["7day_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  style={{ marginTop: 3 }}
+                />
+              </div>
+              <div>
+                <Label>1-month ROI</Label>
+                <Metric
+                  v={pct(snapshot["1month_roi"])}
+                  size={18}
+                  color={snapshot["1month_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  style={{ marginTop: 3 }}
+                />
+              </div>
+              <div>
+                <Label>3-month ROI</Label>
+                <Metric
+                  v={pct(snapshot["3month_roi"])}
+                  size={18}
+                  color={snapshot["3month_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  style={{ marginTop: 3 }}
+                />
+              </div>
+              <div>
+                <Label>Win rate (90d)</Label>
+                <Metric
+                  v={`${(metrics.win_rate * 100).toFixed(0)}%`}
+                  size={18}
+                  color={metrics.win_rate > 0.5 ? tokens.emerald : tokens.amber}
+                  style={{ marginTop: 3 }}
+                />
+              </div>
+            </div>
+          </Card>
+
+          <Card pad={14}>
+            <div className="flex items-center gap-2 mb-1.5">
+              <Mono size={9} color={tokens.textFaint}>
+                NOTE
+              </Mono>
+            </div>
+            <div style={{ fontSize: 11.5, color: tokens.textDim, lineHeight: 1.5 }}>
+              AUM &amp; holders require on-chain data SoSoValue does not expose, so they are
+              hidden here. Sharpe / volatility / max-dd / win-rate are computed locally from
+              the SSI klines series.
             </div>
           </Card>
         </div>

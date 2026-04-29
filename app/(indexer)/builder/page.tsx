@@ -2,9 +2,11 @@
 
 import { Card, Label, Mono, Tag, Btn, Meter, Toggle } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
-const constituents: [string, string, number, number, string, string, string][] = [
+type Constituent = [string, string, number, number, string, string, string];
+
+const FALLBACK: Constituent[] = [
   ["FIL", "Filecoin", 92, 22, "5.0B", "+8.2%", tokens.emerald],
   ["RNDR", "Render", 71, 18, "3.2B", "+2.4%", tokens.emerald],
   ["HNT", "Helium", 66, 15, "1.1B", "+5.1%", tokens.emerald],
@@ -15,7 +17,42 @@ const constituents: [string, string, number, number, string, string, string][] =
   ["ATH", "Aethir", 44, 5, "0.3B", "−2.8%", tokens.red],
 ];
 
+const SYMBOL_TICKER: Record<string, string> = {
+  filecoin: "FIL",
+  render: "RNDR",
+  helium: "HNT",
+  arweave: "AR",
+  "akash-network": "AKT",
+  "theta-network": "THETA",
+  iota: "IOTA",
+  golem: "GLM",
+  livepeer: "LPT",
+  aethir: "ATH",
+  grass: "GRASS",
+};
+
 export default function BuilderPage() {
+  const [constituents, setConstituents] = useState<Constituent[]>(FALLBACK);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ssi/constituents/ssiDePIN")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: { symbol: string; weight: number }[]) => {
+        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
+        const live: Constituent[] = rows.slice(0, 8).map((c) => {
+          const tk = SYMBOL_TICKER[c.symbol.toLowerCase()] ?? c.symbol.slice(0, 5).toUpperCase();
+          const display = c.symbol.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+          return [tk, display, 60, Math.round(c.weight * 100), "—", "—", tokens.textDim];
+        });
+        setConstituents(live);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const [triggers, setTriggers] = useState<Record<string, boolean>>({
     cron: true,
     sentiment: true,

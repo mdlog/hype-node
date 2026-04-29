@@ -70,24 +70,33 @@ async def strategy_node(state: HypeState) -> HypeState:
     state["current_node"] = "strategy"
     sentiment = state.get("sentiment", {}).get("score", 0)
     if sentiment < 60:
-        return _log(state, "THINK", "sentiment below threshold; staying idle")
+        # Mark this cycle as idle so downstream nodes (risk → wrap → exec) skip
+        # the on-chain leg cleanly.
+        state["basket"] = {}
+        state["idle"] = True
+        return _log(state, "THINK", f"basket · idle (sentiment {sentiment} < 60)")
+
     sector = state.get("sector", "DePIN")
     ssi_ticker = terminal.sector_to_ssi(sector)
     basket: dict[str, float] = {}
     if ssi_ticker:
         try:
             constituents = await terminal.get_ssi_constituents(ssi_ticker)
-            for c in constituents:
-                sym = c.get("symbol")
-                w = c.get("weight")
-                if isinstance(sym, str) and isinstance(w, (int, float)):
-                    basket[sym.upper()] = float(w)
+            if constituents:
+                for c in constituents:
+                    sym = c.get("symbol")
+                    w = c.get("weight")
+                    if isinstance(sym, str) and isinstance(w, (int, float)):
+                        basket[sym.upper()] = float(w)
         except Exception as exc:  # noqa: BLE001
             _log(state, "WAIT", f"constituents fetch failed: {exc}")
     if not basket:
-        # Fallback for sectors without an SSI mapping.
+        # Constituents unavailable (rate-limited or no SSI mapping). Use a
+        # sensible blue-chip fallback so the rest of the graph still runs
+        # without violating the wrap weight invariant.
         basket = {"BTC": 0.5, "ETH": 0.3, "SOL": 0.2}
     state["basket"] = basket
+    state["idle"] = False
     top_sym, top_w = max(basket.items(), key=lambda kv: kv[1])
     return _log(
         state,
@@ -123,20 +132,28 @@ async def risk_node(state: HypeState) -> HypeState:
 
 
 def risk_router(state: HypeState) -> str:
+    if state.get("idle"):
+        return "loop"
     return "emergency_exit" if state.get("emergency") else "wrap"
 
 
 async def wrap_node(state: HypeState) -> HypeState:
     state["current_node"] = "wrap"
-    res = await ssi.wrap("HDP8", state.get("basket", {}))
+    basket = state.get("basket") or {}
+    if not basket:
+        return _log(state, "WAIT", "wrap · skipped (empty basket)")
+    res = await ssi.wrap("HDP8", basket)
     state["ssi_tx"] = res
     return _log(state, "ACT", f"ssi.wrap · tx={res['tx_hash'][:10]}…")
 
 
 async def exec_node(state: HypeState) -> HypeState:
     state["current_node"] = "exec"
+    basket = state.get("basket") or {}
+    if not basket:
+        return _log(state, "WAIT", "exec · skipped (empty basket)")
     txs: list[dict[str, Any]] = []
-    for sym in state.get("basket", {}).keys():
+    for sym in basket.keys():
         tx = await sodex.execute_trade("USDC", sym, 1_000)
         txs.append(tx)
     state["sodex_txs"] = txs
@@ -174,7 +191,11 @@ def build_graph():
     g.add_edge("flow", "strategy")
     g.add_edge("strategy", "backtest")
     g.add_edge("backtest", "risk")
-    g.add_conditional_edges("risk", risk_router, {"wrap": "wrap", "emergency_exit": "emergency_exit"})
+    g.add_conditional_edges(
+        "risk",
+        risk_router,
+        {"wrap": "wrap", "emergency_exit": "emergency_exit", "loop": "loop"},
+    )
     g.add_edge("wrap", "exec")
     g.add_edge("exec", "loop")
     g.add_edge("emergency_exit", "loop")

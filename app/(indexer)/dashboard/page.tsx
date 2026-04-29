@@ -1,44 +1,129 @@
 import { Card, Label, Metric, Mono, Tag, Btn, Spark, LineChart } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { fakeSeries } from "@/lib/fake-data";
+import {
+  getSectorScores,
+  listSsiTickers,
+  getSsiSnapshot,
+  getSsiKlines,
+  getSsiConstituents,
+  getNews,
+} from "@/lib/api/sosovalue";
+import { DataSourceBanner } from "@/components/live/DataSourceBanner";
 
-export default function DashboardPage() {
-  const navData = fakeSeries(60, 100, 0.03, 7).map((v, i) => v + i * 0.3);
+export const revalidate = 60;
 
+const FEATURED = "ssiDePIN";
+
+const SSI_DISPLAY: Record<string, { name: string; symbol: string; tag: string }> = {
+  ssiDePIN: { name: "DePIN Index", symbol: "DEPIN", tag: "DePIN" },
+  ssiRWA: { name: "RWA Index", symbol: "RWA", tag: "RWA" },
+  ssiAI: { name: "AI Index", symbol: "AI", tag: "AI" },
+  ssiMeme: { name: "Meme Index", symbol: "MEME", tag: "Meme" },
+  ssiGameFi: { name: "GameFi Index", symbol: "GFI", tag: "Gaming" },
+  ssiLayer1: { name: "Layer 1 Majors", symbol: "L1", tag: "L1" },
+  ssiLayer2: { name: "Layer 2 Index", symbol: "L2", tag: "L2" },
+  ssiMAG7: { name: "Crypto MAG7", symbol: "MAG7", tag: "Macro" },
+  ssiPayFi: { name: "PayFi Index", symbol: "PAYFI", tag: "PayFi" },
+  ssiDeFi: { name: "DeFi Index", symbol: "DEFI", tag: "DeFi" },
+  ssiSocialFi: { name: "SocialFi Index", symbol: "SOC", tag: "SocialFi" },
+  ssiCeFi: { name: "CeFi Index", symbol: "CEFI", tag: "CeFi" },
+  ssiNFT: { name: "NFT Index", symbol: "NFT", tag: "NFT" },
+};
+
+function pct(n: number): string {
+  return `${n >= 0 ? "+" : ""}${(n * 100).toFixed(2)}%`;
+}
+
+function fmtPrice(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return "—";
+  if (n < 0.01) return `$${n.toFixed(6)}`;
+  if (n < 1) return `$${n.toFixed(4)}`;
+  if (n < 100) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function sectorColor(score: number): string {
+  if (score >= 75) return tokens.emerald;
+  if (score >= 60) return tokens.amber;
+  if (score >= 40) return tokens.textDim;
+  return tokens.red;
+}
+
+function fmtRelative(iso: string): string {
+  const dt = Date.now() - new Date(iso).getTime();
+  const s = Math.max(0, Math.round(dt / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+export default async function DashboardPage() {
+  // 100% SoSoValue-sourced. Each call goes through the rate-limit-aware
+  // singleton in lib/api/sosovalue.ts (65s gap, 15-min cache, 6h backoff on
+  // monthly-quota error). All synthetic fallbacks match the live response
+  // shape so the UI is identical regardless of quota status.
+  const [sectors, ssiTickers, featuredSnap, featuredKlines, featuredCons, news] = await Promise.all([
+    getSectorScores(),
+    listSsiTickers(),
+    getSsiSnapshot(FEATURED),
+    getSsiKlines(FEATURED, { limit: 90 }),
+    getSsiConstituents(FEATURED),
+    getNews({ limit: 8 }),
+  ]);
+
+  const sectorsLive = sectors.length > 8;
+  const ssiLive = ssiTickers.length >= 13;
+  const featuredLive = featuredSnap.price !== 1.182 || featuredKlines.length !== 90;
+  const newsLive = news.length > 0 && !news[0]?.id?.startsWith("n");
+
+  const sectorsRanked = [...sectors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const topSector = sectorsRanked[0];
+
+  const navData = featuredKlines.map((k) => k.close);
+  const benchSnap = featuredKlines.map((k) => (k.high + k.low) / 2);
+
+  const featured = SSI_DISPLAY[FEATURED] ?? { name: FEATURED, symbol: FEATURED, tag: "—" };
   const kpis = [
-    { k: "TOTAL AUM", v: "$2.142M", d: "+4.24%", c: tokens.emerald, data: fakeSeries(30, 100, 0.04, 3) },
-    { k: "ACTIVE INDICES", v: "03", d: "HDP8 · RWA7 · AIM3", c: tokens.textDim, data: null as number[] | null },
-    { k: "REBALANCES (24H)", v: "11", d: "avg 4.2s latency", c: tokens.cyan, data: fakeSeries(30, 50, 0.15, 5) },
-    { k: "RISK SCORE", v: "LOW", d: "σ 0.18 · 0 alerts", c: tokens.emerald, data: null as number[] | null },
+    {
+      k: `${featured.symbol} · NAV`,
+      v: fmtPrice(featuredSnap.price),
+      d: pct(featuredSnap["24h_change_pct"]),
+      c: featuredSnap["24h_change_pct"] >= 0 ? tokens.emerald : tokens.red,
+      data: navData.slice(-30),
+    },
+    {
+      k: `${featured.symbol} · YTD`,
+      v: pct(featuredSnap.ytd),
+      d: `1y ${pct(featuredSnap["1year_roi"])} · 1m ${pct(featuredSnap["1month_roi"])}`,
+      c: featuredSnap.ytd >= 0 ? tokens.emerald : tokens.red,
+      data: null as number[] | null,
+    },
+    {
+      k: "TOP SECTOR (24H)",
+      v: topSector?.sector ?? "—",
+      d: `score ${topSector?.score ?? 0} · Δ${topSector?.delta ?? 0}`,
+      c: (topSector?.delta ?? 0) >= 0 ? tokens.emerald : tokens.red,
+      data: null as number[] | null,
+    },
+    {
+      k: "SSI INDICES",
+      v: String(ssiTickers.length).padStart(2, "0"),
+      d: ssiTickers
+        .slice(0, 4)
+        .map((t) => SSI_DISPLAY[t]?.symbol ?? t)
+        .join(" · "),
+      c: ssiLive ? tokens.cyan : tokens.textFaint,
+      data: null as number[] | null,
+    },
   ];
 
-  const events = [
-    { t: "09:42:18", a: "Detected sentiment spike", d: "DePIN +15σ · 11 assets", c: tokens.emerald, lbl: "SIGNAL" },
-    { t: "09:41:52", a: "Fetched fund flow", d: "Terminal API · 24h window", c: tokens.cyan, lbl: "TOOL" },
-    { t: "09:38:04", a: "Rebalanced HDP8", d: "+2.1% FIL · −1.4% RNDR", c: tokens.emerald, lbl: "EXEC" },
-    { t: "09:35:11", a: "Backtest complete", d: "strategy #14 · Sharpe 1.82", c: tokens.textDim, lbl: "INFO" },
-    { t: "09:30:00", a: "Risk gate pass", d: "all thresholds within bounds", c: tokens.emerald, lbl: "OK" },
-    { t: "09:22:44", a: "MCP query received", d: '"show RWA opportunities"', c: tokens.cyan, lbl: "CHAT" },
-    { t: "09:14:12", a: "Weight drift detected", d: "RWA7 · FIL 21.8% → cap 22%", c: tokens.amber, lbl: "WARN" },
-    { t: "08:56:31", a: "Scheduled rebalance", d: "RWA7 · redistributed 5 assets", c: tokens.emerald, lbl: "EXEC" },
-  ];
-
-  const indices = [
-    { n: "HYPE-DEPIN-8", s: "HDP8", a: "$1.10M", d: "+5.24%", dc: tokens.emerald, sh: "1.82", h: "127", r: "2m ago", st: "LIVE", sc: tokens.emerald, spark: fakeSeries(20, 100, 0.04, 2) },
-    { n: "RWA-SEVEN", s: "RWA7", a: "$780K", d: "+1.82%", dc: tokens.emerald, sh: "1.41", h: "64", r: "4h ago", st: "LIVE", sc: tokens.emerald, spark: fakeSeries(20, 100, 0.02, 4) },
-    { n: "AI-MEME-3", s: "AIM3", a: "$260K", d: "−0.41%", dc: tokens.red, sh: "0.92", h: "18", r: "now", st: "REBAL", sc: tokens.amber, spark: fakeSeries(20, 100, 0.06, 8) },
-  ];
-
-  const sectors: [string, number, string][] = [
-    ["DePIN", 92, tokens.emerald],
-    ["RWA", 78, tokens.emerald],
-    ["AI", 71, tokens.emerald],
-    ["Memes", 64, tokens.amber],
-    ["DeFi", 58, tokens.amber],
-    ["L2", 44, tokens.textDim],
-    ["Gaming", 31, tokens.textDim],
-    ["NFT", -12, tokens.red],
-  ];
+  const indices = ssiTickers.slice(0, 8).map((t) => {
+    const display = SSI_DISPLAY[t] ?? { name: t, symbol: t.slice(3, 7).toUpperCase(), tag: "—" };
+    return { ticker: t, ...display };
+  });
 
   return (
     <div className="px-6 py-5 flex flex-col gap-4">
@@ -47,7 +132,10 @@ export default function DashboardPage() {
           <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>
             Command Center
           </div>
-          <Mono size={11}>3 indices live · agent logged 14 decisions in 24h · last pulse 2s ago</Mono>
+          <Mono size={11}>
+            {ssiTickers.length} SoSoValue indices · {sectors.length} sectors · featured{" "}
+            <span style={{ color: tokens.emerald }}>{featured.name}</span>
+          </Mono>
         </div>
         <div className="flex gap-2">
           <Btn small>Pause agent</Btn>
@@ -56,6 +144,35 @@ export default function DashboardPage() {
           </Btn>
         </div>
       </div>
+
+      <DataSourceBanner
+        sources={[
+          {
+            label: "Sector spotlight",
+            state: sectorsLive ? "live" : "mock",
+            detail: sectorsLive
+              ? `${sectors.length} sectors · GET /currencies/sector-spotlight`
+              : "synthetic — quota exhausted",
+          },
+          {
+            label: "SSI registry",
+            state: ssiLive ? "live" : "mock",
+            detail: ssiLive ? `${ssiTickers.length} indices · GET /indices` : "fallback",
+          },
+          {
+            label: `${featured.symbol} snapshot`,
+            state: featuredLive ? "live" : "mock",
+            detail: featuredLive
+              ? `GET /indices/${FEATURED}/market-snapshot + /klines`
+              : "synthetic shape",
+          },
+          {
+            label: "News feed",
+            state: newsLive ? "live" : "mock",
+            detail: newsLive ? `${news.length} articles · GET /news` : "synthetic",
+          },
+        ]}
+      />
 
       <div className="grid grid-cols-4 gap-3">
         {kpis.map((c, i) => (
@@ -68,7 +185,7 @@ export default function DashboardPage() {
                   {c.d}
                 </Mono>
               </div>
-              {c.data && <Spark data={c.data} w={70} h={36} color={c.c} />}
+              {c.data && c.data.length > 0 && <Spark data={c.data} w={70} h={36} color={c.c} />}
             </div>
           </Card>
         ))}
@@ -78,21 +195,23 @@ export default function DashboardPage() {
         <Card pad={16}>
           <div className="flex justify-between mb-3">
             <div>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>Portfolio NAV</div>
-              <Mono size={10}>aggregate · usd · 90d</Mono>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>{featured.name} · NAV (90d)</div>
+              <Mono size={10}>
+                SoSoValue · GET /indices/{FEATURED}/klines{featuredLive ? "" : " · synthetic"}
+              </Mono>
             </div>
             <div className="flex gap-1">
-              {["1D", "1W", "1M", "3M", "ALL"].map((t, i) => (
+              {["1D", "1W", "1M", "3M"].map((t, i) => (
                 <div
                   key={t}
                   style={{
                     padding: "4px 10px",
                     borderRadius: 4,
-                    background: i === 2 ? tokens.bgElev2 : "transparent",
-                    border: `1px solid ${i === 2 ? tokens.borderStrong : "transparent"}`,
+                    background: i === 3 ? tokens.bgElev2 : "transparent",
+                    border: `1px solid ${i === 3 ? tokens.borderStrong : "transparent"}`,
                     fontFamily: "JetBrains Mono, monospace",
                     fontSize: 10,
-                    color: i === 2 ? tokens.text : tokens.textDim,
+                    color: i === 3 ? tokens.text : tokens.textDim,
                     cursor: "pointer",
                   }}
                 >
@@ -106,18 +225,24 @@ export default function DashboardPage() {
             h={240}
             series={[
               { data: navData, color: tokens.emerald, thick: true, fill: true },
-              { data: fakeSeries(60, 100, 0.02, 11), color: tokens.textDim, dashed: true },
+              { data: benchSnap, color: tokens.textDim, dashed: true },
             ]}
           />
           <div className="flex gap-4 mt-2">
             <div className="flex items-center gap-1.5">
               <div style={{ width: 12, height: 2, background: tokens.emerald }} />
-              <Mono size={10} color={tokens.text}>HypeNode aggregate</Mono>
+              <Mono size={10} color={tokens.text}>
+                {featured.symbol} close
+              </Mono>
             </div>
             <div className="flex items-center gap-1.5">
               <div style={{ width: 12, height: 2, background: tokens.textDim }} />
-              <Mono size={10}>BTC benchmark</Mono>
+              <Mono size={10}>{featured.symbol} mid (high+low)/2</Mono>
             </div>
+            <div className="flex-1" />
+            <Mono size={10} color={tokens.textFaint}>
+              {featuredCons.length} constituents
+            </Mono>
           </div>
         </Card>
 
@@ -126,25 +251,44 @@ export default function DashboardPage() {
             className="flex justify-between items-center"
             style={{ padding: "14px 16px", borderBottom: `1px solid ${tokens.border}` }}
           >
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Agent Activity</div>
-            <Tag small color={tokens.emerald} dot>monitoring</Tag>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>News stream</div>
+            <Tag small color={newsLive ? tokens.emerald : tokens.textFaint} dot>
+              {newsLive ? "live · /news" : "fallback"}
+            </Tag>
           </div>
           <div style={{ padding: "6px 0", overflowY: "auto", maxHeight: 290 }}>
-            {events.map((e, i) => (
+            {news.map((n, i) => (
               <div
                 key={i}
                 className="flex gap-2.5 items-start"
                 style={{ padding: "8px 16px", borderBottom: `1px solid ${tokens.borderFaint}` }}
               >
-                <Mono size={10} color={tokens.textFaint} style={{ minWidth: 54, paddingTop: 2 }}>
-                  {e.t}
+                <Mono size={10} color={tokens.textFaint} style={{ minWidth: 30, paddingTop: 2 }}>
+                  {fmtRelative(n.ts)}
                 </Mono>
-                <Tag small color={e.c} style={{ minWidth: 44, justifyContent: "center" }}>
-                  {e.lbl}
+                <Tag
+                  small
+                  color={
+                    n.importance === "high"
+                      ? tokens.red
+                      : n.importance === "med"
+                        ? tokens.amber
+                        : tokens.textDim
+                  }
+                  style={{ minWidth: 40, justifyContent: "center" }}
+                >
+                  {n.sector || "—"}
                 </Tag>
                 <div className="flex-1">
-                  <div style={{ fontSize: 12.5, color: tokens.text, fontWeight: 500 }}>{e.a}</div>
-                  <Mono size={10}>{e.d}</Mono>
+                  <div
+                    style={{ fontSize: 12, color: tokens.text, fontWeight: 500, lineHeight: 1.4 }}
+                  >
+                    {n.title}
+                  </div>
+                  <Mono size={10}>
+                    {n.source} · score {n.sentiment >= 0 ? "+" : ""}
+                    {n.sentiment}
+                  </Mono>
                 </div>
               </div>
             ))}
@@ -158,28 +302,28 @@ export default function DashboardPage() {
             className="flex justify-between items-center"
             style={{ padding: "12px 16px", borderBottom: `1px solid ${tokens.border}` }}
           >
-            <div style={{ fontSize: 14, fontWeight: 600 }}>My Indices</div>
-            <Mono size={10}>on-chain · ValueChain L1</Mono>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>SSI indices</div>
+            <Mono size={10}>SoSoValue · GET /indices</Mono>
           </div>
           <div
             className="grid"
             style={{
-              gridTemplateColumns: "1.8fr 1fr 0.8fr 1fr 0.8fr 1.2fr 0.8fr",
+              gridTemplateColumns: "2fr 1fr 1fr 0.6fr",
               padding: "8px 16px",
               gap: 8,
               borderBottom: `1px solid ${tokens.borderFaint}`,
             }}
           >
-            {["NAME", "AUM", "24H", "SHARPE", "HOLDERS", "LAST REBAL", "STATUS"].map((k) => (
+            {["NAME", "TICKER", "TAG", ""].map((k) => (
               <Label key={k}>{k}</Label>
             ))}
           </div>
-          {indices.map((r, i) => (
+          {indices.map((r) => (
             <div
-              key={i}
+              key={r.ticker}
               className="grid items-center"
               style={{
-                gridTemplateColumns: "1.8fr 1fr 0.8fr 1fr 0.8fr 1.2fr 0.8fr",
+                gridTemplateColumns: "2fr 1fr 1fr 0.6fr",
                 padding: "11px 16px",
                 gap: 8,
                 borderBottom: `1px solid ${tokens.borderFaint}`,
@@ -192,69 +336,72 @@ export default function DashboardPage() {
                     width: 28,
                     height: 28,
                     borderRadius: 6,
-                    background: tokens.bgElev2,
-                    border: `1px solid ${tokens.border}`,
+                    background: r.ticker === FEATURED ? tokens.emerald + "20" : tokens.bgElev2,
+                    border: `1px solid ${r.ticker === FEATURED ? tokens.emerald : tokens.border}`,
                     fontSize: 9.5,
-                    color: tokens.emerald,
+                    color: r.ticker === FEATURED ? tokens.emerald : tokens.textDim,
                     fontWeight: 600,
                   }}
                 >
-                  {r.s.slice(0, 2)}
+                  {r.symbol.slice(0, 4)}
                 </div>
                 <div>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: tokens.text }}>{r.n}</div>
-                  <Mono size={9.5}>{r.s}</Mono>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: tokens.text }}>{r.name}</div>
+                  <Mono size={9.5}>{r.ticker}</Mono>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Mono size={12} color={tokens.text}>{r.a}</Mono>
-                <Spark data={r.spark} w={50} h={20} color={r.dc} fill={false} />
-              </div>
-              <Mono size={12} color={r.dc}>{r.d}</Mono>
-              <Mono size={12} color={tokens.text}>{r.sh}</Mono>
-              <Mono size={12}>{r.h}</Mono>
-              <Mono size={11}>{r.r}</Mono>
-              <Tag small color={r.sc} dot>
-                {r.st}
+              <Mono size={11} color={tokens.text}>
+                {r.symbol}
+              </Mono>
+              <Tag small color={tokens.cyan}>
+                {r.tag}
               </Tag>
+              <Mono size={11} color={r.ticker === FEATURED ? tokens.emerald : tokens.textFaint}>
+                {r.ticker === FEATURED ? "● featured" : "→"}
+              </Mono>
             </div>
           ))}
         </Card>
 
         <Card pad={16}>
           <div className="flex justify-between mb-3">
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Sector Sentiment</div>
-            <Mono size={10}>SoSoValue · 1h</Mono>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>Sector sentiment</div>
+            <Mono size={10} color={sectorsLive ? tokens.emerald : tokens.amber}>
+              {sectorsLive ? "live" : "fallback"}
+            </Mono>
           </div>
           <div className="grid grid-cols-4 gap-1.5">
-            {sectors.map(([s, v, c], i) => (
-              <div
-                key={i}
-                style={{
-                  padding: "10px 10px",
-                  background: `${c}10`,
-                  border: `1px solid ${c}30`,
-                  borderRadius: 6,
-                }}
-              >
-                <Mono size={9.5} color={tokens.textDim}>
-                  {s}
-                </Mono>
+            {sectors.slice(0, 8).map((s, i) => {
+              const c = sectorColor(s.score);
+              return (
                 <div
-                  className="tabular"
+                  key={i}
                   style={{
-                    fontSize: 20,
-                    fontWeight: 600,
-                    color: c,
-                    letterSpacing: "-0.02em",
-                    marginTop: 2,
+                    padding: "10px 10px",
+                    background: `${c}10`,
+                    border: `1px solid ${c}30`,
+                    borderRadius: 6,
                   }}
                 >
-                  {(v as number) > 0 ? "+" : ""}
-                  {v}
+                  <Mono size={9.5} color={tokens.textDim}>
+                    {s.sector}
+                  </Mono>
+                  <div
+                    className="tabular"
+                    style={{
+                      fontSize: 20,
+                      fontWeight: 600,
+                      color: c,
+                      letterSpacing: "-0.02em",
+                      marginTop: 2,
+                    }}
+                  >
+                    {s.delta >= 0 ? "+" : ""}
+                    {s.delta}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </Card>
       </div>

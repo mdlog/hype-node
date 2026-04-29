@@ -7,7 +7,9 @@ out
 .DS_Store
 .vscode
 .idea
+tsconfig.tsbuildinfo
 agent-service/.venv
 agent-service/__pycache__
 agent-service/**/__pycache__
 agent-service/.env
+agent-service/.checkpoints
