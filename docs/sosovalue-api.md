@@ -34,6 +34,19 @@ Source: <https://sosovalue-1.gitbook.io/sosovalue-api-doc>
 - Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (ms).
 - 429 body: `{ code: 402901, message: "Too many requests" }` (note: news doc says `42901` but the error-code table is the source of truth → use `402901`).
 
+### Server-side update frequency (from `/endpoint-overview`)
+
+This is **how often SoSoValue refreshes the data**, independent of how fast you can query. Use it to tune client-side cache TTLs — caching longer than the upstream refresh interval is fine; caching shorter is wasteful.
+
+| Frequency | Endpoints |
+|---|---|
+| **Real-time** | `/currencies/{id}/klines`, `/crypto-stocks/{ticker}/klines`, `/news`, `/news/hot`, `/news/featured` |
+| **30 s** | `/currencies/{id}/market-snapshot`, `/currencies/{id}/pairs`, `/indices/{ticker}/market-snapshot`, `/crypto-stocks/{ticker}/market-snapshot` |
+| **1 min** | `/currencies` list, `/currencies/{id}/supply`, `/currencies/sector-spotlight`, `/currencies/{id}/fundraising`, all ETF endpoints, `/indices` list, `/indices/{ticker}/constituents`, `/indices/{ticker}/klines`, `/crypto-stocks` list + market-cap + sector + sector/{name}/index, `/btc-treasuries` + purchase-history, `/fundraising/projects` + `/fundraising/projects/{id}`, `/macro/events` + `/macro/events/{event}/history`, `/analyses` + `/analyses/{chart_name}` |
+| **5 min** | `/currencies/{id}` (details), `/currencies/{id}/token-economics` |
+
+Implication for our client: per-path TTL beats the uniform 60 s default — see [`PATH_TTL_OVERRIDE`](../lib/api/sosovalue.ts) for the per-path map we use.
+
 ### Error codes
 
 Body shape: `{ code, message, details?: { field, value, issue|constraint|suggestion } }`.

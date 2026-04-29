@@ -197,43 +197,129 @@ export type NewsItem = {
 //   3. In-flight dedup: parallel reads for the same path share one promise.
 //   4. Stale-on-failure: a 429 / network error returns the previous good
 //      payload (if any) rather than collapsing back to synthetic data.
+//   5. Error-class backoffs derived from the SoSoValue error envelope (see
+//      https://sosovalue-1.gitbook.io/sosovalue-api-doc/error-responses):
+//        - 500001 / status>=500          → 5 min  (transient)
+//        - 402901 + "monthly" wording    → 6 h    (monthly quota)
+//        - 402901 / status=429           → 5 min  (short-window rate limit)
+//        - 400101 / 400102 / status=401  → 6 h    (invalid/expired API key,
+//                                                  global — no path retries)
+//        - 400301 / 400401 / 400402      → 1 h    (per-path negative cache,
+//          / status in {403,404}           one path missing ≠ all paths bad)
 //
 // The state lives in `globalThis` so Next.js HMR + route handler isolation
 // don't recreate the limiter on every render.
 
 const MIN_GAP_MS = Number(process.env.SOSOVALUE_MIN_GAP_MS ?? 65_000); // 60s + safety margin
 const CACHE_TTL_MS = Number(process.env.SOSOVALUE_CACHE_TTL_MS ?? 15 * 60_000);
-// "Monthly quota exceeded" (code 402901) → back off 6h, not 65s.
+// "Monthly quota exceeded" (code 402901, message mentions monthly) → 6h.
 const QUOTA_BACKOFF_MS = Number(process.env.SOSOVALUE_QUOTA_BACKOFF_MS ?? 6 * 3600_000);
+// Short-window rate limit (402901 without "monthly", or HTTP 429) → 5 min.
+const RATE_LIMIT_BACKOFF_MS = Number(process.env.SOSOVALUE_RATE_LIMIT_BACKOFF_MS ?? 5 * 60_000);
 // 5xx outages (e.g. 500 code=500001 during a subscription-tier propagation
 // delay or temporary degradation): back off 5 min instead of hammering.
 const TRANSIENT_BACKOFF_MS = Number(process.env.SOSOVALUE_TRANSIENT_BACKOFF_MS ?? 5 * 60_000);
+// Auth errors (400101 invalid key, 400102 expired key, HTTP 401) — won't
+// resolve without an env change. Long backoff to avoid log floods.
+const AUTH_BACKOFF_MS = Number(process.env.SOSOVALUE_AUTH_BACKOFF_MS ?? 6 * 3600_000);
+// 4xx "this path doesn't exist / you can't access it" — cache the negative
+// per-path. A missing ticker doesn't mean other endpoints are broken.
+const NOT_FOUND_TTL_MS = Number(process.env.SOSOVALUE_NOT_FOUND_TTL_MS ?? 60 * 60_000);
+
+// Per-path TTL overrides matching the upstream refresh frequency documented
+// at https://sosovalue-1.gitbook.io/sosovalue-api-doc/endpoint-overview.
+// Caching longer than the source refresh is wasteful; caching shorter wastes
+// quota. Patterns are checked against the path prefix (case-insensitive).
+const PATH_TTL_RULES: Array<[RegExp, number]> = [
+  // Real-time refresh upstream → keep cache short (30 s).
+  [/\/currencies\/[^/]+\/klines/i, 30_000],
+  [/\/crypto-stocks\/[^/]+\/klines/i, 30_000],
+  [/\/news(\/(hot|featured|search))?(\?|$)/i, 30_000],
+  // 30 s upstream → 60 s client cache (one-tick safety).
+  [/\/market-snapshot(\?|$)/i, 60_000],
+  [/\/currencies\/[^/]+\/pairs/i, 60_000],
+  // 5 min upstream → 5 min client cache.
+  [/\/currencies\/[^/]+\/token-economics/i, 300_000],
+  // 5 min upstream for currency details (path is /currencies/{id} with no
+  // suffix). Keep a generous TTL since these rarely change.
+  [/\/currencies\/[^/]+(\?|$)(?!\/)/i, 300_000],
+];
+
+function ttlFor(path: string): number {
+  for (const [re, ttl] of PATH_TTL_RULES) {
+    if (re.test(path)) return ttl;
+  }
+  return CACHE_TTL_MS;
+}
 
 type CacheEntry<T = unknown> = { data: T; expiresAt: number; updatedAt: number };
 
 type RateState = {
   lastRequestAt: number;
   quotaExhaustedUntil: number;
+  rateLimitedUntil: number;
   transientErrorUntil: number;
+  authInvalidUntil: number;
   cache: Map<string, CacheEntry>;
+  notFoundUntil: Map<string, number>;
   inflight: Map<string, Promise<unknown>>;
+  seenWarnings: Set<string>;
 };
 
 const G = globalThis as unknown as { __sosoState?: RateState };
 const state: RateState = (G.__sosoState ??= {
   lastRequestAt: 0,
   quotaExhaustedUntil: 0,
+  rateLimitedUntil: 0,
   transientErrorUntil: 0,
+  authInvalidUntil: 0,
   cache: new Map(),
+  notFoundUntil: new Map(),
   inflight: new Map(),
+  seenWarnings: new Set(),
 });
 
-function isMonthlyQuotaError(msg?: string): boolean {
-  return /monthly quota/i.test(msg ?? "");
+// SoSoValue error codes (per gitbook /error-responses).
+const ERR_RATE_LIMIT = 402901;
+const ERR_INVALID_KEY = 400101;
+const ERR_EXPIRED_KEY = 400102;
+const ERR_FORBIDDEN = 400301;
+const ERR_NOT_FOUND = 400401;
+const ERR_ENDPOINT_NOT_FOUND = 400402;
+
+function isMonthlyQuotaError(code: number | undefined, msg: string | undefined): boolean {
+  // Treat as monthly quota (long backoff) only when the message wording
+  // indicates so. Doc only spec's 402901 generically; SoSoValue uses
+  // "Monthly quota exceeded" wording in practice on the Demo tier.
+  return /monthly|billing|subscription quota/i.test(msg ?? "");
+}
+
+function isRateLimitError(status: number, code: number | undefined): boolean {
+  return status === 429 || code === ERR_RATE_LIMIT;
+}
+
+function isAuthError(status: number, code: number | undefined): boolean {
+  return status === 401 || code === ERR_INVALID_KEY || code === ERR_EXPIRED_KEY;
+}
+
+function isPathBlocked(status: number, code: number | undefined): boolean {
+  return (
+    status === 403 ||
+    status === 404 ||
+    code === ERR_FORBIDDEN ||
+    code === ERR_NOT_FOUND ||
+    code === ERR_ENDPOINT_NOT_FOUND
+  );
 }
 
 function isTransientError(status: number, code?: number): boolean {
   return status >= 500 || (typeof code === "number" && code >= 500000);
+}
+
+function warnOnce(key: string, message: string, ...rest: unknown[]): void {
+  if (state.seenWarnings.has(key)) return;
+  state.seenWarnings.add(key);
+  console.warn(message, ...rest);
 }
 
 function fresh(entry: CacheEntry | undefined): boolean {
@@ -246,13 +332,18 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
   const cached = state.cache.get(path) as CacheEntry<T> | undefined;
   if (fresh(cached)) return cached!.data;
 
-  // Hard backoff: monthly quota exhausted → don't touch the network.
-  if (Date.now() < state.quotaExhaustedUntil) {
-    return cached ? cached.data : fallback();
-  }
-  // Soft backoff: SoSoValue 5xx outage. Same skip-the-network behavior with
-  // a shorter window — the issue typically resolves on its own.
-  if (Date.now() < state.transientErrorUntil) {
+  const now = Date.now();
+
+  // Global hard backoffs: don't touch the network until they expire.
+  if (now < state.authInvalidUntil) return cached ? cached.data : fallback();
+  if (now < state.quotaExhaustedUntil) return cached ? cached.data : fallback();
+  if (now < state.rateLimitedUntil) return cached ? cached.data : fallback();
+  if (now < state.transientErrorUntil) return cached ? cached.data : fallback();
+
+  // Per-path negative cache: this endpoint returned 403/404 recently, no point
+  // burning a 1-req-per-min slot on it. Other paths still go through.
+  const blockedUntil = state.notFoundUntil.get(path);
+  if (blockedUntil && now < blockedUntil) {
     return cached ? cached.data : fallback();
   }
 
@@ -263,7 +354,7 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
   // Rate-limit gate: if we'd violate the 60s gap, return whatever we have
   // (stale cache → synthetic fallback). Don't queue — that would back up
   // requests indefinitely under traffic.
-  const sinceLast = Date.now() - state.lastRequestAt;
+  const sinceLast = now - state.lastRequestAt;
   if (sinceLast < MIN_GAP_MS) {
     if (cached) return cached.data;
     return fallback();
@@ -283,43 +374,93 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
       } catch {
         throw new Error(`SoSoValue ${path} ${res.status} non-JSON: ${text.slice(0, 80)}`);
       }
-      const envelope = body as { code?: number; message?: string; data?: unknown };
-      if (!res.ok || (envelope?.code !== undefined && envelope.code !== 0)) {
-        if (isMonthlyQuotaError(envelope?.message)) {
-          if (state.quotaExhaustedUntil < Date.now()) {
-            console.warn(
-              `[sosovalue] MONTHLY QUOTA EXHAUSTED · backing off ${Math.round(
-                QUOTA_BACKOFF_MS / 3600_000,
-              )}h (serving cached/synthetic data until reset)`,
-            );
+      const envelope = body as {
+        code?: number;
+        message?: string;
+        details?: unknown;
+        data?: unknown;
+      };
+      const code = envelope?.code;
+      const msg = envelope?.message;
+
+      if (!res.ok || (code !== undefined && code !== 0)) {
+        // Surface the `details` field once per (path, code) for 4xx errors
+        // so malformed-param bugs (400001/400002/400003) are debuggable
+        // without flooding the log on every retry.
+        if (typeof code === "number" && code >= 400000 && code < 500000 && envelope.details) {
+          warnOnce(
+            `details:${path}:${code}`,
+            `[sosovalue] ${path} code=${code} details=`,
+            envelope.details,
+          );
+        }
+
+        if (isAuthError(res.status, code)) {
+          warnOnce(
+            "auth",
+            `[sosovalue] AUTH FAILED (${res.status} code=${code} msg=${msg}) · ` +
+              `backing off ${Math.round(AUTH_BACKOFF_MS / 3600_000)}h ` +
+              `(check SOSOVALUE_API_KEY env)`,
+          );
+          state.authInvalidUntil = Date.now() + AUTH_BACKOFF_MS;
+        } else if (isRateLimitError(res.status, code)) {
+          if (isMonthlyQuotaError(code, msg)) {
+            if (state.quotaExhaustedUntil < Date.now()) {
+              console.warn(
+                `[sosovalue] MONTHLY QUOTA EXHAUSTED (code=${code}) · backing off ${Math.round(
+                  QUOTA_BACKOFF_MS / 3600_000,
+                )}h (serving cached/synthetic data until reset)`,
+              );
+            }
+            state.quotaExhaustedUntil = Date.now() + QUOTA_BACKOFF_MS;
+          } else {
+            if (state.rateLimitedUntil < Date.now()) {
+              console.warn(
+                `[sosovalue] RATE LIMITED (${res.status} code=${code}) · ` +
+                  `backing off ${Math.round(RATE_LIMIT_BACKOFF_MS / 60_000)}min`,
+              );
+            }
+            state.rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS;
           }
-          state.quotaExhaustedUntil = Date.now() + QUOTA_BACKOFF_MS;
-        } else if (isTransientError(res.status, envelope?.code)) {
+        } else if (isPathBlocked(res.status, code)) {
+          warnOnce(
+            `blocked:${path}:${code}`,
+            `[sosovalue] PATH BLOCKED ${path} (${res.status} code=${code} msg=${msg}) · ` +
+              `negative-caching ${Math.round(NOT_FOUND_TTL_MS / 60_000)}min`,
+          );
+          state.notFoundUntil.set(path, Date.now() + NOT_FOUND_TTL_MS);
+        } else if (isTransientError(res.status, code)) {
           if (state.transientErrorUntil < Date.now()) {
             console.warn(
-              `[sosovalue] 5xx OUTAGE (${res.status} code=${envelope?.code}) · ` +
+              `[sosovalue] 5xx OUTAGE (${res.status} code=${code}) · ` +
                 `backing off ${Math.round(TRANSIENT_BACKOFF_MS / 60_000)}min ` +
                 `(likely subscription propagation delay or service degradation)`,
             );
           }
           state.transientErrorUntil = Date.now() + TRANSIENT_BACKOFF_MS;
         }
-        throw new Error(
-          `SoSoValue ${path} ${res.status} code=${envelope?.code} msg=${envelope?.message}`,
-        );
+        throw new Error(`SoSoValue ${path} ${res.status} code=${code} msg=${msg}`);
       }
       const data = ("data" in envelope ? envelope.data : body) as T;
       state.cache.set(path, {
         data,
-        expiresAt: Date.now() + CACHE_TTL_MS,
+        // Per-path TTL matches upstream refresh frequency from
+        // /endpoint-overview (klines real-time → 30s, snapshots 30s → 60s
+        // client cache, currency details 5min upstream → 5min, etc).
+        expiresAt: Date.now() + ttlFor(path),
         updatedAt: Date.now(),
       });
       return data;
     } catch (err) {
-      // Stay quiet on every retry once we're in any backoff window.
+      // Stay quiet on every retry once we're in any backoff window — the
+      // root-cause has already been logged once via warnOnce / threshold
+      // checks above.
       const message = (err as Error).message;
       const inBackoff =
-        isMonthlyQuotaError(message) || / 5\d\d /.test(message) || /code=5\d/.test(message);
+        / 4\d\d /.test(message) ||
+        / 5\d\d /.test(message) ||
+        /code=4\d/.test(message) ||
+        /code=5\d/.test(message);
       if (!inBackoff) console.warn("[sosovalue]", message);
       if (cached) return cached.data;
       return fallback();
