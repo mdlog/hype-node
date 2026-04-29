@@ -266,18 +266,40 @@ type RateState = {
   seenWarnings: Set<string>;
 };
 
-const G = globalThis as unknown as { __sosoState?: RateState };
-const state: RateState = (G.__sosoState ??= {
-  lastRequestAt: 0,
-  quotaExhaustedUntil: 0,
-  rateLimitedUntil: 0,
-  transientErrorUntil: 0,
-  authInvalidUntil: 0,
-  cache: new Map(),
-  notFoundUntil: new Map(),
-  inflight: new Map(),
-  seenWarnings: new Set(),
-});
+// Bump this whenever RateState's shape changes so HMR / hot-reload doesn't
+// keep a stale object missing the new fields.
+const STATE_VERSION = 2;
+
+const G = globalThis as unknown as {
+  __sosoState?: RateState;
+  __sosoStateVersion?: number;
+};
+
+function freshState(): RateState {
+  return {
+    lastRequestAt: 0,
+    quotaExhaustedUntil: 0,
+    rateLimitedUntil: 0,
+    transientErrorUntil: 0,
+    authInvalidUntil: 0,
+    cache: new Map(),
+    notFoundUntil: new Map(),
+    inflight: new Map(),
+    seenWarnings: new Set(),
+  };
+}
+
+if (
+  !G.__sosoState ||
+  G.__sosoStateVersion !== STATE_VERSION ||
+  !G.__sosoState.notFoundUntil ||
+  !G.__sosoState.seenWarnings
+) {
+  G.__sosoState = freshState();
+  G.__sosoStateVersion = STATE_VERSION;
+}
+
+const state: RateState = G.__sosoState;
 
 // SoSoValue error codes (per gitbook /error-responses).
 const ERR_RATE_LIMIT = 402901;
