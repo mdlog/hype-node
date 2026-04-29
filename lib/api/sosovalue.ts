@@ -167,12 +167,16 @@ const MIN_GAP_MS = Number(process.env.SOSOVALUE_MIN_GAP_MS ?? 65_000); // 60s + 
 const CACHE_TTL_MS = Number(process.env.SOSOVALUE_CACHE_TTL_MS ?? 15 * 60_000);
 // "Monthly quota exceeded" (code 402901) → back off 6h, not 65s.
 const QUOTA_BACKOFF_MS = Number(process.env.SOSOVALUE_QUOTA_BACKOFF_MS ?? 6 * 3600_000);
+// 5xx outages (e.g. 500 code=500001 during a subscription-tier propagation
+// delay or temporary degradation): back off 5 min instead of hammering.
+const TRANSIENT_BACKOFF_MS = Number(process.env.SOSOVALUE_TRANSIENT_BACKOFF_MS ?? 5 * 60_000);
 
 type CacheEntry<T = unknown> = { data: T; expiresAt: number; updatedAt: number };
 
 type RateState = {
   lastRequestAt: number;
   quotaExhaustedUntil: number;
+  transientErrorUntil: number;
   cache: Map<string, CacheEntry>;
   inflight: Map<string, Promise<unknown>>;
 };
@@ -181,12 +185,17 @@ const G = globalThis as unknown as { __sosoState?: RateState };
 const state: RateState = (G.__sosoState ??= {
   lastRequestAt: 0,
   quotaExhaustedUntil: 0,
+  transientErrorUntil: 0,
   cache: new Map(),
   inflight: new Map(),
 });
 
 function isMonthlyQuotaError(msg?: string): boolean {
   return /monthly quota/i.test(msg ?? "");
+}
+
+function isTransientError(status: number, code?: number): boolean {
+  return status >= 500 || (typeof code === "number" && code >= 500000);
 }
 
 function fresh(entry: CacheEntry | undefined): boolean {
@@ -201,6 +210,11 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
 
   // Hard backoff: monthly quota exhausted → don't touch the network.
   if (Date.now() < state.quotaExhaustedUntil) {
+    return cached ? cached.data : fallback();
+  }
+  // Soft backoff: SoSoValue 5xx outage. Same skip-the-network behavior with
+  // a shorter window — the issue typically resolves on its own.
+  if (Date.now() < state.transientErrorUntil) {
     return cached ? cached.data : fallback();
   }
 
@@ -242,6 +256,15 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
             );
           }
           state.quotaExhaustedUntil = Date.now() + QUOTA_BACKOFF_MS;
+        } else if (isTransientError(res.status, envelope?.code)) {
+          if (state.transientErrorUntil < Date.now()) {
+            console.warn(
+              `[sosovalue] 5xx OUTAGE (${res.status} code=${envelope?.code}) · ` +
+                `backing off ${Math.round(TRANSIENT_BACKOFF_MS / 60_000)}min ` +
+                `(likely subscription propagation delay or service degradation)`,
+            );
+          }
+          state.transientErrorUntil = Date.now() + TRANSIENT_BACKOFF_MS;
         }
         throw new Error(
           `SoSoValue ${path} ${res.status} code=${envelope?.code} msg=${envelope?.message}`,
@@ -255,11 +278,11 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
       });
       return data;
     } catch (err) {
-      // Stay quiet on every retry once we're in monthly-quota backoff.
+      // Stay quiet on every retry once we're in any backoff window.
       const message = (err as Error).message;
-      if (!isMonthlyQuotaError(message)) {
-        console.warn("[sosovalue]", message);
-      }
+      const inBackoff =
+        isMonthlyQuotaError(message) || / 5\d\d /.test(message) || /code=5\d/.test(message);
+      if (!inBackoff) console.warn("[sosovalue]", message);
       if (cached) return cached.data;
       return fallback();
     } finally {

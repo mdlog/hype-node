@@ -41,11 +41,16 @@ CACHE_TTL_SEC = float(os.getenv("SOSOVALUE_CACHE_TTL_SEC", str(15 * 60)))
 # When the API reports "Monthly quota exceeded" (code 402901 + that message),
 # back off for 6h instead of the 65s per-minute gap. Tunable.
 QUOTA_BACKOFF_SEC = float(os.getenv("SOSOVALUE_QUOTA_BACKOFF_SEC", str(6 * 3600)))
+# Server-side 5xx errors (e.g. 500 code=500001) usually mean a SoSoValue
+# outage or a subscription-activation propagation delay. Back off for a
+# short window instead of hammering the gateway with retries.
+TRANSIENT_BACKOFF_SEC = float(os.getenv("SOSOVALUE_TRANSIENT_BACKOFF_SEC", "300"))
 
 _cache: dict[str, tuple[Any, float, float]] = {}  # path → (data, expires_at, updated_at)
 _inflight: dict[str, asyncio.Future[Any]] = {}
 _last_request_at = 0.0
 _quota_exhausted_until = 0.0  # epoch seconds; while > now() we skip the network
+_transient_error_until = 0.0  # 5xx outage backoff (shorter than quota)
 _gate_lock = asyncio.Lock()
 
 
@@ -58,7 +63,7 @@ def _is_monthly_quota_error(msg: str) -> bool:
 
 
 async def _get(path: str) -> Any:
-    global _last_request_at, _quota_exhausted_until
+    global _last_request_at, _quota_exhausted_until, _transient_error_until
 
     if not KEY:
         return None
@@ -69,6 +74,11 @@ async def _get(path: str) -> Any:
 
     # Hard backoff: monthly quota exhausted → don't even try the network.
     if time.time() < _quota_exhausted_until:
+        return cached[0] if cached else None
+
+    # Soft backoff: SoSoValue is having a server-side issue. Skip network
+    # and serve cache/synthetic until the window closes.
+    if time.time() < _transient_error_until:
         return cached[0] if cached else None
 
     if path in _inflight:
@@ -102,7 +112,6 @@ async def _get(path: str) -> Any:
 
         if r.status_code != 200 or (envelope_code is not None and envelope_code != 0):
             if _is_monthly_quota_error(msg):
-                # Don't log this every retry — once is enough.
                 if _quota_exhausted_until < time.time():
                     print(
                         f"[terminal] SoSoValue MONTHLY QUOTA EXHAUSTED · "
@@ -111,6 +120,17 @@ async def _get(path: str) -> Any:
                         f"(serving cached/synthetic data)"
                     )
                 _quota_exhausted_until = time.time() + QUOTA_BACKOFF_SEC
+            elif r.status_code >= 500 or (
+                isinstance(envelope_code, int) and envelope_code >= 500000
+            ):
+                if _transient_error_until < time.time():
+                    print(
+                        f"[terminal] SoSoValue 5xx OUTAGE ({r.status_code} code={envelope_code}) · "
+                        f"backing off {int(TRANSIENT_BACKOFF_SEC / 60)}min until "
+                        f"{time.strftime('%H:%M', time.localtime(time.time() + TRANSIENT_BACKOFF_SEC))} "
+                        f"(likely subscription propagation delay or service degradation)"
+                    )
+                _transient_error_until = time.time() + TRANSIENT_BACKOFF_SEC
             raise RuntimeError(f"{r.status_code} code={envelope_code} msg={msg}")
 
         data = body.get("data", body) if isinstance(body, dict) else body
@@ -118,9 +138,15 @@ async def _get(path: str) -> Any:
         fut.set_result(data)
         return data
     except Exception as exc:  # noqa: BLE001
-        # Suppress per-retry noise once we're in monthly-quota backoff —
-        # otherwise the agent loop fills the log with the same line.
-        if not _is_monthly_quota_error(str(exc)):
+        # Suppress per-retry noise during quota / transient-error backoff —
+        # otherwise the agent loop fills the log with the same line every cycle.
+        msg = str(exc)
+        suppress = (
+            _is_monthly_quota_error(msg)
+            or " 5" in msg  # 5xx
+            or "code=5" in msg
+        )
+        if not suppress:
             print(f"[terminal] {path} failed: {exc}")
         if cached is not None:
             fut.set_result(cached[0])
