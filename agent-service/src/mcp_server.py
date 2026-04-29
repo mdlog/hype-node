@@ -18,13 +18,14 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from .tools import backtest as bt
-from .tools import risk as risk_tool
-from .tools import sodex
-from .tools import ssi
-from .tools import terminal
-
+# Load .env before importing tools. Some tool modules read env at import time.
 load_dotenv()
+
+from .tools import backtest as bt  # noqa: E402
+from .tools import risk as risk_tool  # noqa: E402
+from .tools import sodex  # noqa: E402
+from .tools import ssi  # noqa: E402
+from .tools import terminal  # noqa: E402
 
 server = Server("hypenode")
 

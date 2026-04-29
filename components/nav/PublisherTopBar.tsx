@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { tokens } from "@/lib/tokens";
 import { Mono } from "@/components/ui/Mono";
+import { WalletBadge } from "@/components/auth/WalletBadge";
 
 const items = [
   { k: "radar", l: "Hype Radar" },
@@ -148,20 +149,7 @@ export function PublisherTopBar() {
           </div>
           <Mono size={9}>30d earnings</Mono>
         </div>
-        <div
-          className="flex items-center justify-center"
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: "50%",
-            background: `linear-gradient(135deg, #a78bfa, ${tokens.cyan})`,
-            fontSize: 12,
-            fontWeight: 700,
-            color: tokens.bg,
-          }}
-        >
-          K
-        </div>
+        <WalletBadge />
         <Link
           href="/dashboard"
           style={{

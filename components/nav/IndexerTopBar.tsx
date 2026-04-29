@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { tokens } from "@/lib/tokens";
 import { Mono } from "@/components/ui/Mono";
+import { WalletBadge } from "@/components/auth/WalletBadge";
 
 const items = [
   { k: "dashboard", l: "Dashboard" },
@@ -122,21 +123,7 @@ export function IndexerTopBar() {
           </Mono>
         </div>
         <Mono size={10}>⌘K</Mono>
-        <div
-          className="flex items-center justify-center"
-          style={{
-            width: 26,
-            height: 26,
-            borderRadius: "50%",
-            background: tokens.bgElev2,
-            border: `1px solid ${tokens.border}`,
-            fontSize: 11,
-            fontWeight: 600,
-            color: tokens.text,
-          }}
-        >
-          A
-        </div>
+        <WalletBadge />
         <Link
           href="/publisher/radar"
           style={{

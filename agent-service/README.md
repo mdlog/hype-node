@@ -32,6 +32,11 @@ python -m src.main    # serves http://localhost:8001
 The frontend reads `AGENT_SERVICE_URL` to find this service. Without keys, every
 tool returns deterministic synthetic data so the UI works offline.
 
+Useful local diagnostics:
+
+- `GET /health` — FastAPI process health
+- `GET /terminal/status` — non-secret SoSoValue cache, backoff, and last-error state
+
 ## MCP
 
 Run the MCP server independently for Claude Desktop / external clients:

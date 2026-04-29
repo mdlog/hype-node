@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
 
 :root {
   color-scheme: dark;
@@ -55,6 +55,26 @@ button {
   }
 }
 
+/* Loading skeleton + spinner used by app/(indexer)/loading.tsx and
+   app/publisher/loading.tsx so navigation feels instant. */
+@keyframes hype-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes hype-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.hype-skeleton {
+  animation: hype-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
 .ambient-glow::before {
   content: "";
   position: absolute;
@@ -65,4 +85,144 @@ button {
   background: radial-gradient(circle, rgba(16, 185, 129, 0.08) 0%, transparent 70%);
   pointer-events: none;
   z-index: 0;
+}
+
+/* === Landing page === */
+@keyframes hype-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.hype-pulse {
+  animation: hype-pulse 1.4s ease-in-out infinite;
+}
+
+.hype-hero-glow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(800px 400px at 15% 0%, rgba(16, 185, 129, 0.1), transparent 60%),
+    radial-gradient(800px 500px at 85% 20%, rgba(34, 211, 238, 0.06), transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+.hype-hero-grid::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(28, 35, 44, 0.4) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(28, 35, 44, 0.4) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse 1000px 600px at 50% 30%, #000 30%, transparent 80%);
+          mask-image: radial-gradient(ellipse 1000px 600px at 50% 30%, #000 30%, transparent 80%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hype-title-grad {
+  background: linear-gradient(180deg, #fff 60%, #c2c8d3 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+.hype-accent-grad {
+  background: linear-gradient(90deg, #10b981 0%, #22d3ee 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+.hype-num-grad {
+  background: linear-gradient(180deg, #fff, #b8c0cc);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+
+.hype-nav {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  background: rgba(5, 7, 10, 0.72);
+}
+
+.hype-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid #2a3340;
+  background: transparent;
+  color: #e6eaf0;
+  transition: all 0.15s;
+  line-height: 1.2;
+}
+.hype-btn:hover {
+  border-color: #3a4554;
+  background: #0f141b;
+}
+.hype-btn.lg {
+  padding: 12px 20px;
+  font-size: 14px;
+}
+.hype-btn.ghost {
+  border-color: transparent;
+  color: #9aa4b2;
+}
+.hype-btn.ghost:hover {
+  color: #e6eaf0;
+  background: transparent;
+}
+.hype-btn.primary {
+  background: #10b981;
+  color: #05070a;
+  border-color: #10b981;
+}
+.hype-btn.primary:hover {
+  background: #14c98e;
+  box-shadow: 0 0 24px rgba(16, 185, 129, 0.4);
+}
+.hype-btn.amber {
+  background: #f59e0b;
+  color: #05070a;
+  border-color: #f59e0b;
+}
+.hype-btn.amber:hover {
+  background: #ffb02e;
+  box-shadow: 0 0 24px rgba(245, 158, 11, 0.4);
+}
+
+.hype-product-card {
+  transition: all 0.25s;
+}
+.hype-product-card:hover {
+  border-color: #2a3340 !important;
+  transform: translateY(-2px);
+}
+
+.hype-nav-link {
+  font-size: 13.5px;
+  color: #9aa4b2;
+  transition: color 0.15s;
+}
+.hype-nav-link:hover {
+  color: #e6eaf0;
+}
+
+.hype-stage:not(:last-child)::after {
+  content: "→";
+  position: absolute;
+  right: -10px;
+  top: 24px;
+  color: #2a3340;
+  font-size: 24px;
+  font-weight: 300;
 }

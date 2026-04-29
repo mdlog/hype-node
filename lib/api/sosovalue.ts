@@ -385,9 +385,15 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
   const promise = (async (): Promise<T> => {
     state.lastRequestAt = Date.now();
     try {
+      // Hard timeout so a slow / hanging upstream never blocks page render.
+      // The catch path treats a timeout as a transient error → 5min backoff,
+      // so subsequent requests serve cached/synthetic instantly.
       const res = await fetch(`${BASE}${path}`, {
         headers: { "x-soso-api-key": KEY, accept: "application/json" },
         cache: "no-store",
+        signal: AbortSignal.timeout(
+          Number(process.env.SOSOVALUE_FETCH_TIMEOUT_MS ?? 5_000),
+        ),
       });
       const text = await res.text();
       let body: unknown;

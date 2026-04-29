@@ -17,11 +17,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .graph import GRAPH, HypeState
-from .state import AgentNode, AgentState, ChatRequest, ChatTurn, ReasoningEntry
-from .tools import terminal
-
+# Load .env before importing the graph/tools. terminal.py reads its SoSoValue
+# settings at import time, so late dotenv loading can leave it with stale env.
 load_dotenv()
+
+from .graph import GRAPH, HypeState  # noqa: E402
+from .state import AgentNode, AgentState, ChatRequest, ChatTurn, ReasoningEntry  # noqa: E402
+from .tools import terminal  # noqa: E402
 
 
 @asynccontextmanager
@@ -90,11 +92,9 @@ def _build_state_response() -> AgentState:
 async def _runner() -> None:
     """Background task that drives the LangGraph loop on a cadence.
 
-    Cadence accounts for the SoSoValue Demo tier (1 req/min). The graph itself
-    hits at most one *fresh* SoSoValue endpoint per cycle thanks to the 15-min
-    in-memory cache in tools/terminal.py — everything else returns cached or
-    stale data without burning a token. We sleep 120s between cycles so the
-    rate gate never blocks the next call when we genuinely need fresh data.
+    Cadence is controlled by AGENT_LOOP_SEC, while SoSoValue request pacing and
+    cache TTLs are controlled by SOSOVALUE_* env vars. Demo-tier deployments
+    should use a much slower loop and longer cache than paid-tier/dev setups.
     """
     global TOOL_CALLS, DECISIONS, GAS_VAL
     sectors_cycle = ["DePIN", "RWA", "AI", "Memes", "GameFi"]  # rotates through SSI indices
@@ -121,7 +121,7 @@ async def _runner() -> None:
                     text=f"loop crash · {exc}",
                 )
             )
-        # 120s = two SoSoValue token windows. Override with AGENT_LOOP_SEC.
+        # Override with AGENT_LOOP_SEC. Demo tier should usually be >=120s.
         await asyncio.sleep(int(os.getenv("AGENT_LOOP_SEC", "120")))
 
 
@@ -203,6 +203,11 @@ async def fund_flow(sector: str = "DePIN", window: str = "24h") -> dict[str, Any
 @app.get("/terminal/news")
 async def news(sector: str = "DePIN", limit: int = 10) -> list[dict[str, Any]]:
     return await terminal.get_news(sector, limit)
+
+
+@app.get("/terminal/status")
+async def terminal_status() -> dict[str, Any]:
+    return terminal.status()
 
 
 if __name__ == "__main__":

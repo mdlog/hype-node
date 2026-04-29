@@ -51,6 +51,8 @@ _inflight: dict[str, asyncio.Future[Any]] = {}
 _last_request_at = 0.0
 _quota_exhausted_until = 0.0  # epoch seconds; while > now() we skip the network
 _transient_error_until = 0.0  # 5xx outage backoff (shorter than quota)
+_last_success: dict[str, Any] | None = None
+_last_error: dict[str, Any] | None = None
 _gate_lock = asyncio.Lock()
 
 
@@ -62,8 +64,70 @@ def _is_monthly_quota_error(msg: str) -> bool:
     return "monthly quota" in (msg or "").lower()
 
 
+def _seconds_until(ts: float) -> int:
+    return max(0, int(ts - time.time()))
+
+
+def _iso_from_epoch(ts: float | None) -> str | None:
+    if not ts:
+        return None
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+
+def _record_error(
+    *,
+    path: str,
+    status_code: int,
+    code: int | None,
+    message: str,
+    backoff_until: float | None,
+) -> None:
+    global _last_error
+    _last_error = {
+        "path": path,
+        "status_code": status_code,
+        "code": code,
+        "message": message,
+        "at": _iso_from_epoch(time.time()),
+        "backoff_until": _iso_from_epoch(backoff_until),
+    }
+
+
+def status() -> dict[str, Any]:
+    """Return non-secret SoSoValue transport diagnostics for /terminal/status."""
+
+    now = time.time()
+    cache = []
+    for path, (_data, expires_at, updated_at) in sorted(_cache.items()):
+        cache.append(
+            {
+                "path": path,
+                "fresh": expires_at > now,
+                "age_sec": max(0, int(now - updated_at)),
+                "expires_in_sec": _seconds_until(expires_at),
+            }
+        )
+    return {
+        "base": BASE,
+        "has_api_key": bool(KEY),
+        "min_gap_sec": MIN_GAP_SEC,
+        "cache_ttl_sec": CACHE_TTL_SEC,
+        "quota_backoff_sec": QUOTA_BACKOFF_SEC,
+        "transient_backoff_sec": TRANSIENT_BACKOFF_SEC,
+        "last_request_at": _iso_from_epoch(_last_request_at),
+        "backoff": {
+            "quota_exhausted_for_sec": _seconds_until(_quota_exhausted_until),
+            "transient_error_for_sec": _seconds_until(_transient_error_until),
+        },
+        "last_success": _last_success,
+        "last_error": _last_error,
+        "cache": cache,
+        "inflight": sorted(_inflight.keys()),
+    }
+
+
 async def _get(path: str) -> Any:
-    global _last_request_at, _quota_exhausted_until, _transient_error_until
+    global _last_request_at, _quota_exhausted_until, _transient_error_until, _last_success
 
     if not KEY:
         return None
@@ -120,6 +184,13 @@ async def _get(path: str) -> Any:
                         f"(serving cached/synthetic data)"
                     )
                 _quota_exhausted_until = time.time() + QUOTA_BACKOFF_SEC
+                _record_error(
+                    path=path,
+                    status_code=r.status_code,
+                    code=envelope_code if isinstance(envelope_code, int) else None,
+                    message=msg,
+                    backoff_until=_quota_exhausted_until,
+                )
             elif r.status_code >= 500 or (
                 isinstance(envelope_code, int) and envelope_code >= 500000
             ):
@@ -131,10 +202,26 @@ async def _get(path: str) -> Any:
                         f"(likely subscription propagation delay or service degradation)"
                     )
                 _transient_error_until = time.time() + TRANSIENT_BACKOFF_SEC
+                _record_error(
+                    path=path,
+                    status_code=r.status_code,
+                    code=envelope_code if isinstance(envelope_code, int) else None,
+                    message=msg,
+                    backoff_until=_transient_error_until,
+                )
+            else:
+                _record_error(
+                    path=path,
+                    status_code=r.status_code,
+                    code=envelope_code if isinstance(envelope_code, int) else None,
+                    message=msg,
+                    backoff_until=None,
+                )
             raise RuntimeError(f"{r.status_code} code={envelope_code} msg={msg}")
 
         data = body.get("data", body) if isinstance(body, dict) else body
         _cache[path] = (data, time.time() + CACHE_TTL_SEC, time.time())
+        _last_success = {"path": path, "at": _iso_from_epoch(time.time())}
         fut.set_result(data)
         return data
     except Exception as exc:  # noqa: BLE001
