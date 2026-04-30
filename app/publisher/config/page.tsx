@@ -3,6 +3,7 @@
 import { Card, Mono, Tag, Toggle } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { useEffect, useState } from "react";
+import { CreatorIdentityCard } from "@/components/auth/CreatorIdentityCard";
 
 const SSI_DISPLAY: Record<string, { label: string; flag: "hot" | "new" | null }> = {
   ssiDePIN: { label: "DePIN", flag: "hot" },
@@ -205,45 +206,7 @@ export default function ConfigPage() {
         </Card>
 
         <div className="flex flex-col gap-3">
-          <Card pad={16}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Creator identity</div>
-            <div className="flex items-center gap-3 mb-2.5">
-              <div
-                className="flex items-center justify-center"
-                style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: "50%",
-                  background: `linear-gradient(135deg, #a78bfa, ${tokens.cyan})`,
-                  fontSize: 16,
-                  fontWeight: 700,
-                  color: tokens.bg,
-                }}
-              >
-                K
-              </div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>@kartika.eth</div>
-                <Mono size={10}>publisher #0x4f…a21 · joined Aug 2024</Mono>
-              </div>
-            </div>
-            {[
-              ["Display name", "Kartika"],
-              ["Bio tag", "DePIN + RWA thesis"],
-              ["Auto-publish", "Off · approval required"],
-            ].map(([k, v]) => (
-              <div
-                key={k}
-                className="flex justify-between"
-                style={{ padding: "6px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}
-              >
-                <Mono size={10}>{k}</Mono>
-                <Mono size={11} color={tokens.text}>
-                  {v}
-                </Mono>
-              </div>
-            ))}
-          </Card>
+          <CreatorIdentityCard />
 
           <Card pad={16}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Agent behavior</div>
