@@ -29,27 +29,14 @@ export function PublisherTopBar() {
       }}
     >
       <Link href="/publisher/radar" className="flex items-center gap-2.5">
-        <div
-          className="flex items-center justify-center"
-          style={{
-            width: 26,
-            height: 26,
-            borderRadius: 6,
-            background: `linear-gradient(135deg, ${tokens.emerald}, ${tokens.emeraldDim})`,
-            boxShadow: `0 0 16px ${tokens.emerald}50`,
-          }}
-        >
-          <svg width={14} height={14} viewBox="0 0 12 12">
-            <path
-              d="M 1 10 L 4 4 L 7 7 L 11 2"
-              fill="none"
-              stroke={tokens.bg}
-              strokeWidth={1.8}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo-hypenode.png"
+          alt="HypeNode"
+          width={40}
+          height={40}
+          style={{ display: "block" }}
+        />
         <div>
           <div
             style={{
@@ -136,19 +123,10 @@ export function PublisherTopBar() {
             AGENT ON
           </Mono>
         </div>
-        <div className="text-right">
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              color: tokens.text,
-              lineHeight: 1,
-            }}
-          >
-            $847.22
-          </div>
-          <Mono size={9}>30d earnings</Mono>
-        </div>
+        {/* The fake "$847.22 · 30d earnings" line was removed: we don't have
+            an on-chain earnings indexer yet, so the real number is "—".
+            WalletBadge below shows the actual wallet identity, and the
+            earnings page surfaces the honest empty state. */}
         <WalletBadge />
         <Link
           href="/dashboard"
