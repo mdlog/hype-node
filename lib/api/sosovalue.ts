@@ -571,32 +571,15 @@ export async function getNewsRaw(
   sp.set("page_size", String(opts.pageSize ?? 20));
   if (opts.startTime) sp.set("start_time", String(opts.startTime));
   if (opts.endTime) sp.set("end_time", String(opts.endTime));
+  // Synthetic fallback returns an EMPTY list — never a fake title that looks
+  // like real news. UIs should detect `total === 0` and render an empty state
+  // ("No news from SoSoValue right now") instead of misleading placeholder
+  // headlines like the old "Filecoin storage demand jumps 38% QoQ" mock.
   return request<NewsResponse>(`/news?${sp}`, () => ({
     page: 1,
-    page_size: 20,
-    total: 2,
-    list: [
-      {
-        id: "n1",
-        title: "Filecoin storage demand jumps 38% QoQ, enterprise contracts expand",
-        content: "",
-        release_time: Date.now() - 2 * 60_000,
-        author: "Messari",
-        source_link: "https://messari.io",
-        matched_currencies: [{ id: "fil", full_name: "Filecoin", name: "FIL" }],
-        tags: ["DePIN", "storage"],
-      },
-      {
-        id: "n2",
-        title: "Helium network passes 1M devices",
-        content: "",
-        release_time: Date.now() - 8 * 60_000,
-        author: "The Block",
-        source_link: "https://theblock.co",
-        matched_currencies: [{ id: "hnt", full_name: "Helium", name: "HNT" }],
-        tags: ["DePIN"],
-      },
-    ],
+    page_size: 0,
+    total: 0,
+    list: [],
   }));
 }
 

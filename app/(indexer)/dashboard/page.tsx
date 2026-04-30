@@ -77,7 +77,9 @@ export default async function DashboardPage() {
   const sectorsLive = sectors.length > 8;
   const ssiLive = ssiTickers.length >= 13;
   const featuredLive = featuredSnap.price !== 1.182 || featuredKlines.length !== 90;
-  const newsLive = news.length > 0 && !news[0]?.id?.startsWith("n");
+  // Synthetic fallback now returns an empty array (no more fake "n1/n2"
+  // titles), so a non-empty list IS the real-data signal.
+  const newsLive = news.length > 0;
 
   const sectorsRanked = [...sectors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
   const topSector = sectorsRanked[0];
@@ -278,46 +280,70 @@ export default async function DashboardPage() {
           >
             <div style={{ fontSize: 14, fontWeight: 600 }}>News stream</div>
             <Tag small color={newsLive ? tokens.emerald : tokens.textFaint} dot>
-              {newsLive ? "live · /news" : "fallback"}
+              {newsLive ? "live · /news" : "no data"}
             </Tag>
           </div>
-          <div style={{ padding: "6px 0", overflowY: "auto", maxHeight: 290 }}>
-            {news.map((n, i) => (
-              <div
-                key={i}
-                className="flex gap-2.5 items-start"
-                style={{ padding: "8px 16px", borderBottom: `1px solid ${tokens.borderFaint}` }}
-              >
-                <Mono size={10} color={tokens.textFaint} style={{ minWidth: 30, paddingTop: 2 }}>
-                  {fmtRelative(n.ts)}
+          {news.length === 0 ? (
+            // Honest empty state. The synthetic news fallback in
+            // lib/api/sosovalue.ts is now an empty list, so this branch
+            // fires whenever SoSoValue is unavailable / rate-limited /
+            // returns no articles — instead of fake titles like the old
+            // "Filecoin storage demand jumps 38% QoQ" placeholder.
+            <div
+              className="flex items-center justify-center text-center"
+              style={{
+                height: 240,
+                padding: 16,
+                color: tokens.textFaint,
+              }}
+            >
+              <div className="flex flex-col items-center gap-2" style={{ maxWidth: 240 }}>
+                <Mono size={11}>No news from /news right now</Mono>
+                <Mono size={9} color={tokens.textFaint}>
+                  upstream returned 0 articles · headlines populate from the
+                  live SoSoValue feed when available
                 </Mono>
-                <Tag
-                  small
-                  color={
-                    n.importance === "high"
-                      ? tokens.red
-                      : n.importance === "med"
-                        ? tokens.amber
-                        : tokens.textDim
-                  }
-                  style={{ minWidth: 40, justifyContent: "center" }}
-                >
-                  {n.sector || "—"}
-                </Tag>
-                <div className="flex-1">
-                  <div
-                    style={{ fontSize: 12, color: tokens.text, fontWeight: 500, lineHeight: 1.4 }}
-                  >
-                    {n.title}
-                  </div>
-                  <Mono size={10}>
-                    {n.source} · score {n.sentiment >= 0 ? "+" : ""}
-                    {n.sentiment}
-                  </Mono>
-                </div>
               </div>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <div style={{ padding: "6px 0", overflowY: "auto", maxHeight: 290 }}>
+              {news.map((n, i) => (
+                <div
+                  key={i}
+                  className="flex gap-2.5 items-start"
+                  style={{ padding: "8px 16px", borderBottom: `1px solid ${tokens.borderFaint}` }}
+                >
+                  <Mono size={10} color={tokens.textFaint} style={{ minWidth: 30, paddingTop: 2 }}>
+                    {fmtRelative(n.ts)}
+                  </Mono>
+                  <Tag
+                    small
+                    color={
+                      n.importance === "high"
+                        ? tokens.red
+                        : n.importance === "med"
+                          ? tokens.amber
+                          : tokens.textDim
+                    }
+                    style={{ minWidth: 40, justifyContent: "center" }}
+                  >
+                    {n.sector || "—"}
+                  </Tag>
+                  <div className="flex-1">
+                    <div
+                      style={{ fontSize: 12, color: tokens.text, fontWeight: 500, lineHeight: 1.4 }}
+                    >
+                      {n.title}
+                    </div>
+                    <Mono size={10}>
+                      {n.source} · score {n.sentiment >= 0 ? "+" : ""}
+                      {n.sentiment}
+                    </Mono>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       </div>
 
