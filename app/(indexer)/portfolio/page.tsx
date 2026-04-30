@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Card, Label, Metric, Mono, Tag, Btn, LineChart } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import {
@@ -10,6 +11,17 @@ import { closesFromKlines, computeMetrics } from "@/lib/metrics";
 export const revalidate = 60;
 
 const FEATURED = "ssiDePIN";
+
+// 1D / 1W / 1M / 3M / ALL → number of trailing klines to render.
+// 90 is the upstream cap on /indices/{ticker}/klines so 3M ≈ ALL.
+const PERIOD_DAYS: Record<string, number> = {
+  "1D": 1,
+  "1W": 7,
+  "1M": 30,
+  "3M": 90,
+  ALL: 90,
+};
+const PERIOD_LABELS = ["1D", "1W", "1M", "3M", "ALL"] as const;
 
 const PALETTE = [
   tokens.emerald,
@@ -47,7 +59,11 @@ function fmtPrice(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-export default async function PortfolioPage() {
+export default async function PortfolioPage({
+  searchParams,
+}: {
+  searchParams?: { period?: string };
+}) {
   // 100% SoSoValue. ssiDePIN as the canonical "HYPE-DEPIN-8" basket.
   const [constituents, snapshot, klines] = await Promise.all([
     getSsiConstituents(FEATURED),
@@ -55,7 +71,11 @@ export default async function PortfolioPage() {
     getSsiKlines(FEATURED, { limit: 90 }),
   ]);
 
-  const closes = closesFromKlines(klines);
+  const periodKey = (searchParams?.period ?? "1M").toUpperCase();
+  const periodDays = PERIOD_DAYS[periodKey] ?? 30;
+  // Slice client-side so switching periods costs zero requests.
+  const slicedKlines = klines.slice(-periodDays);
+  const closes = closesFromKlines(slicedKlines);
   const metrics = computeMetrics(closes);
 
   const composition: [string, number, string][] = constituents
@@ -144,23 +164,28 @@ export default async function PortfolioPage() {
                 </div>
               </div>
               <div className="flex gap-1">
-                {["1D", "1W", "1M", "3M", "ALL"].map((t, i) => (
-                  <div
-                    key={t}
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 4,
-                      background: i === 3 ? tokens.bgElev2 : "transparent",
-                      border: `1px solid ${i === 3 ? tokens.borderStrong : "transparent"}`,
-                      fontFamily: "JetBrains Mono, monospace",
-                      fontSize: 10,
-                      color: i === 3 ? tokens.text : tokens.textDim,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {t}
-                  </div>
-                ))}
+                {PERIOD_LABELS.map((t) => {
+                  const on = t === periodKey;
+                  return (
+                    <Link
+                      key={t}
+                      href={`/portfolio?period=${t}`}
+                      scroll={false}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 4,
+                        background: on ? tokens.bgElev2 : "transparent",
+                        border: `1px solid ${on ? tokens.borderStrong : "transparent"}`,
+                        fontFamily: "JetBrains Mono, monospace",
+                        fontSize: 10,
+                        color: on ? tokens.text : tokens.textDim,
+                        textDecoration: "none",
+                      }}
+                    >
+                      {t}
+                    </Link>
+                  );
+                })}
               </div>
             </div>
             <LineChart

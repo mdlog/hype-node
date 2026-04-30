@@ -64,11 +64,19 @@ function fmtRelative(iso: string): string {
   return `${Math.round(h / 24)}d`;
 }
 
+// Period filter for the NAV chart. We always fetch the full 90-day window
+// from /klines (3-month cap is the upstream max anyway), then slice it
+// client-side per-period — that way switching periods costs zero requests.
+const PERIOD_DAYS: Record<string, number> = { "1D": 1, "1W": 7, "1M": 30, "3M": 90 };
+const PERIOD_LABELS = ["1D", "1W", "1M", "3M"] as const;
+
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams?: { featured?: string };
+  searchParams?: { featured?: string; period?: string };
 }) {
+  const periodKey = (searchParams?.period ?? "3M").toUpperCase();
+  const periodDays = PERIOD_DAYS[periodKey] ?? 90;
   // First fetch what's free / shared — sector spotlight + SSI registry +
   // news. Then fan out across ALL 13 SSI tickers for snapshots so we can
   // show every sector's 24h % side-by-side. The rate-limited transport
@@ -127,8 +135,12 @@ export default async function DashboardPage({
       : 0;
   const positiveCount = validChanges.filter((n) => n > 0).length;
 
-  const navData = featuredKlines.map((k) => k.close);
-  const benchSnap = featuredKlines.map((k) => (k.high + k.low) / 2);
+  // Slice klines to the selected window. -periodDays takes the last N rows;
+  // -1 (1D) gives a degenerate 1-point series we still render but mostly
+  // useful as a visual confirmation of "you picked 1D".
+  const slicedKlines = featuredKlines.slice(-periodDays);
+  const navData = slicedKlines.map((k) => k.close);
+  const benchSnap = slicedKlines.map((k) => (k.high + k.low) / 2);
 
   const featured = SSI_DISPLAY[FEATURED] ?? { name: FEATURED, symbol: FEATURED, tag: "—" };
   const top = sortedByChange[0];
@@ -292,29 +304,40 @@ export default async function DashboardPage({
         <Card pad={16}>
           <div className="flex justify-between mb-3">
             <div>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>{featured.name} · NAV (90d)</div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>
+                {featured.name} · NAV ({periodKey})
+              </div>
               <Mono size={10}>
                 SoSoValue · GET /indices/{FEATURED}/klines{featuredLive ? "" : " · synthetic"}
               </Mono>
             </div>
             <div className="flex gap-1">
-              {["1D", "1W", "1M", "3M"].map((t, i) => (
-                <div
-                  key={t}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: 4,
-                    background: i === 3 ? tokens.bgElev2 : "transparent",
-                    border: `1px solid ${i === 3 ? tokens.borderStrong : "transparent"}`,
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 10,
-                    color: i === 3 ? tokens.text : tokens.textDim,
-                    cursor: "pointer",
-                  }}
-                >
-                  {t}
-                </div>
-              ))}
+              {PERIOD_LABELS.map((t) => {
+                const on = t === periodKey;
+                // Preserve the current ?featured= when switching period.
+                const params = new URLSearchParams();
+                params.set("period", t);
+                if (FEATURED && FEATURED !== DEFAULT_FEATURED) params.set("featured", FEATURED);
+                return (
+                  <Link
+                    key={t}
+                    href={`/dashboard?${params}`}
+                    scroll={false}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 4,
+                      background: on ? tokens.bgElev2 : "transparent",
+                      border: `1px solid ${on ? tokens.borderStrong : "transparent"}`,
+                      fontFamily: "JetBrains Mono, monospace",
+                      fontSize: 10,
+                      color: on ? tokens.text : tokens.textDim,
+                      textDecoration: "none",
+                    }}
+                  >
+                    {t}
+                  </Link>
+                );
+              })}
             </div>
           </div>
           {navData.length > 0 ? (
