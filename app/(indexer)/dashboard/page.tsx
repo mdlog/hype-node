@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Card, Label, Metric, Mono, Tag, Btn, Spark, LineChart } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import {
@@ -7,12 +8,15 @@ import {
   getSsiKlines,
   getSsiConstituents,
   getNews,
+  type SsiSnapshot,
 } from "@/lib/api/sosovalue";
 import { DataSourceBanner } from "@/components/live/DataSourceBanner";
 
 export const revalidate = 60;
 
-const FEATURED = "ssiDePIN";
+// Default focused ticker. Can be overridden via ?featured=ssiAI etc — the
+// chip strip below the KPI row swaps the URL on click.
+const DEFAULT_FEATURED = "ssiDePIN";
 
 const SSI_DISPLAY: Record<string, { name: string; symbol: string; tag: string }> = {
   ssiDePIN: { name: "DePIN Index", symbol: "DEPIN", tag: "DePIN" },
@@ -60,34 +64,78 @@ function fmtRelative(iso: string): string {
   return `${Math.round(h / 24)}d`;
 }
 
-export default async function DashboardPage() {
-  // 100% SoSoValue-sourced. Each call goes through the rate-limit-aware
-  // singleton in lib/api/sosovalue.ts (65s gap, 15-min cache, 6h backoff on
-  // monthly-quota error). All synthetic fallbacks match the live response
-  // shape so the UI is identical regardless of quota status.
-  const [sectors, ssiTickers, featuredSnap, featuredKlines, featuredCons, news] = await Promise.all([
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams?: { featured?: string };
+}) {
+  // First fetch what's free / shared — sector spotlight + SSI registry +
+  // news. Then fan out across ALL 13 SSI tickers for snapshots so we can
+  // show every sector's 24h % side-by-side. The rate-limited transport
+  // serializes / dedups, and on the High Frequency tier 13 sequential
+  // calls cost ~9s cold and ~0s once cached.
+  const [sectors, ssiTickers, news] = await Promise.all([
     getSectorScores(),
     listSsiTickers(),
-    getSsiSnapshot(FEATURED),
-    getSsiKlines(FEATURED, { limit: 90 }),
-    getSsiConstituents(FEATURED),
     getNews({ limit: 8 }),
   ]);
+
+  const allSnaps: { ticker: string; snap: SsiSnapshot }[] = await Promise.all(
+    ssiTickers.map(async (t) => ({ ticker: t, snap: await getSsiSnapshot(t) })),
+  );
+
+  // Pick which SSI ticker the chart + headline KPIs focus on. Priority:
+  //   1. ?featured= URL param if it's a known ticker
+  //   2. Top performer by 24h change
+  //   3. DEFAULT_FEATURED fallback
+  const requested = searchParams?.featured;
+  const known = new Set(ssiTickers);
+  const sortedByChange = [...allSnaps].sort(
+    (a, b) => (b.snap.change_pct_24h ?? 0) - (a.snap.change_pct_24h ?? 0),
+  );
+  const topSsi = sortedByChange[0]?.ticker;
+  const FEATURED =
+    requested && known.has(requested)
+      ? requested
+      : topSsi ?? DEFAULT_FEATURED;
+
+  // Per-featured calls. Constituents and klines aren't pre-fetched in the
+  // big snapshot fan-out because we only need them for the focused index.
+  const [featuredKlines, featuredCons] = await Promise.all([
+    getSsiKlines(FEATURED, { limit: 90 }),
+    getSsiConstituents(FEATURED),
+  ]);
+  const featuredSnap =
+    allSnaps.find((s) => s.ticker === FEATURED)?.snap ??
+    (await getSsiSnapshot(FEATURED));
 
   const sectorsLive = sectors.length > 8;
   const ssiLive = ssiTickers.length >= 13;
   const featuredLive = featuredSnap.price !== 1.182 || featuredKlines.length !== 90;
-  // Synthetic fallback now returns an empty array (no more fake "n1/n2"
-  // titles), so a non-empty list IS the real-data signal.
   const newsLive = news.length > 0;
 
   const sectorsRanked = [...sectors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
   const topSector = sectorsRanked[0];
 
+  // Aggregate stats across ALL 13 SSI — not just DePIN. Real numbers.
+  const validChanges = allSnaps
+    .map((s) => s.snap.change_pct_24h)
+    .filter((n) => Number.isFinite(n));
+  const avg24h =
+    validChanges.length > 0
+      ? validChanges.reduce((a, b) => a + b, 0) / validChanges.length
+      : 0;
+  const positiveCount = validChanges.filter((n) => n > 0).length;
+
   const navData = featuredKlines.map((k) => k.close);
   const benchSnap = featuredKlines.map((k) => (k.high + k.low) / 2);
 
   const featured = SSI_DISPLAY[FEATURED] ?? { name: FEATURED, symbol: FEATURED, tag: "—" };
+  const top = sortedByChange[0];
+  const worst = sortedByChange[sortedByChange.length - 1];
+  const topDisplay = top ? SSI_DISPLAY[top.ticker] : null;
+  const worstDisplay = worst ? SSI_DISPLAY[worst.ticker] : null;
+
   const kpis = [
     {
       k: `${featured.symbol} · NAV`,
@@ -97,27 +145,24 @@ export default async function DashboardPage() {
       data: navData.slice(-30),
     },
     {
-      k: `${featured.symbol} · YTD`,
-      v: pct(featuredSnap.ytd),
-      d: `1y ${pct(featuredSnap.roi_1y)} · 1m ${pct(featuredSnap.roi_1m)}`,
-      c: featuredSnap.ytd >= 0 ? tokens.emerald : tokens.red,
+      k: "TOP SSI (24H)",
+      v: topDisplay?.symbol ?? top?.ticker ?? "—",
+      d: pct(top?.snap.change_pct_24h ?? 0),
+      c: (top?.snap.change_pct_24h ?? 0) >= 0 ? tokens.emerald : tokens.red,
       data: null as number[] | null,
     },
     {
-      k: "TOP SECTOR (24H)",
-      v: topSector?.sector ?? "—",
-      d: `score ${topSector?.score ?? 0} · Δ${topSector?.delta ?? 0}`,
-      c: (topSector?.delta ?? 0) >= 0 ? tokens.emerald : tokens.red,
+      k: "WORST SSI (24H)",
+      v: worstDisplay?.symbol ?? worst?.ticker ?? "—",
+      d: pct(worst?.snap.change_pct_24h ?? 0),
+      c: (worst?.snap.change_pct_24h ?? 0) >= 0 ? tokens.emerald : tokens.red,
       data: null as number[] | null,
     },
     {
-      k: "SSI INDICES",
-      v: String(ssiTickers.length).padStart(2, "0"),
-      d: ssiTickers
-        .slice(0, 4)
-        .map((t) => SSI_DISPLAY[t]?.symbol ?? t)
-        .join(" · "),
-      c: ssiLive ? tokens.cyan : tokens.textFaint,
+      k: "AVG · POSITIVE",
+      v: `${pct(avg24h)} · ${positiveCount}/${allSnaps.length}`,
+      d: `top sector ${topSector?.sector ?? "—"} Δ${topSector?.delta ?? 0}`,
+      c: avg24h >= 0 ? tokens.emerald : tokens.red,
       data: null as number[] | null,
     },
   ];
@@ -192,6 +237,56 @@ export default async function DashboardPage() {
           </Card>
         ))}
       </div>
+
+      {/* SSI selector — every index, real 24h % from /market-snapshot.
+          Click to refocus the chart + featured KPI. */}
+      <Card pad={12}>
+        <div className="flex justify-between items-center mb-2">
+          <Mono size={9} color={tokens.textFaint}>
+            SECTORS · click to feature on chart
+          </Mono>
+          <Mono size={10} color={tokens.textFaint}>
+            13 SSI · sorted by 24h
+          </Mono>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {sortedByChange.map(({ ticker, snap }) => {
+            const d = SSI_DISPLAY[ticker] ?? { symbol: ticker.slice(3, 7).toUpperCase() };
+            const change = snap.change_pct_24h ?? 0;
+            const isFeatured = ticker === FEATURED;
+            const c =
+              change >= 0.02
+                ? tokens.emerald
+                : change >= -0.02
+                  ? tokens.textDim
+                  : tokens.red;
+            return (
+              <Link
+                key={ticker}
+                href={`/dashboard?featured=${ticker}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "5px 9px",
+                  borderRadius: 6,
+                  background: isFeatured ? `${c}18` : tokens.bgElev2,
+                  border: `1px solid ${isFeatured ? c : tokens.border}`,
+                  textDecoration: "none",
+                }}
+              >
+                <Mono size={10} color={isFeatured ? tokens.text : tokens.textDim}>
+                  {d.symbol}
+                </Mono>
+                <Mono size={10} color={c}>
+                  {change >= 0 ? "+" : ""}
+                  {(change * 100).toFixed(2)}%
+                </Mono>
+              </Link>
+            );
+          })}
+        </div>
+      </Card>
 
       <div className="grid gap-3" style={{ gridTemplateColumns: "1.5fr 1fr" }}>
         <Card pad={16}>
