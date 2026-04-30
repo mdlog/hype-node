@@ -1,6 +1,5 @@
-import { Card, Label, Metric, Mono, Tag, Btn, Spark, LineChart, Meter } from "@/components/ui";
+import { Label, Metric, Mono, Tag, Btn } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { fakeSeries } from "@/lib/fake-data";
 import { getNews, getSectorScores } from "@/lib/api/sosovalue";
 
 export const revalidate = 60;
@@ -18,28 +17,29 @@ function fmtRelative(iso: string): string {
 
 export default async function ResearchPage() {
   const [news, sectors] = await Promise.all([getNews({ limit: 12 }), getSectorScores()]);
-  // Render the top-N news as live cards, falling back to deterministic flow
-  // labels (we don't have per-article fund flow yet — that's coming once we
-  // wire the per-asset SoSoValue endpoints).
-  const cards = news.slice(0, 8).map((n, i) => ({
+
+  // Cards are pure projections of real /news rows: title, source, sentiment
+  // proxy, sector tag, importance rail. No synthetic per-article series, no
+  // fabricated fund-flow numbers — SoSoValue does not expose either.
+  const cards = news.slice(0, 8).map((n) => ({
     sector: n.sector,
     title: n.title,
     src: `${n.source} · ${fmtRelative(n.ts)}`,
     sent: n.sentiment,
-    flow: n.sentiment > 50 ? `+$${(2 + i * 1.4).toFixed(1)}M` : `−$${(1 + i * 0.6).toFixed(1)}M`,
     strong: n.importance === "high",
-    data: fakeSeries(20, 100, 0.05, 3 + i),
   }));
 
-  // Top sector flows derived from live SoSoValue sector scores — bigger
-  // |delta| means more movement either direction. Visual weight = score/100.
-  const sortedSectors = [...sectors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  const flows: [string, string, string, number][] = sortedSectors.slice(0, 5).map((s) => [
-    s.sector,
-    `${s.delta >= 0 ? "+" : "−"}$${Math.abs(s.delta * 1.2).toFixed(1)}M`,
-    s.delta >= 0 ? tokens.emerald : tokens.red,
-    Math.min(1, s.score / 100),
-  ]);
+  // Sector momentum strip — real change_pct_24h from /sector-spotlight (via
+  // getSectorScores). `delta` is pct*2 (see lib/api/sosovalue.ts) so divide
+  // back for a faithful display. Color/intensity track the sign + magnitude.
+  const sectorStrip = [...sectors]
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+    .slice(0, 8)
+    .map((s) => {
+      const pct = s.delta / 2; // recover real change_pct_24h percentage
+      const mag = Math.min(1, Math.abs(pct) / 5); // 5% → full intensity
+      return { sector: s.sector, pct, mag };
+    });
 
   return (
     <div className="grid h-[calc(100vh-48px)]" style={{ gridTemplateColumns: "240px 1fr 320px" }}>
@@ -82,12 +82,6 @@ export default async function ResearchPage() {
             />
           </div>
         </div>
-        <Label className="mb-1.5">Fund flow</Label>
-        <div className="flex gap-1 mb-3.5">
-          <Tag small color={tokens.emerald} filled>Inflow</Tag>
-          <Tag small>Neutral</Tag>
-          <Tag small color={tokens.red}>Outflow</Tag>
-        </div>
         <Label className="mb-1.5">Timeframe</Label>
         <div className="flex gap-1 mb-3.5">
           {["1H", "4H", "24H", "7D"].map((t, i) => (
@@ -116,7 +110,7 @@ export default async function ResearchPage() {
           <div>
             <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.02em" }}>Research Feed</div>
             <Mono size={10}>
-              live stream · SoSoValue Terminal · {news.length} signals
+              Real news headlines from /news · sector momentum from /sector-spotlight · no synthetic projections
             </Mono>
           </div>
           <div className="flex gap-1.5">
@@ -150,7 +144,6 @@ export default async function ResearchPage() {
                   )}
                   <Mono size={10}>{e.src}</Mono>
                 </div>
-                <Spark data={e.data} w={80} h={22} color={e.sent > 0 ? tokens.emerald : tokens.red} fill={false} />
               </div>
               <div
                 style={{
@@ -174,12 +167,10 @@ export default async function ResearchPage() {
                 </div>
                 <div style={{ width: 1, height: 30, background: tokens.border }} />
                 <div>
-                  <Label>Net flow (24h)</Label>
-                  <Metric
-                    v={e.flow}
-                    size={18}
-                    color={e.flow.startsWith("+") ? tokens.emerald : tokens.red}
-                  />
+                  <Label>Sector</Label>
+                  <Mono size={13} color={tokens.text}>
+                    {e.sector}
+                  </Mono>
                 </div>
                 <div className="flex-1" />
                 <Btn small>Analyze</Btn>
@@ -195,53 +186,64 @@ export default async function ResearchPage() {
         className="overflow-y-auto"
         style={{ padding: 16, borderLeft: `1px solid ${tokens.border}` }}
       >
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Fund Flow Heatmap</div>
-        <div className="grid grid-cols-4 gap-1 mb-4">
-          {Array.from({ length: 32 }).map((_, i) => {
-            const v = ((i * 17) % 100) / 100 - 0.3;
-            const c =
-              v > 0.2
-                ? tokens.emerald
-                : v > 0
-                  ? tokens.emerald + "80"
-                  : v > -0.2
-                    ? tokens.amber + "60"
-                    : tokens.red + "60";
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Sector momentum (24h)</div>
+        <Mono size={10} className="block mb-2.5">
+          real change_pct_24h from /sector-spotlight
+        </Mono>
+        <div className="grid grid-cols-2 gap-1.5 mb-4">
+          {sectorStrip.map((s) => {
+            const positive = s.pct >= 0;
+            const base = positive ? tokens.emerald : tokens.red;
+            // Hex alpha 26..FF based on magnitude (0..1) for intensity.
+            const alpha = Math.round(38 + s.mag * 217)
+              .toString(16)
+              .padStart(2, "0");
             return (
               <div
-                key={i}
-                style={{ aspectRatio: "1 / 1", background: c, borderRadius: 3 }}
-              />
+                key={s.sector}
+                style={{
+                  padding: "8px 10px",
+                  background: base + alpha,
+                  border: `1px solid ${base}50`,
+                  borderRadius: 6,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 600, color: tokens.text }}>
+                  {s.sector}
+                </div>
+                <Mono size={10} color={positive ? tokens.emerald : tokens.red}>
+                  {positive ? "+" : ""}
+                  {s.pct.toFixed(2)}%
+                </Mono>
+              </div>
             );
           })}
         </div>
-        <Label className="mb-2">TOP FLOWS (NET)</Label>
-        {flows.map(([s, v, c, w], i) => (
-          <div key={i} style={{ padding: "8px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}>
-            <div className="flex justify-between mb-1">
-              <div style={{ fontSize: 12, color: tokens.text }}>{s}</div>
-              <Mono size={11} color={c}>
-                {v}
+        <Label className="mb-2">SECTOR SCORES</Label>
+        {sectors.slice(0, 6).map((s) => {
+          const pct = s.delta / 2;
+          const c = pct >= 0 ? tokens.emerald : tokens.red;
+          return (
+            <div
+              key={s.sector}
+              style={{ padding: "8px 0", borderBottom: `1px solid ${tokens.borderFaint}` }}
+            >
+              <div className="flex justify-between mb-1">
+                <div style={{ fontSize: 12, color: tokens.text }}>{s.sector}</div>
+                <Mono size={11} color={c}>
+                  {pct >= 0 ? "+" : ""}
+                  {pct.toFixed(2)}%
+                </Mono>
+              </div>
+              <Mono size={10} color={tokens.textDim}>
+                composite score {s.score}
               </Mono>
             </div>
-            <Meter v={w} color={c} h={3} />
-          </div>
-        ))}
-        <Label className="mt-4 mb-2">AI SENTIMENT Δ (1H)</Label>
-        <div
-          style={{
-            padding: 10,
-            background: tokens.bgElev2,
-            borderRadius: 6,
-            border: `1px solid ${tokens.border}`,
-          }}
-        >
-          <LineChart
-            w={260}
-            h={100}
-            series={[{ data: fakeSeries(40, 60, 0.08, 2), color: tokens.cyan, thick: true, fill: true }]}
-          />
-        </div>
+          );
+        })}
       </div>
     </div>
   );

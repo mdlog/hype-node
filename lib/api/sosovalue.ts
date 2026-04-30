@@ -99,12 +99,15 @@ export type SsiKline = {
 };
 
 export type SsiSnapshot = {
+  // Verified live shape (2026-05-01): docs say `24h_change_pct/7day_roi/...`
+  // but the real API returns snake-case `change_pct_24h/roi_{7d,1m,3m,1y}/ytd`.
+  // Trust the wire format, not the doc.
   price: number;
-  "24h_change_pct": number;
-  "7day_roi": number;
-  "1month_roi": number;
-  "3month_roi": number;
-  "1year_roi": number;
+  change_pct_24h: number;
+  roi_7d: number;
+  roi_1m: number;
+  roi_3m: number;
+  roi_1y: number;
   ytd: number;
 };
 
@@ -148,12 +151,17 @@ export type EtfMarketSnapshot = {
   volume: number | string;
 };
 
-// Known canonical currency_id values from SSI constituents probe.
-// Use these when the path requires the long numeric id format.
+// Known canonical currency_id values. Verified 2026-04 via
+// /indices/ssiMAG7/constituents (top-7 by mcap):
+//   BTC = ...866 ($1.53T mcap, rank 1)
+//   ETH = ...867 ($273B mcap,  rank 2)
+//   SOL = ...875 ($48B mcap,   rank 7)
+// (The earlier table — btc=…867, eth=…868, sol=…869 — was wrong;
+// …867 is ETH, …869 is BNB, …875 is SOL.)
 export const CURRENCY_ID = {
-  btc: "1673723677362319867",
-  eth: "1673723677362319868",
-  sol: "1673723677362319869",
+  btc: "1673723677362319866",
+  eth: "1673723677362319867",
+  sol: "1673723677362319875",
 } as const;
 
 // ---------- adapter shapes consumed by the UI ----------
@@ -631,11 +639,11 @@ export async function getSsiSnapshot(ticker: string): Promise<SsiSnapshot> {
     `/indices/${encodeURIComponent(ticker)}/market-snapshot`,
     () => ({
       price: 1.182,
-      "24h_change_pct": 0.0524,
-      "7day_roi": 0.082,
-      "1month_roi": 0.182,
-      "3month_roi": 0.341,
-      "1year_roi": 1.84,
+      change_pct_24h: 0.0524,
+      roi_7d: 0.082,
+      roi_1m: 0.182,
+      roi_3m: 0.341,
+      roi_1y: 1.84,
       ytd: 0.42,
     }),
   );

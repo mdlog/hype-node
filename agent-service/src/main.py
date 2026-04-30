@@ -21,8 +21,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # settings at import time, so late dotenv loading can leave it with stale env.
 load_dotenv()
 
+from .chat_agent import run_agentic_chat  # noqa: E402
 from .graph import GRAPH, HypeState  # noqa: E402
 from .state import AgentNode, AgentState, ChatRequest, ChatTurn, ReasoningEntry  # noqa: E402
+from .tools import basket as basket_tool  # noqa: E402
+from .tools import real_backtest  # noqa: E402
 from .tools import terminal  # noqa: E402
 
 
@@ -142,44 +145,10 @@ async def reasoning() -> list[ReasoningEntry]:
 
 @app.post("/chat", response_model=ChatTurn)
 async def chat(req: ChatRequest) -> ChatTurn:
-    last_user = next((t for t in reversed(req.turns) if t.role == "user"), None)
-    if last_user is None:
-        return ChatTurn(role="agent", content="No user turn supplied.", ts=datetime.now(timezone.utc))
-
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return ChatTurn(
-            role="agent",
-            content=(
-                "No ANTHROPIC_API_KEY set in the agent service. "
-                "Set the key and the LangGraph chat path will run live; "
-                f"echoing your prompt: {last_user.content!r}"
-            ),
-            ts=datetime.now(timezone.utc),
-        )
-
-    # Lazy import to keep cold-start cheap when no key is set.
-    from langchain_anthropic import ChatAnthropic
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    llm = ChatAnthropic(
-        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-        api_key=api_key,
-        max_tokens=1024,
-    )
-    system = SystemMessage(
-        content=(
-            "You are HypeNode, an autonomous on-chain index agent. "
-            "Use the SoSoValue Terminal data and SSI Protocol context the user provides. "
-            "Be concise, give actionable index suggestions, and surface risk gates."
-        )
-    )
-    history = [system]
-    for t in req.turns:
-        if t.role == "user":
-            history.append(HumanMessage(content=t.content))
-    msg = await llm.ainvoke(history)
-    return ChatTurn(role="agent", content=msg.content, ts=datetime.now(timezone.utc))
+    """Agentic chat — Claude with tool-use over the MCP-style read-only
+    surface (terminal sentiment / fund flow / news / spotlight, backtest,
+    risk gate). See `chat_agent.py` for the loop and tool schemas."""
+    return await run_agentic_chat(req)
 
 
 @app.post("/run")
@@ -188,6 +157,31 @@ async def run(payload: dict[str, Any]) -> HypeState:
     state = await GRAPH.ainvoke(payload or {"sector": "DePIN"})
     LATEST_STATE.update(state)
     return state
+
+
+@app.get("/propose-basket")
+async def propose_basket_endpoint(
+    sector: str = "DePIN",
+    n_assets: int = 8,
+    weighting: str = "score",
+) -> dict[str, Any]:
+    """REST surface for the same `propose_basket` the chat agent uses as a
+    tool. Lets server components (proposals, proposals/[id]) build real
+    on-chain-grounded baskets without spinning up a chat turn."""
+    return await basket_tool.propose_basket(
+        sector=sector, n_assets=n_assets, weighting=weighting,
+    )
+
+
+@app.post("/run-backtest")
+async def run_backtest_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """REST surface for the chat agent's backtest tool. Body shape:
+    `{constituents: [{currency_id, symbol, weight}, ...], days?: int}`."""
+    constituents = payload.get("constituents") or []
+    days = int(payload.get("days", 90))
+    if not isinstance(constituents, list):
+        return {"ok": False, "error": "constituents must be a list"}
+    return await real_backtest.run_real_backtest(constituents=constituents, days=days)
 
 
 @app.get("/terminal/sentiment")
@@ -201,7 +195,9 @@ async def fund_flow(sector: str = "DePIN", window: str = "24h") -> dict[str, Any
 
 
 @app.get("/terminal/news")
-async def news(sector: str = "DePIN", limit: int = 10) -> list[dict[str, Any]]:
+async def news(sector: str = "DePIN", limit: int = 10) -> Any:
+    # Returns a list of news items on success, or {ok: false, error, items: []}
+    # during a SoSoValue backoff window — see terminal.get_news.
     return await terminal.get_news(sector, limit)
 
 

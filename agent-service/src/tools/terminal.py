@@ -152,6 +152,8 @@ async def _get(path: str) -> Any:
         gap = time.time() - _last_request_at
         if gap < MIN_GAP_SEC:
             wait = MIN_GAP_SEC - gap
+            # If we have cached data, return it stale rather than block —
+            # the caller wanted "freshish" not "synchronously block 60s".
             if cached is not None:
                 age = int(time.time() - cached[2])
                 print(
@@ -159,7 +161,19 @@ async def _get(path: str) -> Any:
                     f"(age {age}s, next slot in {int(wait)}s)"
                 )
                 return cached[0]
-            return None
+            # No cache → sleep until the slot opens. Without this, parallel
+            # fan-outs (e.g. propose_basket fetching 10 snapshots) would
+            # have 9 of 10 calls return None because they all see the
+            # same `last_request_at`. Sleeping serializes them at the
+            # MIN_GAP_SEC cadence — 10 fetches × 0.7s = ~7s on paid tier.
+            # On Demo (65s gap) this would be impractical for parallel
+            # fetches; callers should batch-cache or use sector tools
+            # that stay within a single round trip.
+            if wait > 30:
+                # Don't block forever on a long backoff; the caller can
+                # retry or accept None.
+                return None
+            await asyncio.sleep(wait)
         _last_request_at = time.time()
 
     fut: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
@@ -326,31 +340,35 @@ async def get_news_raw(
 
 
 async def get_sector_spotlight() -> dict[str, Any]:
-    """Real response field is `change_pct_24h` (decimal fraction).
-
-    Verified shape (2026-04-26):
-      {"sector": [{"name": "DeFi", "change_pct_24h": 0.0034,
-                   "marketcap_dom": 0.0138}, ...],
-       "spotlight": [...]}
-    """
+    """Real sector momentum from SoSoValue. Returns `ok: false` on
+    backoff so the chat agent doesn't cite the synthetic fallback shape
+    as live data. Background graph.py callers fall back to `sector: []`
+    via the `.get(...)` defaults they already use."""
+    explain = _backoff_explainer()
+    if explain:
+        return {"ok": False, "sector": [], "spotlight": [], "error": explain}
     data = await _get("/currencies/sector-spotlight")
-    if data is not None:
-        return data
-    return {
-        "sector": [
-            {"name": "Layer1", "change_pct_24h": -0.0046, "marketcap_dom": 0.0797},
-            {"name": "DeFi", "change_pct_24h": 0.0034, "marketcap_dom": 0.0138},
-            {"name": "Layer2", "change_pct_24h": -0.0067, "marketcap_dom": 0.0022},
-            {"name": "GameFi", "change_pct_24h": -0.0357, "marketcap_dom": 0.0009},
-            {"name": "NFT", "change_pct_24h": -0.0133, "marketcap_dom": 0.0006},
-        ],
-        "spotlight": [{"name": "perpdex", "change_pct_24h": 0.112}],
-    }
+    if data is None:
+        explain = _backoff_explainer() or "transport failure"
+        return {"ok": False, "sector": [], "spotlight": [], "error": explain}
+    if isinstance(data, dict):
+        # Tag the source so caller can render "live" vs synthetic — only
+        # set ok:true when shape includes the real `sector` array.
+        return {**data, "ok": True}
+    return {"ok": False, "sector": [], "spotlight": [], "error": "unexpected response shape"}
 
 
-async def list_ssi_tickers() -> list[str]:
+async def list_ssi_tickers() -> Any:
+    """List of SSI index tickers. Returns `{ok: false, error}` during
+    backoff so the agent doesn't fabricate a curated list."""
+    explain = _backoff_explainer()
+    if explain:
+        return {"ok": False, "tickers": [], "error": explain}
     data = await _get("/indices")
-    return data if isinstance(data, list) else ["ssimag7", "ssilayer1", "ssidepin"]
+    if not isinstance(data, list):
+        explain = _backoff_explainer() or "transport failure"
+        return {"ok": False, "tickers": [], "error": explain}
+    return {"ok": True, "tickers": data}
 
 
 async def get_ssi_constituents(ticker: str) -> list[dict[str, Any]]:
@@ -361,6 +379,44 @@ async def get_ssi_constituents(ticker: str) -> list[dict[str, Any]]:
         {"currency_id": "1", "symbol": "btc", "weight": 0.31},
         {"currency_id": "2", "symbol": "eth", "weight": 0.22},
     ]
+
+
+async def get_currency_snapshot(currency_id: str) -> dict[str, Any] | None:
+    """Live market snapshot for a single asset. Returns price, market cap,
+    24h change %, turnover, rank. None on transport failure (caller decides
+    whether to fall back or surface 'data unavailable')."""
+    return await _get(f"/currencies/{currency_id}/market-snapshot")
+
+
+async def get_currency_klines(
+    currency_id: str,
+    interval: str = "1d",
+    limit: int = 90,
+) -> list[dict[str, Any]] | None:
+    """Historical OHLCV for a single asset. Default 90d daily candles —
+    enough window to compute Sharpe + max drawdown for the backtester.
+    Returns None on transport failure."""
+    return await _get(
+        f"/currencies/{currency_id}/klines?interval={interval}&limit={limit}"
+    )
+
+
+async def get_ssi_snapshot(ticker: str) -> dict[str, Any] | None:
+    """Live snapshot for an SSI index (price, 24h change, ROI windows).
+    Used as the BTC/ETH benchmark in the real backtester (an SSI index
+    aggregates the asset class — better baseline than a single coin)."""
+    return await _get(f"/indices/{ticker}/market-snapshot")
+
+
+async def get_ssi_klines(
+    ticker: str,
+    interval: str = "1d",
+    limit: int = 90,
+) -> list[dict[str, Any]] | None:
+    """Historical OHLC for an SSI index. Returns None on transport failure."""
+    return await _get(
+        f"/indices/{ticker}/klines?interval={interval}&limit={limit}"
+    )
 
 
 # ---------- adapters consumed by the LangGraph nodes ----------
@@ -376,46 +432,135 @@ def _score_from_title(title: str) -> int:
     return max(-50, min(100, s))
 
 
+def _backoff_explainer() -> str | None:
+    """If SoSoValue is in a backoff window or unkeyed, return a one-line
+    explanation. Same shape as the helper in basket.py — surfaced via tool
+    results so the agent can tell the user 'data unavailable' instead of
+    citing a synthetic placeholder."""
+    if int(_seconds_until(_transient_error_until)) > 0:
+        return f"SoSoValue API in 5xx outage backoff (~{_seconds_until(_transient_error_until)}s remaining)"
+    if int(_seconds_until(_quota_exhausted_until)) > 0:
+        return f"SoSoValue monthly quota exhausted (~{_seconds_until(_quota_exhausted_until)}s until reset)"
+    if not KEY:
+        return "SOSOVALUE_API_KEY not configured"
+    return None
+
+
 async def get_sentiment(sector: str = "DePIN", window: str = "1h") -> dict[str, Any]:
+    """Sector sentiment proxy from news velocity. Score is a heuristic
+    (`min(100, 40 + matches*8)`) until SoSoValue exposes a first-class
+    sentiment metric. Returns `ok: false` with `data_source: 'unavailable'`
+    when the API is unreachable so the agent doesn't cite the synthetic
+    Filecoin/Helium fallback news as live signal."""
+    # Refuse before fetching — `get_news_raw` always returns synthetic
+    # fallback when transport fails, so post-hoc detection is impossible.
+    # We have to short-circuit on the documented backoff state.
+    explain = _backoff_explainer()
+    if explain:
+        return {
+            "ok": False,
+            "sector": sector,
+            "window": window,
+            "score": 0,
+            "delta": 0,
+            "data_source": "unavailable",
+            "error": explain,
+        }
     news = await get_news_raw(language="en", page_size=50)
+    items = news.get("list", []) if isinstance(news, dict) else []
+    # If the call landed in backoff state in the interim (e.g. our own
+    # request triggered a fresh 5xx), refuse rather than score on the
+    # fallback dict that get_news_raw may now be returning.
+    explain = _backoff_explainer()
+    if explain:
+        return {
+            "ok": False,
+            "sector": sector,
+            "window": window,
+            "score": 0,
+            "delta": 0,
+            "data_source": "unavailable",
+            "error": explain,
+        }
     matching = [
-        n for n in news.get("list", [])
+        n for n in items
         if any(t.lower() == sector.lower() for t in (n.get("tags") or []))
     ]
     score = min(100, 40 + len(matching) * 8)
     return {
+        "ok": True,
         "sector": sector,
         "window": window,
         "score": score,
         "delta": 15 if len(matching) >= 3 else 0,
+        "matched_news_count": len(matching),
+        "data_source": "live_news_velocity_proxy",
+        "note": "Heuristic — score = min(100, 40 + matches*8) over /news. Not an official SoSoValue sentiment metric.",
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
 
 async def get_fund_flow(sector: str = "DePIN", window: str = "24h") -> dict[str, Any]:
-    if sector.lower() == "btc":
+    """Net fund flow into a sector. REAL ETF data for BTC (via /etfs/IBIT/history);
+    for other sectors SoSoValue does not currently expose per-sector flow,
+    so we return `ok: false` with a clear note rather than a synthetic placeholder."""
+    if sector.lower() in ("btc", "bitcoin"):
         rows = await get_etf_history("IBIT", limit=1)
         if rows:
             last = rows[0]
             return {
+                "ok": True,
                 "sector": sector,
                 "window": window,
                 "net_inflow_usd": last["net_inflow"],
                 "top_asset": "BTC",
                 "top_asset_flow_usd": last["net_inflow"],
+                "data_source": "etf_ibit_history",
                 "ts": last["date"],
             }
+        explain = _backoff_explainer()
+        return {
+            "ok": False,
+            "sector": sector,
+            "window": window,
+            "net_inflow_usd": 0,
+            "top_asset": "?",
+            "data_source": "unavailable",
+            "error": explain or "ETF history unavailable",
+        }
+    # Non-BTC sectors: SoSoValue doesn't expose per-sector flow. Keep
+    # numeric keys present (0) so the LangGraph background loop's
+    # f-string `f['net_inflow_usd']:.0f` access doesn't KeyError.
     return {
+        "ok": False,
         "sector": sector,
         "window": window,
-        "net_inflow_usd": 24_600_000,
-        "top_asset": "FIL",
-        "top_asset_flow_usd": 8_100_000,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "net_inflow_usd": 0,
+        "top_asset": "?",
+        "data_source": "unsupported",
+        "error": (
+            "SoSoValue does not expose per-sector fund flow. Real ETF flow "
+            "is only available for BTC (via /etfs/IBIT/history). For other "
+            "sectors, use propose_basket + get_currency_snapshot to look at "
+            "per-asset price/marketcap movement instead."
+        ),
     }
 
 
-async def get_news(sector: str = "DePIN", limit: int = 10) -> list[dict[str, Any]]:
+async def get_news(sector: str = "DePIN", limit: int = 10) -> Any:
+    """Real-news adapter for the chat agent. During backoff, returns
+    `{ok: false, error}` instead of the synthetic Filecoin/Helium
+    fallback list. Background graph.py callers handle list-or-dict
+    responses defensively."""
+    explain = _backoff_explainer()
+    if explain:
+        return {
+            "ok": False,
+            "sector": sector,
+            "data_source": "unavailable",
+            "error": explain,
+            "items": [],
+        }
     raw = await get_news_raw(language="en", page_size=min(limit, 100))
     out: list[dict[str, Any]] = []
     for n in raw.get("list", [])[:limit]:

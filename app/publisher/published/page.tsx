@@ -82,7 +82,7 @@ export default async function PublishedPage() {
       sector: "—",
     };
     const closes = klines.map((k) => k.close);
-    const chg = snap?.["24h_change_pct"] ?? 0;
+    const chg = snap?.change_pct_24h ?? 0;
     return {
       ticker,
       name: display.name,
@@ -90,7 +90,7 @@ export default async function PublishedPage() {
       sector: display.sector,
       nav: snap?.price ?? 0,
       chg24h: chg,
-      roi30d: snap?.["1month_roi"] ?? 0,
+      roi30d: snap?.roi_1m ?? 0,
       ytd: snap?.ytd ?? 0,
       spark: closes,
       sparkColor: chg >= 0 ? tokens.emerald : tokens.red,

@@ -2,57 +2,75 @@
 
 import { Card, Label, Mono, Tag, Btn, Meter, Toggle } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
+import type { BasketProposal } from "@/lib/api/agent";
 
-type Constituent = [string, string, number, number, string, string, string];
+type LoadState = "loading" | "ready" | "error";
 
-const FALLBACK: Constituent[] = [
-  ["FIL", "Filecoin", 92, 22, "5.0B", "+8.2%", tokens.emerald],
-  ["RNDR", "Render", 71, 18, "3.2B", "+2.4%", tokens.emerald],
-  ["HNT", "Helium", 66, 15, "1.1B", "+5.1%", tokens.emerald],
-  ["AR", "Arweave", 58, 12, "0.8B", "−1.2%", tokens.red],
-  ["AKT", "Akash", 61, 11, "0.6B", "+12.8%", tokens.emerald],
-  ["IOTX", "IoTeX", 48, 9, "0.4B", "+0.4%", tokens.textDim],
-  ["DIMO", "Dimo", 52, 8, "0.2B", "+3.1%", tokens.emerald],
-  ["ATH", "Aethir", 44, 5, "0.3B", "−2.8%", tokens.red],
-];
+function fmtMcap(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return "—";
+  if (v >= 1e12) return `${(v / 1e12).toFixed(2)}T`;
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  return v.toFixed(0);
+}
 
-const SYMBOL_TICKER: Record<string, string> = {
-  filecoin: "FIL",
-  render: "RNDR",
-  helium: "HNT",
-  arweave: "AR",
-  "akash-network": "AKT",
-  "theta-network": "THETA",
-  iota: "IOTA",
-  golem: "GLM",
-  livepeer: "LPT",
-  aethir: "ATH",
-  grass: "GRASS",
-};
+function fmtPct(frac: number): string {
+  if (!Number.isFinite(frac)) return "—";
+  const pct = frac * 100;
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+}
+
+function changeColor(frac: number): string {
+  if (!Number.isFinite(frac) || Math.abs(frac) < 0.001) return tokens.textDim;
+  return frac >= 0 ? tokens.emerald : tokens.red;
+}
 
 export default function BuilderPage() {
-  const [constituents, setConstituents] = useState<Constituent[]>(FALLBACK);
+  const [proposal, setProposal] = useState<BasketProposal | null>(null);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/ssi/constituents/ssiDePIN")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((rows: { symbol: string; weight: number }[]) => {
-        if (cancelled || !Array.isArray(rows) || rows.length === 0) return;
-        const live: Constituent[] = rows.slice(0, 8).map((c) => {
-          const tk = SYMBOL_TICKER[c.symbol.toLowerCase()] ?? c.symbol.slice(0, 5).toUpperCase();
-          const display = c.symbol.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-          return [tk, display, 60, Math.round(c.weight * 100), "—", "—", tokens.textDim];
-        });
-        setConstituents(live);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+  const loadProposal = useCallback(async () => {
+    setLoadState("loading");
+    setError(null);
+    try {
+      const res = await fetch(
+        "/api/agent/propose-basket?sector=DePIN&n_assets=8&weighting=score",
+        { cache: "no-store" },
+      );
+      const body = (await res.json().catch(() => null)) as BasketProposal | null;
+      if (!res.ok || !body || body.ok === false) {
+        setError(body?.error ?? `HTTP ${res.status}`);
+        setProposal(null);
+        setLoadState("error");
+        return;
+      }
+      setProposal(body);
+      setLoadState("ready");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "network error");
+      setProposal(null);
+      setLoadState("error");
+    }
   }, []);
 
+  useEffect(() => {
+    void loadProposal();
+  }, [loadProposal]);
+
+  // User-editable index metadata defaults (config, not signals).
+  // These are the starter values shown in the form; the user is expected
+  // to override them before deploying. Not data — left functional, labeled.
+  const [meta, setMeta] = useState({
+    name: "HYPE-DEPIN-8",
+    symbol: "HDP8",
+    base: "USDC",
+    chain: "ValueChain L1",
+  });
+
+  // User-config UI affordances — option labels for weighting strategy and
+  // rebalance triggers. These are user choices, not fabricated signals.
   const [triggers, setTriggers] = useState<Record<string, boolean>>({
     cron: true,
     sentiment: true,
@@ -63,6 +81,10 @@ export default function BuilderPage() {
   const [rule, setRule] = useState(0);
 
   const stepLabels = ["Signal", "Constituents", "Weights & rules", "Simulate", "Deploy"];
+
+  const constituents = proposal?.constituents ?? [];
+  const summary = proposal?.summary;
+  const totalWeightPct = constituents.reduce((sum, c) => sum + c.weight * 100, 0);
 
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
@@ -133,7 +155,15 @@ export default function BuilderPage() {
             className="flex justify-between items-center"
             style={{ padding: "12px 16px", borderBottom: `1px solid ${tokens.border}` }}
           >
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Constituents · 8 assets</div>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>
+              Constituents
+              {loadState === "ready" && (
+                <span style={{ color: tokens.textDim, fontWeight: 400 }}>
+                  {" · "}
+                  {constituents.length} of {proposal?.n_pool ?? "—"} pool
+                </span>
+              )}
+            </div>
             <div className="flex gap-1.5">
               <Btn small>+ Add asset</Btn>
               <Btn small icon={<span style={{ color: tokens.cyan }}>✦</span>}>
@@ -141,112 +171,290 @@ export default function BuilderPage() {
               </Btn>
             </div>
           </div>
-          <div
-            className="grid"
-            style={{
-              gridTemplateColumns: "2fr 0.8fr 1.4fr 0.9fr 0.9fr 30px",
-              padding: "8px 16px",
-              gap: 10,
-              borderBottom: `1px solid ${tokens.borderFaint}`,
-            }}
-          >
-            {["ASSET", "SENTIMENT", "WEIGHT", "MCAP", "24H", ""].map((k, i) => (
-              <Label key={i}>{k}</Label>
-            ))}
-          </div>
-          {constituents.map(([sym, n, s, w, cap, d, dc], i) => (
+
+          {loadState === "loading" && (
+            <div style={{ padding: "32px 16px", textAlign: "center" }}>
+              <Mono size={11} color={tokens.textDim}>
+                Loading basket proposal from agent service…
+              </Mono>
+            </div>
+          )}
+
+          {loadState === "error" && (
             <div
-              key={i}
-              className="grid items-center"
               style={{
-                gridTemplateColumns: "2fr 0.8fr 1.4fr 0.9fr 0.9fr 30px",
-                padding: "10px 16px",
+                padding: "24px 16px",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
                 gap: 10,
-                borderBottom: `1px solid ${tokens.borderFaint}`,
               }}
             >
-              <div className="flex items-center gap-2.5">
-                <div
-                  className="flex items-center justify-center font-mono"
-                  style={{
-                    width: 26,
-                    height: 26,
-                    borderRadius: 5,
-                    background: tokens.bgElev2,
-                    border: `1px solid ${tokens.border}`,
-                    fontSize: 9,
-                    fontWeight: 600,
-                    color: tokens.emerald,
-                  }}
-                >
-                  {sym}
-                </div>
-                <div>
-                  <div style={{ fontSize: 12.5, fontWeight: 500 }}>{n}</div>
-                  <Mono size={9.5}>{sym}</Mono>
-                </div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: tokens.amber }}>
+                Builder data unavailable
               </div>
-              <Mono size={12} color={(s as number) > 60 ? tokens.emerald : (s as number) > 40 ? tokens.amber : tokens.textDim}>
-                +{s}
+              <Mono size={11} color={tokens.textDim} style={{ textAlign: "center", maxWidth: 460 }}>
+                SSI constituents could not be fetched from the agent service. — {error ?? "unknown error"}
               </Mono>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <Meter v={(w as number) / 25} color={tokens.emerald} h={5} />
-                </div>
-                <Mono size={11} color={tokens.text} style={{ minWidth: 34, textAlign: "right" }}>
-                  {(w as number).toFixed(1)}%
-                </Mono>
+              <Btn small onClick={loadProposal}>
+                Retry
+              </Btn>
+            </div>
+          )}
+
+          {loadState === "ready" && (
+            <>
+              <div
+                className="grid"
+                style={{
+                  gridTemplateColumns: "2fr 1fr 1.4fr 0.9fr 30px",
+                  padding: "8px 16px",
+                  gap: 10,
+                  borderBottom: `1px solid ${tokens.borderFaint}`,
+                }}
+              >
+                {["ASSET", "24H %", "WEIGHT", "MCAP", ""].map((k, i) => (
+                  <Label key={i}>{k}</Label>
+                ))}
               </div>
-              <Mono size={11}>${cap}</Mono>
-              <Mono size={11} color={dc as string}>{d}</Mono>
-              <div style={{ color: tokens.textFaint, cursor: "pointer", fontSize: 14, textAlign: "center" }}>×</div>
-            </div>
-          ))}
-          <div
-            className="flex justify-between items-center"
-            style={{ padding: "12px 16px", background: tokens.bgElev2 }}
-          >
-            <Mono size={11}>Total weight</Mono>
-            <div className="flex items-center gap-2">
-              <Mono size={12} color={tokens.emerald}>100.00% ✓</Mono>
-              <Tag small color={tokens.emerald} dot>balanced</Tag>
-            </div>
-          </div>
+              {constituents.length === 0 && (
+                <div style={{ padding: "20px 16px", textAlign: "center" }}>
+                  <Mono size={11} color={tokens.textDim}>
+                    Agent returned an empty basket for sector DePIN.
+                  </Mono>
+                </div>
+              )}
+              {constituents.map((c) => {
+                const weightPct = c.weight * 100;
+                const tk = c.symbol.length <= 5 ? c.symbol.toUpperCase() : c.symbol.slice(0, 5).toUpperCase();
+                return (
+                  <div
+                    key={c.currency_id}
+                    className="grid items-center"
+                    style={{
+                      gridTemplateColumns: "2fr 1fr 1.4fr 0.9fr 30px",
+                      padding: "10px 16px",
+                      gap: 10,
+                      borderBottom: `1px solid ${tokens.borderFaint}`,
+                    }}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className="flex items-center justify-center font-mono"
+                        style={{
+                          width: 26,
+                          height: 26,
+                          borderRadius: 5,
+                          background: tokens.bgElev2,
+                          border: `1px solid ${tokens.border}`,
+                          fontSize: 9,
+                          fontWeight: 600,
+                          color: tokens.emerald,
+                        }}
+                      >
+                        {tk}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: 500 }}>{c.symbol}</div>
+                        <Mono size={9.5}>
+                          {c.marketcap_rank != null ? `rank #${c.marketcap_rank}` : c.currency_id}
+                        </Mono>
+                      </div>
+                    </div>
+                    <Mono size={12} color={changeColor(c.change_pct_24h)}>
+                      {fmtPct(c.change_pct_24h)}
+                    </Mono>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <Meter v={weightPct / 25} color={tokens.emerald} h={5} />
+                      </div>
+                      <Mono size={11} color={tokens.text} style={{ minWidth: 38, textAlign: "right" }}>
+                        {weightPct.toFixed(2)}%
+                      </Mono>
+                    </div>
+                    <Mono size={11}>${fmtMcap(c.marketcap)}</Mono>
+                    <div style={{ color: tokens.textFaint, cursor: "pointer", fontSize: 14, textAlign: "center" }}>×</div>
+                  </div>
+                );
+              })}
+              <div
+                className="flex justify-between items-center"
+                style={{ padding: "12px 16px", background: tokens.bgElev2 }}
+              >
+                <Mono size={11}>Total weight</Mono>
+                <div className="flex items-center gap-2">
+                  <Mono
+                    size={12}
+                    color={Math.abs(totalWeightPct - 100) < 0.5 ? tokens.emerald : tokens.amber}
+                  >
+                    {totalWeightPct.toFixed(2)}%{" "}
+                    {Math.abs(totalWeightPct - 100) < 0.5 ? "✓" : "Δ"}
+                  </Mono>
+                  <Tag
+                    small
+                    color={Math.abs(totalWeightPct - 100) < 0.5 ? tokens.emerald : tokens.amber}
+                    dot
+                  >
+                    {Math.abs(totalWeightPct - 100) < 0.5 ? "balanced" : "drift"}
+                  </Tag>
+                </div>
+              </div>
+            </>
+          )}
         </Card>
 
         <div className="flex flex-col gap-3">
-          <Card pad={14}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Index metadata</div>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                ["Name", "HYPE-DEPIN-8"],
-                ["Symbol", "HDP8"],
-                ["Base", "USDC"],
-                ["Chain", "ValueChain L1"],
-              ].map(([k, v]) => (
+          {loadState === "ready" && summary && (
+            <Card pad={14}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Basket summary</div>
+              <div className="grid grid-cols-3 gap-2">
                 <div
-                  key={k}
+                  style={{
+                    padding: "8px 10px",
+                    background: tokens.bgElev2,
+                    border: `1px solid ${tokens.border}`,
+                    borderRadius: 5,
+                  }}
+                >
+                  <Mono size={9}>n_picked / n_pool</Mono>
+                  <div className="font-mono" style={{ fontSize: 13, color: tokens.text, marginTop: 2 }}>
+                    {proposal?.n_picked ?? constituents.length} / {proposal?.n_pool ?? "—"}
+                  </div>
+                </div>
+                <div
+                  style={{
+                    padding: "8px 10px",
+                    background: tokens.bgElev2,
+                    border: `1px solid ${tokens.border}`,
+                    borderRadius: 5,
+                  }}
+                >
+                  <Mono size={9}>avg 24h Δ</Mono>
+                  <div
+                    className="font-mono"
+                    style={{
+                      fontSize: 13,
+                      color: changeColor(summary.avg_change_24h_pct),
+                      marginTop: 2,
+                    }}
+                  >
+                    {fmtPct(summary.avg_change_24h_pct)}
+                  </div>
+                </div>
+                <div
+                  style={{
+                    padding: "8px 10px",
+                    background: tokens.bgElev2,
+                    border: `1px solid ${tokens.border}`,
+                    borderRadius: 5,
+                  }}
+                >
+                  <Mono size={9}>total mcap</Mono>
+                  <div className="font-mono" style={{ fontSize: 13, color: tokens.text, marginTop: 2 }}>
+                    ${fmtMcap(summary.total_marketcap_usd)}
+                  </div>
+                </div>
+              </div>
+
+              {summary.weights_pct.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <Mono size={9} className="block mb-1.5">
+                    Composition (real weights_pct)
+                  </Mono>
+                  <div
+                    className="flex w-full overflow-hidden"
+                    style={{
+                      height: 10,
+                      borderRadius: 4,
+                      border: `1px solid ${tokens.border}`,
+                    }}
+                  >
+                    {summary.weights_pct.map((w, i) => {
+                      const palette = [
+                        tokens.emerald,
+                        tokens.cyan,
+                        tokens.amber,
+                        tokens.emeraldDim,
+                        "#6366F1",
+                        "#A855F7",
+                        tokens.red,
+                        tokens.amberDim,
+                      ];
+                      return (
+                        <div
+                          key={i}
+                          title={`${summary.symbols[i] ?? ""} ${w.toFixed(2)}%`}
+                          style={{
+                            width: `${w}%`,
+                            background: palette[i % palette.length],
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
+                    {summary.symbols.map((s, i) => (
+                      <Mono key={s} size={9.5} color={tokens.textDim}>
+                        {s} {summary.weights_pct[i]?.toFixed(1)}%
+                      </Mono>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
+
+          <Card pad={14}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Index metadata</div>
+            <Mono size={9} className="block mb-2">
+              user-editable defaults · not data
+            </Mono>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  ["Name", "name"],
+                  ["Symbol", "symbol"],
+                  ["Base", "base"],
+                  ["Chain", "chain"],
+                ] as const
+              ).map(([label, key]) => (
+                <label
+                  key={key}
                   style={{
                     padding: "6px 10px",
                     background: tokens.bgElev2,
                     border: `1px solid ${tokens.border}`,
                     borderRadius: 5,
+                    display: "block",
                   }}
                 >
-                  <Mono size={9}>{k}</Mono>
-                  <div
+                  <Mono size={9}>{label}</Mono>
+                  <input
+                    value={meta[key]}
+                    onChange={(e) =>
+                      setMeta((p) => ({ ...p, [key]: e.target.value }))
+                    }
                     className="font-mono"
-                    style={{ fontSize: 12.5, color: tokens.text, marginTop: 1 }}
-                  >
-                    {v}
-                  </div>
-                </div>
+                    style={{
+                      fontSize: 12.5,
+                      color: tokens.text,
+                      marginTop: 1,
+                      width: "100%",
+                      background: "transparent",
+                      border: "none",
+                      outline: "none",
+                    }}
+                  />
+                </label>
               ))}
             </div>
           </Card>
 
           <Card pad={14}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Weighting rule</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Weighting rule</div>
+            <Mono size={9} className="block mb-2">
+              user-config · option labels (not data)
+            </Mono>
             {[
               "Sentiment-weighted (AI score)",
               "Market cap × liquidity",
@@ -295,14 +503,19 @@ export default function BuilderPage() {
           </Card>
 
           <Card pad={14} className="flex-1">
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Rebalance triggers</div>
-            {[
-              ["Every 6h (cron)", "cron"],
-              ["Sentiment Δ > 15", "sentiment"],
-              ["Flow reversal", "flow"],
-              ["Volatility > 0.35", "vol"],
-              ["News keyword match", "news"],
-            ].map(([r, k]) => (
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Rebalance triggers</div>
+            <Mono size={9} className="block mb-2">
+              user-config · toggles (not data)
+            </Mono>
+            {(
+              [
+                ["Every 6h (cron)", "cron"],
+                ["Sentiment Δ > 15", "sentiment"],
+                ["Flow reversal", "flow"],
+                ["Volatility > 0.35", "vol"],
+                ["News keyword match", "news"],
+              ] as const
+            ).map(([r, k]) => (
               <div
                 key={k}
                 className="flex justify-between items-center"

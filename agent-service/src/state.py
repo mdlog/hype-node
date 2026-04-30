@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -34,10 +34,41 @@ class ReasoningEntry(BaseModel):
     text: str
 
 
+class ToolCallTrace(BaseModel):
+    """One entry in an agent message's tool-call trace.
+
+    The UI renders these as the "Tool execution trace" card from the chat
+    redesign — name + args summary + one-line output + duration. `output_raw`
+    is included for debugging but UI typically shows only `output_summary`.
+    """
+
+    name: str
+    input: dict[str, Any]
+    output_summary: str | None = None
+    output_raw: Any = None
+    duration_ms: int = 0
+    ok: bool = True
+    error: str | None = None
+
+
+class ChatUsage(BaseModel):
+    """Per-turn cost & latency surfaced back to the UI for the model badge."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    elapsed_ms: int = 0
+
+
 class ChatTurn(BaseModel):
     role: Literal["user", "agent"]
     content: str
     ts: datetime | None = None
+    # Populated only on agent turns when the agent ran tool calls. The Next.js
+    # client treats it as optional so older transcripts (text-only) still load.
+    tool_calls: list[ToolCallTrace] | None = None
+    usage: ChatUsage | None = None
 
 
 class ChatRequest(BaseModel):

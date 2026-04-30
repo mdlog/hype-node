@@ -43,28 +43,14 @@ export default function Landing() {
 function Logo() {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <div
-        style={{
-          width: 28,
-          height: 28,
-          borderRadius: 7,
-          background: `linear-gradient(135deg, ${PALETTE.emerald}, ${PALETTE.emeraldDim})`,
-          display: "grid",
-          placeItems: "center",
-          boxShadow: "0 0 24px rgba(16,185,129,0.35)",
-        }}
-      >
-        <svg width={14} height={14} viewBox="0 0 12 12">
-          <path
-            d="M 1 10 L 4 4 L 7 7 L 11 2"
-            fill="none"
-            stroke={PALETTE.bg}
-            strokeWidth={1.8}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </div>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/logo-hypenode.png"
+        alt="HypeNode"
+        width={42}
+        height={42}
+        style={{ display: "block" }}
+      />
       <span style={{ fontWeight: 700, letterSpacing: "-0.02em", fontSize: 16 }}>HypeNode</span>
       <span
         style={{

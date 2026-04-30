@@ -34,27 +34,14 @@ export function IndexerTopBar() {
       }}
     >
       <Link href="/dashboard" className="flex items-center gap-2">
-        <div
-          className="flex items-center justify-center"
-          style={{
-            width: 22,
-            height: 22,
-            borderRadius: 5,
-            background: `linear-gradient(135deg, ${tokens.emerald}, ${tokens.emeraldDim})`,
-            boxShadow: `0 0 12px ${tokens.emerald}50`,
-          }}
-        >
-          <svg width={12} height={12} viewBox="0 0 12 12">
-            <path
-              d="M 2 9 L 4 5 L 7 8 L 10 3"
-              fill="none"
-              stroke={tokens.bg}
-              strokeWidth={1.6}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo-hypenode.png"
+          alt="HypeNode"
+          width={36}
+          height={36}
+          style={{ display: "block" }}
+        />
         <span
           className="font-sans"
           style={{

@@ -2,7 +2,7 @@
 
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SiweMessage } from "siwe";
 import { useAccount, useDisconnect, useSignMessage } from "wagmi";
 
@@ -33,6 +33,16 @@ export function SignInButton({
   const [status, setStatus] = useState<Status>("idle");
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Per-address attempt guard. Auto-triggering signIn() on the connect
+  // event is the obvious UX win, but a naive `useEffect([isConnected,
+  // address])` re-fires on every status change too — which means after a
+  // failed verify (status → "error"), the effect re-runs, fetches a new
+  // nonce (overwriting the session.nonce), and races the next signMessage
+  // → 401 forever. The fix is to remember which address we've already
+  // tried for in this tab, and only auto-trigger ONCE per connection.
+  // Cleared when the wallet disconnects.
+  const handledAddressRef = useRef<string | null>(null);
 
   // Hydrate session state on mount so a returning visitor sees their
   // logged-in status without having to reconnect.
@@ -102,8 +112,23 @@ export function SignInButton({
     if (!isConnected && status !== "signed-in") {
       setStatus("idle");
       setError(null);
+      handledAddressRef.current = null;
     }
   }, [isConnected, status]);
+
+  // Auto-trigger SIWE the moment the wallet finishes connecting — so the
+  // user only has to click "Get access" once. The handledAddressRef +
+  // status guards together prevent the retry-loop bug: we only fire when
+  // status is exactly "idle" AND we haven't already tried this address.
+  // After a failure (status → "error"), the user explicitly retries via
+  // the Retry button; the auto-trigger does NOT fire on error states.
+  useEffect(() => {
+    if (!isConnected || !address) return;
+    if (status !== "idle") return;
+    if (handledAddressRef.current === address) return;
+    handledAddressRef.current = address;
+    signIn();
+  }, [isConnected, address, status, signIn]);
 
   const signOut = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -166,11 +191,12 @@ export function SignInButton({
           );
         }
 
-        // Connected but not yet signed in. Two-click flow (connect → sign)
-        // is intentional: auto-triggering signMessage on connect is racy in
-        // dev (effect re-runs on status changes can fetch a new nonce while
-        // the previous signature is still in flight, causing 401 verify
-        // mismatches), and matches Uniswap/OpenSea-style UX.
+        // Connected but not yet signed in. With auto-trigger this state is
+        // brief (just the moment between wallet-connect and the first
+        // setStatus("loading")), but we render a manual button as fallback
+        // — for example if the auto-trigger handler errored before even
+        // setting status, or if the user dismissed the wallet's signature
+        // prompt and we want them to be able to retry without disconnecting.
         return (
           <button type="button" className={className} onClick={signIn}>
             Sign message →

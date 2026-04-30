@@ -128,15 +128,15 @@ export default async function PortfolioPage() {
                 <div className="flex gap-2.5 items-center mt-1 flex-wrap">
                   <Mono
                     size={12}
-                    color={snapshot["1year_roi"] >= 0 ? tokens.emerald : tokens.red}
+                    color={snapshot.roi_1y >= 0 ? tokens.emerald : tokens.red}
                   >
-                    {pct(snapshot["1year_roi"])} since 1y
+                    {pct(snapshot.roi_1y)} since 1y
                   </Mono>
                   <Mono
                     size={12}
-                    color={snapshot["24h_change_pct"] >= 0 ? tokens.emerald : tokens.red}
+                    color={snapshot.change_pct_24h >= 0 ? tokens.emerald : tokens.red}
                   >
-                    {pct(snapshot["24h_change_pct"])} (24h)
+                    {pct(snapshot.change_pct_24h)} (24h)
                   </Mono>
                   <Mono size={12} color={snapshot.ytd >= 0 ? tokens.emerald : tokens.red}>
                     {pct(snapshot.ytd)} ytd
@@ -274,27 +274,27 @@ export default async function PortfolioPage() {
               <div>
                 <Label>7-day ROI</Label>
                 <Metric
-                  v={pct(snapshot["7day_roi"])}
+                  v={pct(snapshot.roi_7d)}
                   size={18}
-                  color={snapshot["7day_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  color={snapshot.roi_7d >= 0 ? tokens.emerald : tokens.red}
                   style={{ marginTop: 3 }}
                 />
               </div>
               <div>
                 <Label>1-month ROI</Label>
                 <Metric
-                  v={pct(snapshot["1month_roi"])}
+                  v={pct(snapshot.roi_1m)}
                   size={18}
-                  color={snapshot["1month_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  color={snapshot.roi_1m >= 0 ? tokens.emerald : tokens.red}
                   style={{ marginTop: 3 }}
                 />
               </div>
               <div>
                 <Label>3-month ROI</Label>
                 <Metric
-                  v={pct(snapshot["3month_roi"])}
+                  v={pct(snapshot.roi_3m)}
                   size={18}
-                  color={snapshot["3month_roi"] >= 0 ? tokens.emerald : tokens.red}
+                  color={snapshot.roi_3m >= 0 ? tokens.emerald : tokens.red}
                   style={{ marginTop: 3 }}
                 />
               </div>

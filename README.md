@@ -1,4 +1,8 @@
-# HypeNode Autonomous Indexer
+<p align="center">
+  <img src="public/logo-hypenode.png" alt="HypeNode" width="160" />
+</p>
+
+<h1 align="center">HypeNode Autonomous Indexer</h1>
 
 Next.js 14 + TypeScript + Tailwind frontend for the HypeNode "Research-to-Execution"
 agentic system, plus a Python LangGraph + MCP backend.

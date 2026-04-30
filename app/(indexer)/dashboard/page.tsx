@@ -90,14 +90,14 @@ export default async function DashboardPage() {
     {
       k: `${featured.symbol} · NAV`,
       v: fmtPrice(featuredSnap.price),
-      d: pct(featuredSnap["24h_change_pct"]),
-      c: featuredSnap["24h_change_pct"] >= 0 ? tokens.emerald : tokens.red,
+      d: pct(featuredSnap.change_pct_24h),
+      c: featuredSnap.change_pct_24h >= 0 ? tokens.emerald : tokens.red,
       data: navData.slice(-30),
     },
     {
       k: `${featured.symbol} · YTD`,
       v: pct(featuredSnap.ytd),
-      d: `1y ${pct(featuredSnap["1year_roi"])} · 1m ${pct(featuredSnap["1month_roi"])}`,
+      d: `1y ${pct(featuredSnap.roi_1y)} · 1m ${pct(featuredSnap.roi_1m)}`,
       c: featuredSnap.ytd >= 0 ? tokens.emerald : tokens.red,
       data: null as number[] | null,
     },
@@ -220,14 +220,39 @@ export default async function DashboardPage() {
               ))}
             </div>
           </div>
-          <LineChart
-            w={780}
-            h={240}
-            series={[
-              { data: navData, color: tokens.emerald, thick: true, fill: true },
-              { data: benchSnap, color: tokens.textDim, dashed: true },
-            ]}
-          />
+          {navData.length > 0 ? (
+            <LineChart
+              w={780}
+              h={240}
+              series={[
+                { data: navData, color: tokens.emerald, thick: true, fill: true },
+                { data: benchSnap, color: tokens.textDim, dashed: true },
+              ]}
+            />
+          ) : (
+            // SoSoValue's /indices/{ticker}/klines returns an empty array on
+            // the live API (verified 2026-05-01) — likely a server-side data
+            // gap, not a client bug. Show an honest placeholder instead of an
+            // empty axis-only chart so the page reads as "no data" not "broken".
+            <div
+              className="flex items-center justify-center text-center"
+              style={{
+                height: 240,
+                background: tokens.bgElev2,
+                border: `1px dashed ${tokens.border}`,
+                borderRadius: 8,
+                color: tokens.textFaint,
+              }}
+            >
+              <div className="flex flex-col items-center gap-2">
+                <Mono size={11}>No klines from SoSoValue for {FEATURED}</Mono>
+                <Mono size={9} color={tokens.textFaint}>
+                  upstream returned 0 candles · current snapshot price{" "}
+                  {fmtPrice(featuredSnap.price)} · {featuredCons.length} constituents
+                </Mono>
+              </div>
+            </div>
+          )}
           <div className="flex gap-4 mt-2">
             <div className="flex items-center gap-1.5">
               <div style={{ width: 12, height: 2, background: tokens.emerald }} />
