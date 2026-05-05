@@ -2,6 +2,7 @@ import { Card, Mono, Btn, HypeGauge } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { getNews, getSectorSpotlight } from "@/lib/api/sosovalue";
 import { TrendingNewsCard } from "@/components/publisher/TrendingNewsCard";
+import { TrendingNewsPanel } from "@/components/publisher/TrendingNewsPanel";
 
 export const revalidate = 60;
 
@@ -230,6 +231,7 @@ export default async function RadarPage() {
           </Card>
 
           <TrendingNewsCard news={news} />
+          <TrendingNewsPanel />
         </div>
 
         <div className="flex flex-col gap-3">

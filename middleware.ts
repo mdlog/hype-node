@@ -17,6 +17,7 @@ const PROTECTED = [
   "/chat",
   "/settings",
   "/publisher",
+  "/onboarding",
 ];
 
 export async function middleware(req: NextRequest) {
@@ -51,5 +52,6 @@ export const config = {
     "/chat/:path*",
     "/settings/:path*",
     "/publisher/:path*",
+    "/onboarding/:path*",
   ],
 };

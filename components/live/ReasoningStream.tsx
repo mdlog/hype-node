@@ -35,7 +35,10 @@ const FALLBACK: Entry[] = [
 function formatTs(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
-  return d.toISOString().slice(11, 19);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
 }
 
 export function ReasoningStream() {

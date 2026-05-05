@@ -9,8 +9,13 @@ import {
   getSsiConstituents,
   getNews,
   type SsiSnapshot,
+  type IndexConstituent,
 } from "@/lib/api/sosovalue";
 import { DataSourceBanner } from "@/components/live/DataSourceBanner";
+import { MacroCalendar } from "@/components/dashboard/MacroCalendar";
+import { SmartMoneyWidget } from "@/components/dashboard/SmartMoneyWidget";
+import { StablecoinFlowWidget } from "@/components/dashboard/StablecoinFlowWidget";
+import { SsiCompositeLogo } from "@/components/dashboard/SsiCompositeLogo";
 
 export const revalidate = 60;
 
@@ -179,9 +184,31 @@ export default async function DashboardPage({
     },
   ];
 
-  const indices = ssiTickers.slice(0, 8).map((t) => {
+  const visibleTickers = ssiTickers.slice(0, 8);
+  // Fetch top constituents for each visible SSI in parallel — we need the
+  // top-3 token symbols to render the composite logo (stacked-avatar style).
+  // Each call is cached server-side (15min TTL by default), so warm renders
+  // skip the network entirely.
+  const constituentsByTicker = await Promise.all(
+    visibleTickers.map(async (t) => {
+      try {
+        const list = await getSsiConstituents(t);
+        return { ticker: t, list };
+      } catch {
+        return { ticker: t, list: [] as IndexConstituent[] };
+      }
+    }),
+  );
+  const symbolsByTicker: Record<string, string[]> = {};
+  for (const { ticker, list } of constituentsByTicker) {
+    symbolsByTicker[ticker] = [...list]
+      .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+      .slice(0, 3)
+      .map((c) => c.symbol);
+  }
+  const indices = visibleTickers.map((t) => {
     const display = SSI_DISPLAY[t] ?? { name: t, symbol: t.slice(3, 7).toUpperCase(), tag: "—" };
-    return { ticker: t, ...display };
+    return { ticker: t, ...display, symbols: symbolsByTicker[t] ?? [] };
   });
 
   return (
@@ -499,21 +526,25 @@ export default async function DashboardPage({
               }}
             >
               <div className="flex items-center gap-2.5">
-                <div
-                  className="flex items-center justify-center font-mono"
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: 6,
-                    background: r.ticker === FEATURED ? tokens.emerald + "20" : tokens.bgElev2,
-                    border: `1px solid ${r.ticker === FEATURED ? tokens.emerald : tokens.border}`,
-                    fontSize: 9.5,
-                    color: r.ticker === FEATURED ? tokens.emerald : tokens.textDim,
-                    fontWeight: 600,
-                  }}
-                >
-                  {r.symbol.slice(0, 4)}
-                </div>
+                {r.symbols.length > 0 ? (
+                  <SsiCompositeLogo symbols={r.symbols} size={28} />
+                ) : (
+                  <div
+                    className="flex items-center justify-center font-mono"
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 6,
+                      background: tokens.bgElev2,
+                      border: `1px solid ${tokens.border}`,
+                      fontSize: 9.5,
+                      color: tokens.textDim,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {r.symbol.slice(0, 4)}
+                  </div>
+                )}
                 <div>
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: tokens.text }}>{r.name}</div>
                   <Mono size={9.5}>{r.ticker}</Mono>
@@ -573,6 +604,12 @@ export default async function DashboardPage({
             })}
           </div>
         </Card>
+      </div>
+
+      <MacroCalendar />
+      <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <SmartMoneyWidget />
+        <StablecoinFlowWidget />
       </div>
     </div>
   );

@@ -26,12 +26,21 @@ class AgentState(BaseModel):
     model: str = "claude-sonnet-4-5"
     current_node: str | None = None
     nodes: list[AgentNode] = []
+    # Run controls — surfaced so the UI can flip the Pause button to "Resume"
+    # and badge the agent as halted. `paused` is toggleable; `halted` is a
+    # latched safety stop that only clears on /reset.
+    paused: bool = False
+    halted: bool = False
 
 
 class ReasoningEntry(BaseModel):
     ts: datetime
     kind: Literal["TOOL", "OBS", "THINK", "ACT", "WAIT"]
     text: str
+    # Optional clickable link surfaced in the UI — used for SoDEX order
+    # details, Etherscan tx links, etc. Renders as a small "↗" next to the
+    # entry in the reasoning panel when set.
+    url: str | None = None
 
 
 class ToolCallTrace(BaseModel):

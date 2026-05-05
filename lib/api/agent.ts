@@ -18,12 +18,20 @@ export type AgentState = {
   model: string;
   currentNode: string | null;
   nodes: AgentNode[];
+  // Run controls — flipped via /api/agent/{pause,reset,halt}. The agent
+  // page reads these to retitle the Pause button (Pause ↔ Resume) and
+  // surface a "halted" badge.
+  paused: boolean;
+  halted: boolean;
 };
 
 export type ReasoningEntry = {
   ts: string;
   kind: "TOOL" | "OBS" | "THINK" | "ACT" | "WAIT";
   text: string;
+  // Optional clickable link — present on entries that point to external
+  // resources (SoDEX order pages, Etherscan tx pages, etc.).
+  url?: string | null;
 };
 
 export type ToolCallTrace = {
@@ -60,12 +68,40 @@ async function safeJson<T>(res: Response, fallback: T): Promise<T> {
   return (await res.json()) as T;
 }
 
+type AgentStateWire = {
+  uptime_sec?: number;
+  decisions_24h?: number;
+  tool_calls?: number;
+  gas_spent_val?: number;
+  model?: string;
+  current_node?: string | null;
+  nodes?: AgentNode[];
+  paused?: boolean;
+  halted?: boolean;
+};
+
+function normalizeAgentState(wire: AgentStateWire): AgentState {
+  const d = defaultState();
+  return {
+    uptimeSec: wire.uptime_sec ?? d.uptimeSec,
+    decisions24h: wire.decisions_24h ?? d.decisions24h,
+    toolCalls: wire.tool_calls ?? d.toolCalls,
+    gasSpentVal: wire.gas_spent_val ?? d.gasSpentVal,
+    model: wire.model ?? d.model,
+    currentNode: wire.current_node ?? null,
+    nodes: wire.nodes ?? d.nodes,
+    paused: wire.paused ?? false,
+    halted: wire.halted ?? false,
+  };
+}
+
 export async function getAgentState(): Promise<AgentState> {
   try {
     const res = await fetch(`${AGENT_URL}/state`, {
       cache: "no-store",
     });
-    return await safeJson<AgentState>(res, defaultState());
+    const wire = await safeJson<AgentStateWire>(res, {});
+    return normalizeAgentState(wire);
   } catch {
     return defaultState();
   }
@@ -79,6 +115,40 @@ export async function getReasoningLog(): Promise<ReasoningEntry[]> {
     return [];
   }
 }
+
+/* ---------- Run controls (Pause / Step / Reset / Halt) ---------- */
+//
+// Wire from the agent page header. Each helper POSTs to the matching
+// FastAPI endpoint on the LangGraph service. On network failure we surface
+// `ok: false` rather than throwing so the UI can show a one-shot toast/error
+// without unmounting the page.
+
+export type ControlResult = {
+  ok: boolean;
+  data?: Record<string, unknown>;
+  error?: string;
+};
+
+async function postControl(action: "pause" | "step" | "reset" | "halt"): Promise<ControlResult> {
+  try {
+    const res = await fetch(`${AGENT_URL}/${action}`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    return { ok: true, data: (await res.json()) as Record<string, unknown> };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+export const pauseAgent = () => postControl("pause");
+export const stepAgent = () => postControl("step");
+export const resetAgent = () => postControl("reset");
+export const haltAgent = () => postControl("halt");
 
 /* ---------- Terminal status (SoSoValue transport diagnostics) ---------- */
 
@@ -221,6 +291,141 @@ export async function runBacktest(
   }
 }
 
+/* ---------- Risk gate config (persistent, live) ---------- */
+//
+// Read every cycle by the agent's risk_node. UI edits flow back via POST.
+// The shape mirrors agent-service/src/store.py — keep them in sync.
+
+export type RiskConfig = {
+  volatility_max: number;
+  drawdown_max: number;
+  sentiment_delta_min: number;
+  single_asset_weight_max: number;
+  net_outflow_24h_max_usd: number;
+  rule_volatility_enabled: boolean;
+  rule_drawdown_enabled: boolean;
+  rule_sentiment_enabled: boolean;
+  rule_weight_enabled: boolean;
+  rule_outflow_enabled: boolean;
+  manual_override: boolean;
+  updated_at: string;
+};
+
+const RISK_CONFIG_DEFAULTS: RiskConfig = {
+  volatility_max: 0.35,
+  drawdown_max: 0.15,
+  sentiment_delta_min: -20,
+  single_asset_weight_max: 0.25,
+  net_outflow_24h_max_usd: 5_000_000,
+  rule_volatility_enabled: true,
+  rule_drawdown_enabled: true,
+  rule_sentiment_enabled: true,
+  rule_weight_enabled: true,
+  rule_outflow_enabled: true,
+  manual_override: false,
+  updated_at: "",
+};
+
+export async function getRiskConfig(): Promise<RiskConfig> {
+  try {
+    const res = await fetch(`${AGENT_URL}/risk/config`, { cache: "no-store" });
+    if (!res.ok) return RISK_CONFIG_DEFAULTS;
+    return (await res.json()) as RiskConfig;
+  } catch {
+    // Agent service unreachable → fall back to defaults so server-rendered
+    // pages don't crash. UI will show stale-but-sensible defaults.
+    return RISK_CONFIG_DEFAULTS;
+  }
+}
+
+export async function updateRiskConfig(
+  patch: Partial<RiskConfig>,
+): Promise<RiskConfig | null> {
+  try {
+    const res = await fetch(`${AGENT_URL}/risk/config`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as RiskConfig;
+  } catch {
+    return null;
+  }
+}
+
+/* ---------- Decision history (persistent audit trail) ---------- */
+
+export type DecisionRow = {
+  id: number;
+  ts: string;
+  sector: string | null;
+  idle: boolean;
+  basket_size: number | null;
+  basket_top_symbol: string | null;
+  basket_top_weight: number | null;
+  basket: Record<string, number> | null;
+  strategy_source: string | null;
+  strategy_confidence: string | null;
+  strategy_reasoning: string | null;
+  sentiment_score: number | null;
+  sentiment_delta: number | null;
+  flow_inflow_usd: number | null;
+  backtest_sharpe: number | null;
+  backtest_drawdown: number | null;
+  backtest_win_rate: number | null;
+  risk_verdict: string | null;
+  risk_breaches: Array<Record<string, unknown>> | null;
+  ssi_tx_hash: string | null;
+  ssi_status: string | null;
+  sodex_placed: number | null;
+  sodex_skipped: number | null;
+  sodex_errors: number | null;
+  emergency: boolean;
+};
+
+export type HistoryStats = {
+  total: number;
+  emergency_count: number;
+  idle_count: number;
+  active_count: number;
+  last_decision_at: string | null;
+  sectors: string[];
+  window_days: number;
+};
+
+export async function getDecisionHistory(opts?: {
+  limit?: number;
+  sector?: string;
+  since?: string;
+}): Promise<DecisionRow[]> {
+  try {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.sector) params.set("sector", opts.sector);
+    if (opts?.since) params.set("since", opts.since);
+    const qs = params.toString();
+    const url = `${AGENT_URL}/history${qs ? `?${qs}` : ""}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { rows?: DecisionRow[] };
+    return body.rows ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getHistoryStats(): Promise<HistoryStats | null> {
+  try {
+    const res = await fetch(`${AGENT_URL}/history/stats`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as HistoryStats;
+  } catch {
+    return null;
+  }
+}
+
 export async function chat(turns: ChatTurn[]): Promise<ChatTurn> {
   try {
     const res = await fetch(`${AGENT_URL}/chat`, {
@@ -248,6 +453,8 @@ function defaultState(): AgentState {
     gasSpentVal: 0,
     model: "claude-sonnet-4-5",
     currentNode: null,
+    paused: false,
+    halted: false,
     nodes: [
       { id: "signal", label: "Signal Listener", status: "idle", sub: "polls 2s" },
       { id: "sentiment", label: "Sentiment Analysis", status: "idle", sub: "AI score" },

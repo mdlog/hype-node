@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -38,6 +39,45 @@ KEY = os.getenv("SOSOVALUE_API_KEY", "")
 
 MIN_GAP_SEC = float(os.getenv("SOSOVALUE_MIN_GAP_SEC", "65"))
 CACHE_TTL_SEC = float(os.getenv("SOSOVALUE_CACHE_TTL_SEC", str(15 * 60)))
+
+# Per-path cache TTL overrides. Daily klines (historical) basically never
+# change for past candles, so we cache them 30 minutes — without this, the
+# `asyncio.gather` fan-out in real_backtest.py keeps hitting the rate-limit
+# guard and serving the same stale entry every cycle (see "rate-limit guard:
+# serving stale" log lines). Sentiment / flow stay short because they ARE
+# the realtime signal the loop reacts to.
+#
+# First match wins. Non-matching paths fall back to CACHE_TTL_SEC.
+PATH_TTL_RULES: list[tuple[re.Pattern[str], float]] = [
+    # Daily klines (historical) — 30min. Past candles immutable.
+    (re.compile(r"/(currencies|indices)/[^/]+/klines"), 30 * 60),
+    # News — short, signal velocity matters.
+    (re.compile(r"/news(\?|/|$)"), 30),
+    # Realtime market snapshots — short.
+    (re.compile(r"/market-snapshot"), 60),
+    (re.compile(r"/currencies/[^/]+/pairs"), 60),
+    # Token economics rarely change — 1h is fine.
+    (re.compile(r"/currencies/[^/]+/token-economics"), 60 * 60),
+    # Currency master list — very stable, cache long.
+    (re.compile(r"/currencies(\?|$)"), 60 * 60),
+    # SSI index list (rarely changes) — cache long.
+    (re.compile(r"/indices(\?|$)"), 60 * 60),
+    # SSI constituents — rebalance event-driven, 5min is conservative.
+    (re.compile(r"/indices/[^/]+/constituents"), 5 * 60),
+    # Fundraising data — slow-moving (VC rounds).
+    (re.compile(r"/fundraising"), 60 * 60),
+    # BTC treasury filings — quarterly cadence.
+    (re.compile(r"/btc-treasuries"), 60 * 60),
+]
+
+
+def _ttl_for(path: str) -> float:
+    """Return the cache TTL (seconds) for a given path, falling back to the
+    global CACHE_TTL_SEC when no path-specific rule matches."""
+    for rx, ttl in PATH_TTL_RULES:
+        if rx.search(path):
+            return ttl
+    return CACHE_TTL_SEC
 # When the API reports "Monthly quota exceeded" (code 402901 + that message),
 # back off for 6h instead of the 65s per-minute gap. Tunable.
 QUOTA_BACKOFF_SEC = float(os.getenv("SOSOVALUE_QUOTA_BACKOFF_SEC", str(6 * 3600)))
@@ -234,7 +274,7 @@ async def _get(path: str) -> Any:
             raise RuntimeError(f"{r.status_code} code={envelope_code} msg={msg}")
 
         data = body.get("data", body) if isinstance(body, dict) else body
-        _cache[path] = (data, time.time() + CACHE_TTL_SEC, time.time())
+        _cache[path] = (data, time.time() + _ttl_for(path), time.time())
         _last_success = {"path": path, "at": _iso_from_epoch(time.time())}
         fut.set_result(data)
         return data

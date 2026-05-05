@@ -9,3 +9,5 @@ export { LineChart } from "./LineChart";
 export { Meter } from "./Meter";
 export { Toggle } from "./Toggle";
 export { HypeGauge } from "./HypeGauge";
+export { ProjectLogo } from "./ProjectLogo";
+export { LogoSplash } from "./LogoSplash";

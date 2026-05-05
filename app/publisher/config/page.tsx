@@ -104,7 +104,7 @@ export default function ConfigPage() {
           <Mono size={10} className="block mb-3">
             agent scans these for hype signals
           </Mono>
-          <div style={{ maxHeight: 460, overflowY: "auto" }}>
+          <div>
             {tickers.map((t) => {
               const display = SSI_DISPLAY[t] ?? { label: t, flag: null };
               const on = sectorState[t] ?? false;

@@ -2,20 +2,52 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { tokens } from "@/lib/tokens";
 import { Mono } from "@/components/ui/Mono";
 import { WalletBadge } from "@/components/auth/WalletBadge";
+import { RoleSwitcher } from "@/components/nav/RoleSwitcher";
 
-const items = [
+type NavLeaf = { k: string; l: string };
+type NavGroup = { l: string; children: NavLeaf[] };
+type NavItem = NavLeaf | NavGroup;
+
+const isGroup = (i: NavItem): i is NavGroup => "children" in i;
+
+const items: NavItem[] = [
   { k: "dashboard", l: "Dashboard" },
-  { k: "research", l: "Research" },
-  { k: "builder", l: "Builder" },
-  { k: "agent", l: "Agent" },
-  { k: "portfolio", l: "Portfolio" },
-  { k: "risk", l: "Risk" },
-  { k: "history", l: "History" },
+  {
+    l: "Markets",
+    children: [
+      { k: "tokens", l: "Tokens" },
+      { k: "stocks", l: "Stocks" },
+      { k: "fundraising", l: "Funding" },
+    ],
+  },
+  {
+    l: "Research",
+    children: [
+      { k: "research", l: "Research" },
+      { k: "analyses", l: "Analysis" },
+    ],
+  },
+  {
+    l: "Strategy",
+    children: [
+      { k: "builder", l: "Builder" },
+      { k: "agent", l: "Agent" },
+      { k: "backtest", l: "Backtest" },
+    ],
+  },
+  {
+    l: "Portfolio",
+    children: [
+      { k: "portfolio", l: "Portfolio" },
+      { k: "risk", l: "Risk" },
+      { k: "history", l: "History" },
+    ],
+  },
   { k: "chat", l: "Chat" },
-  { k: "backtest", l: "Backtest" },
   { k: "settings", l: "Settings" },
 ];
 
@@ -33,60 +65,49 @@ export function IndexerTopBar() {
         background: tokens.bg,
       }}
     >
-      <Link href="/dashboard" className="flex items-center gap-2">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/logo-hypenode.png"
-          alt="HypeNode"
-          width={36}
-          height={36}
-          style={{ display: "block" }}
-        />
-        <span
-          className="font-sans"
-          style={{
-            fontSize: 14,
-            fontWeight: 600,
-            letterSpacing: "-0.01em",
-            color: tokens.text,
-          }}
-        >
-          HypeNode
-        </span>
-        <span
-          className="font-mono uppercase"
-          style={{
-            fontSize: 10,
-            color: tokens.textFaint,
-            letterSpacing: "0.12em",
-          }}
-        >
-          / indexer
-        </span>
-      </Link>
-      <div className="flex-1 flex gap-0.5 ml-6">
-        {items.map((i) => {
-          const on = active === i.k;
-          return (
-            <Link
-              key={i.k}
-              href={`/${i.k}`}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 5,
-                background: on ? tokens.bgElev : "transparent",
-                color: on ? tokens.text : tokens.textDim,
-                fontSize: 12,
-                fontWeight: 500,
-                letterSpacing: "-0.01em",
-              }}
-            >
-              {i.l}
-            </Link>
-          );
-        })}
+      <div className="flex-1 flex items-center min-w-0">
+        <Link href="/dashboard" className="flex items-center gap-2">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/logo-hypenode.png"
+            alt="HypeNode"
+            width={36}
+            height={36}
+            style={{ display: "block" }}
+          />
+          <span
+            className="font-sans"
+            style={{
+              fontSize: 14,
+              fontWeight: 600,
+              letterSpacing: "-0.01em",
+              color: tokens.text,
+            }}
+          >
+            HypeNode
+          </span>
+          <span
+            className="font-mono uppercase"
+            style={{
+              fontSize: 10,
+              color: tokens.textFaint,
+              letterSpacing: "0.12em",
+            }}
+          >
+            / indexer
+          </span>
+        </Link>
       </div>
-      <div className="flex items-center gap-2.5">
+      <div className="flex gap-0.5 justify-center">
+        {items.map((i) =>
+          isGroup(i) ? (
+            <NavDropdown key={i.l} group={i} active={active} />
+          ) : (
+            <NavLink key={i.k} item={i} active={active} />
+          ),
+        )}
+      </div>
+      <div className="flex-1 flex items-center justify-end gap-2.5">
         <div
           className="flex items-center"
           style={{
@@ -111,19 +132,132 @@ export function IndexerTopBar() {
         </div>
         <Mono size={10}>⌘K</Mono>
         <WalletBadge />
-        <Link
-          href="/publisher/radar"
+        <RoleSwitcher current="indexer" />
+      </div>
+    </div>
+  );
+}
+
+function NavLink({ item, active }: { item: NavLeaf; active: string }) {
+  const on = active === item.k;
+  return (
+    <Link
+      href={`/${item.k}`}
+      style={{
+        padding: "6px 10px",
+        borderRadius: 5,
+        background: on ? tokens.bgElev : "transparent",
+        color: on ? tokens.text : tokens.textDim,
+        fontSize: 12,
+        fontWeight: 500,
+        letterSpacing: "-0.01em",
+      }}
+    >
+      {item.l}
+    </Link>
+  );
+}
+
+function NavDropdown({ group, active }: { group: NavGroup; active: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const containsActive = group.children.some((c) => c.k === active);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          padding: "6px 10px",
+          borderRadius: 5,
+          background: containsActive || open ? tokens.bgElev : "transparent",
+          color: containsActive ? tokens.text : tokens.textDim,
+          fontSize: 12,
+          fontWeight: 500,
+          letterSpacing: "-0.01em",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "inherit",
+        }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {group.l}
+        <span
           style={{
-            fontSize: 11,
-            color: tokens.cyan,
-            border: `1px solid ${tokens.cyan}40`,
-            padding: "3px 8px",
-            borderRadius: 4,
+            fontSize: 9,
+            color: tokens.textFaint,
+            transform: open ? "rotate(180deg)" : "none",
+            transition: "transform 120ms ease",
+            display: "inline-block",
           }}
         >
-          → Publisher
-        </Link>
-      </div>
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            minWidth: 160,
+            background: tokens.bg,
+            border: `1px solid ${tokens.border}`,
+            borderRadius: 6,
+            padding: 4,
+            display: "flex",
+            flexDirection: "column",
+            gap: 1,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+            zIndex: 20,
+          }}
+        >
+          {group.children.map((c) => {
+            const on = active === c.k;
+            return (
+              <Link
+                key={c.k}
+                href={`/${c.k}`}
+                onClick={() => setOpen(false)}
+                role="menuitem"
+                style={{
+                  padding: "7px 10px",
+                  borderRadius: 4,
+                  background: on ? tokens.bgElev : "transparent",
+                  color: on ? tokens.text : tokens.textDim,
+                  fontSize: 12,
+                  fontWeight: 500,
+                  letterSpacing: "-0.01em",
+                }}
+              >
+                {c.l}
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

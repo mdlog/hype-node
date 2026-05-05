@@ -10,16 +10,22 @@ stream the log."""
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from . import store
 from .tools import backtest as bt
 from .tools import risk as risk_tool
 from .tools import sodex
 from .tools import ssi
 from .tools import terminal
+from .strategy_agent import run_strategy_agent
+
+# Total USDC notional spread across basket constituents per rebalance cycle.
+EXEC_NOTIONAL_USDC = float(os.getenv("AGENT_EXEC_NOTIONAL_USDC", "50"))
 
 
 class HypeState(TypedDict, total=False):
@@ -37,8 +43,14 @@ class HypeState(TypedDict, total=False):
     current_node: str
 
 
-def _log(state: HypeState, kind: str, text: str) -> HypeState:
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), "kind": kind, "text": text}
+def _log(state: HypeState, kind: str, text: str, url: str | None = None) -> HypeState:
+    entry: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "text": text,
+    }
+    if url:
+        entry["url"] = url
     state.setdefault("log", []).append(entry)
     return state
 
@@ -67,42 +79,64 @@ async def flow_node(state: HypeState) -> HypeState:
 
 
 async def strategy_node(state: HypeState) -> HypeState:
+    """Compose the basket for this cycle.
+
+    Replaces the legacy `if sentiment < 60: idle` rule with a Claude tool-use
+    loop (see strategy_agent.py). Claude has access to read-only SoSoValue
+    tools — sentiment, fund flow, news, SSI constituents, run_backtest — and
+    decides composition + confidence. Tool calls + reasoning stream live to
+    the /agent page via strategy_agent's emitter.
+
+    Hard floor at sentiment < 30: skip Claude entirely and idle to save tokens
+    on cycles that clearly aren't going anywhere. Above that, defer judgment
+    to the LLM (it can override with delta + flow context).
+
+    On any failure (no API key, Claude error, max_iter exceeded), the agent
+    returns a rule-based fallback basket so the LangGraph loop never stalls.
+    """
     state["current_node"] = "strategy"
-    sentiment = state.get("sentiment", {}).get("score", 0)
-    if sentiment < 60:
-        # Mark this cycle as idle so downstream nodes (risk → wrap → exec) skip
-        # the on-chain leg cleanly.
+    sentiment_score = state.get("sentiment", {}).get("score", 0)
+    sector = state.get("sector", "DePIN")
+
+    # Hard floor — below this, even Claude can't talk us into a basket and
+    # spending tokens reasoning about an empty signal is wasteful.
+    if sentiment_score < 30:
         state["basket"] = {}
         state["idle"] = True
-        return _log(state, "THINK", f"basket · idle (sentiment {sentiment} < 60)")
+        state["strategy_source"] = "rule_floor"
+        return _log(
+            state,
+            "THINK",
+            f"basket · idle (sentiment {sentiment_score} < 30 hard floor — skipping LLM)",
+        )
 
-    sector = state.get("sector", "DePIN")
-    ssi_ticker = terminal.sector_to_ssi(sector)
-    basket: dict[str, float] = {}
-    if ssi_ticker:
-        try:
-            constituents = await terminal.get_ssi_constituents(ssi_ticker)
-            if constituents:
-                for c in constituents:
-                    sym = c.get("symbol")
-                    w = c.get("weight")
-                    if isinstance(sym, str) and isinstance(w, (int, float)):
-                        basket[sym.upper()] = float(w)
-        except Exception as exc:  # noqa: BLE001
-            _log(state, "WAIT", f"constituents fetch failed: {exc}")
-    if not basket:
-        # Constituents unavailable (rate-limited or no SSI mapping). Use a
-        # sensible blue-chip fallback so the rest of the graph still runs
-        # without violating the wrap weight invariant.
-        basket = {"BTC": 0.5, "ETH": 0.3, "SOL": 0.2}
+    try:
+        result = await run_strategy_agent(sector)
+    except Exception as exc:  # noqa: BLE001 — last-resort safety net
+        _log(state, "WAIT", f"strategy_agent crashed: {exc}")
+        result = {
+            "basket": {"BTC": 0.5, "ETH": 0.3, "SOL": 0.2},
+            "reasoning": "post-crash fallback",
+            "confidence": "low",
+            "source": "fallback",
+        }
+
+    basket = result.get("basket") or {}
     state["basket"] = basket
-    state["idle"] = False
-    top_sym, top_w = max(basket.items(), key=lambda kv: kv[1])
-    return _log(
-        state,
-        "THINK",
-        f"basket · {ssi_ticker or 'fallback'} N={len(basket)} top {top_sym}@{top_w:.0%}",
-    )
+    state["idle"] = len(basket) == 0
+    state["strategy_source"] = result.get("source", "fallback")
+    state["strategy_confidence"] = result.get("confidence", "low")
+    state["strategy_reasoning"] = result.get("reasoning", "")
+
+    if basket:
+        top_sym, top_w = max(basket.items(), key=lambda kv: kv[1])
+        return _log(
+            state,
+            "THINK",
+            f"basket · {result.get('source')}-driven N={len(basket)} "
+            f"top {top_sym}@{top_w:.0%} conf={result.get('confidence')}",
+        )
+    return _log(state, "THINK", f"basket · idle ({result.get('source')})")
 
 
 async def backtest_node(state: HypeState) -> HypeState:
@@ -125,10 +159,23 @@ async def risk_node(state: HypeState) -> HypeState:
         "weights": state.get("basket", {}),
         "net_outflow_24h_usd": 0,
     }
-    verdict = await risk_tool.check_thresholds(metrics)
+    # Pull live config from SQLite each cycle so UI changes take effect on
+    # the next rebalance without restarting the service. Falls through to
+    # DEFAULT_THRESHOLDS in tools/risk.py if the DB is unreachable.
+    try:
+        cfg = store.get_risk_config()
+    except Exception:  # noqa: BLE001 — never fail the loop on a config read
+        cfg = None
+    verdict = await risk_tool.check_thresholds(metrics, cfg)
     state["risk"] = verdict
     state["emergency"] = not verdict["ok"]
-    return _log(state, "THINK", f"risk · {verdict['verdict']} breaches={len(verdict['breaches'])}")
+    skipped = verdict.get("skipped_rules") or []
+    suffix = f" skipped={len(skipped)}" if skipped else ""
+    return _log(
+        state,
+        "THINK",
+        f"risk · {verdict['verdict']} breaches={len(verdict['breaches'])}{suffix}",
+    )
 
 
 def risk_router(state: HypeState) -> str:
@@ -142,9 +189,24 @@ async def wrap_node(state: HypeState) -> HypeState:
     basket = state.get("basket") or {}
     if not basket:
         return _log(state, "WAIT", "wrap · skipped (empty basket)")
-    res = await ssi.wrap("HDP8", basket)
+    # Symbol per sector keeps idempotency clean — re-runs of the same sector
+    # hit `already_registered` instead of reverting on-chain.
+    sector = state.get("sector", "GEN")
+    symbol = f"H{sector[:3].upper()}"
+    try:
+        res = await ssi.wrap(symbol, basket)
+    except Exception as exc:  # noqa: BLE001
+        return _log(state, "WAIT", f"ssi.wrap · failed: {exc}")
     state["ssi_tx"] = res
-    return _log(state, "ACT", f"ssi.wrap · tx={res['tx_hash'][:10]}…")
+    if res.get("status") == "already_registered":
+        return _log(state, "OBS", f"ssi.wrap · {symbol} already registered, skip")
+    txh = res.get("tx_hash") or ""
+    return _log(
+        state,
+        "ACT",
+        f"ssi.wrap · {symbol} tx={txh[:10]}… block={res.get('block_number')}",
+        url=res.get("external_url"),
+    )
 
 
 async def exec_node(state: HypeState) -> HypeState:
@@ -152,19 +214,59 @@ async def exec_node(state: HypeState) -> HypeState:
     basket = state.get("basket") or {}
     if not basket:
         return _log(state, "WAIT", "exec · skipped (empty basket)")
+
+    # Allocate USDC across constituents proportionally — bobot di basket
+    # nilainya 0..1, total ≈ 1.0.
+    notional_total = float(state.get("exec_notional_usdc") or EXEC_NOTIONAL_USDC)
     txs: list[dict[str, Any]] = []
-    for sym in basket.keys():
-        tx = await sodex.execute_trade("USDC", sym, 1_000)
+    placed = skipped = errors = 0
+    total_latency = 0
+    for sym, weight in basket.items():
+        amount_in = max(notional_total * float(weight), 1.0)
+        tx = await sodex.execute_trade("USDC", sym, amount_in)
         txs.append(tx)
+        total_latency += int(tx.get("latency_ms") or 0)
+        if tx.get("ok"):
+            placed += 1
+            _log(
+                state,
+                "ACT",
+                f"sodex · {sym} order #{tx.get('order_id')} {tx.get('quantity')} @ {tx.get('limit_price')}",
+                url=tx.get("external_url"),
+            )
+        elif tx.get("skipped"):
+            skipped += 1
+            _log(state, "WAIT", f"sodex · skip {sym} ({tx.get('reason')})")
+        else:
+            errors += 1
+            _log(state, "WAIT", f"sodex · error {sym}: {tx.get('error')}")
+
     state["sodex_txs"] = txs
-    return _log(state, "ACT", f"sodex · {len(txs)} fills · avg latency 4.2s")
+    avg = (total_latency / len(txs) / 1000) if txs else 0.0
+    return _log(
+        state,
+        "ACT",
+        f"sodex · {placed} placed · {skipped} skipped · {errors} errors · avg {avg:.1f}s",
+    )
 
 
 async def emergency_exit(state: HypeState) -> HypeState:
     state["current_node"] = "emergency_exit"
-    res = await ssi.wrap("USSI", {"USDC": 1.0})
+    # Hedge spec: 100% USDC. Idempotent — first emergency in the registry's
+    # lifetime registers it; subsequent ones report already_registered and
+    # cost zero gas.
+    try:
+        res = await ssi.wrap("USSI", {"USDC": 1.0})
+    except Exception as exc:  # noqa: BLE001
+        return _log(state, "WAIT", f"emergency · ssi.wrap failed: {exc}")
     state["ssi_tx"] = res
-    return _log(state, "WAIT", f"emergency · routed to USSI hedge tx={res['tx_hash'][:10]}…")
+    txh = (res.get("tx_hash") or "")[:10]
+    return _log(
+        state,
+        "WAIT",
+        f"emergency · routed to USSI hedge tx={txh}…",
+        url=res.get("external_url"),
+    )
 
 
 async def monitor_loop(state: HypeState) -> HypeState:

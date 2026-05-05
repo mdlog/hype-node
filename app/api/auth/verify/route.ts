@@ -33,7 +33,11 @@ export async function POST(req: NextRequest) {
     // for a future session.
     session.nonce = undefined;
     await session.save();
-    return NextResponse.json({ ok: true, address: session.address });
+    return NextResponse.json({
+      ok: true,
+      address: session.address,
+      role: session.preferredRole ?? null,
+    });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: (err as Error).message || "verify failed" },

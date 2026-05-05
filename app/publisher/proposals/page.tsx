@@ -1,12 +1,8 @@
 import Link from "next/link";
 import { Card, Mono, Tag, Btn, HypeGauge } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import {
-  getSectorScores,
-  getSsiConstituents,
-  sectorToSsi,
-  type IndexConstituent,
-} from "@/lib/api/sosovalue";
+import { getSectorScores, sectorToSsi } from "@/lib/api/sosovalue";
+import { proposeBasket, type BasketProposal } from "@/lib/api/agent";
 
 export const revalidate = 60;
 
@@ -21,38 +17,6 @@ const palette = [
   "#f472b6",
 ];
 
-const TICKER_MAP: Record<string, string> = {
-  filecoin: "FIL",
-  render: "RNDR",
-  helium: "HNT",
-  arweave: "AR",
-  "akash-network": "AKT",
-  "theta-network": "THETA",
-  iota: "IOTA",
-  golem: "GLM",
-  livepeer: "LPT",
-  aethir: "ATH",
-  grass: "GRASS",
-  ondo: "ONDO",
-  mkr: "MKR",
-  usdy: "USDY",
-  btc: "BTC",
-  eth: "ETH",
-  sol: "SOL",
-  bnb: "BNB",
-  ada: "ADA",
-  avax: "AVAX",
-};
-
-function tickerOf(symbol: string): string {
-  return TICKER_MAP[symbol.toLowerCase()] ?? symbol.slice(0, 5).toUpperCase();
-}
-
-function fmtRelative(driftMin: number): string {
-  if (driftMin < 60) return `${driftMin}m ago`;
-  return `${Math.round(driftMin / 60)}h ago`;
-}
-
 type SectorScore = { sector: string; score: number; delta: number; news: number };
 
 type Proposal = {
@@ -60,62 +24,48 @@ type Proposal = {
   ticker: string;
   sector: string;
   name: string;
-  conf: number;
+  composite: number;
+  momentumLabel: "POSITIVE" | "NEGATIVE" | "FLAT";
   trigger: string;
   assets: [string, number][];
-  proj: string;
-  time: string;
+  nPool: number;
+  nPicked: number;
+  totalMcapUsd: number;
+  avgChange24hPct: number;
   highlight: boolean;
 };
 
-function buildProposal(
-  sec: SectorScore,
-  ticker: string,
-  constituents: IndexConstituent[],
-  age: number,
-  index: number,
-): Proposal {
-  // Confidence proxy: combines sector score (0–100) with breadth (constituent
-  // count) and clamps. Real agent confidence will replace this when wired.
-  const conf = Math.max(
-    20,
-    Math.min(99, Math.round(sec.score * 0.7 + Math.min(constituents.length, 12) * 2.5)),
-  );
-  const top = constituents.slice(0, 8).map((c) => [tickerOf(c.symbol), Math.round(c.weight * 100)] as [string, number]);
-  const subsLo = Math.max(20, Math.round(conf * 0.6));
-  const subsHi = subsLo + Math.round(conf * 0.5);
-  const earnLo = subsLo * 4;
-  const earnHi = subsHi * 4;
-
-  return {
-    id: ticker.toLowerCase().replace(/^ssi/, ""),
-    ticker,
-    sector: sec.sector,
-    name: `HYPE-${sec.sector.toUpperCase()}-${constituents.length}`,
-    conf,
-    trigger: `Sector score ${sec.score} · 24h Δ ${sec.delta >= 0 ? "+" : ""}${sec.delta} · ${
-      constituents.length
-    } SSI constituents`,
-    assets: top,
-    proj: `Est. subs: ${subsLo}–${subsHi} · proj. 30d earnings $${earnLo}–$${earnHi}`,
-    time: `drafted ${fmtRelative(age * (index + 1))} · expires in ${6 - index}h`,
-    highlight: index === 0 && sec.score >= 60,
-  };
+/**
+ * Composite score from real basket signals — same shape as
+ * /publisher/radar's compositeScore, but built from propose-basket output:
+ *   momentum  = avg 24h change (%) * 4   (±5% → ±20)
+ *   breadth   = picked count, capped at 20, * 1.5 (0..30)
+ *   scale     = log10(total mcap usd + 1) * 2 (real basket scale)
+ * Centered at 50, clamped 0..100. No hidden weights, no synthetic inputs.
+ */
+function compositeFromBasket(b: NonNullable<BasketProposal>): number {
+  const avgChange = b.summary?.avg_change_24h_pct ?? 0;
+  const nPicked = b.n_picked ?? 0;
+  const totalMcap = b.summary?.total_marketcap_usd ?? 0;
+  const momentum = avgChange * 4;
+  const breadth = Math.min(nPicked, 20) * 1.5;
+  const scale = Math.log10(totalMcap + 1) * 2;
+  return Math.max(0, Math.min(100, Math.round(50 + momentum + breadth + scale)));
 }
 
 const SECTOR_PRIORITY = ["DePIN", "RWA", "AI", "Meme", "GameFi", "DeFi", "Layer2", "Layer1"];
 
 export default async function ProposalsPage() {
-  // Auto-generate proposals from the top SoSoValue sectors. Strategy:
+  // Auto-generate proposals from the top SoSoValue sectors:
   // 1. Fetch sector spotlight scores.
   // 2. Filter to sectors with a known SSI ticker mapping.
-  // 3. For top 3, fetch live constituents and build a proposal card.
+  // 3. For top 3, call the agent's propose-basket endpoint for the real
+  //    constituent pool, weights, and 24h change summary.
   const sectors = await getSectorScores();
   const eligible = sectors
     .map((s) => ({ ...s, ticker: sectorToSsi(s.sector) }))
     .filter((s): s is SectorScore & { ticker: string } => !!s.ticker)
     .sort((a, b) => {
-      // Prefer narrative-aligned sectors first, then by score.
       const aPri = SECTOR_PRIORITY.indexOf(a.sector);
       const bPri = SECTOR_PRIORITY.indexOf(b.sector);
       if (aPri !== -1 && bPri !== -1) return aPri - bPri;
@@ -125,15 +75,63 @@ export default async function ProposalsPage() {
     })
     .slice(0, 3);
 
-  const constituentLists = await Promise.all(
-    eligible.map((s) => getSsiConstituents(s.ticker).catch(() => [] as IndexConstituent[])),
+  const baskets = await Promise.all(
+    eligible.map((s) => proposeBasket(s.sector, 8, "score")),
   );
 
-  const proposals: Proposal[] = eligible.map((s, i) =>
-    buildProposal(s, s.ticker, constituentLists[i], 6, i),
-  );
+  type Skipped = { sector: string; reason: string };
+  const skipped: Skipped[] = [];
+  const proposals: Proposal[] = [];
 
-  const live = sectors.length >= 13 && constituentLists.some((cs) => cs.length > 0);
+  eligible.forEach((sec, i) => {
+    const basket = baskets[i];
+    if (!basket) {
+      skipped.push({ sector: sec.sector, reason: "agent service unreachable" });
+      return;
+    }
+    if (!basket.ok) {
+      skipped.push({ sector: sec.sector, reason: basket.error ?? "propose-basket returned ok=false" });
+      return;
+    }
+    const summary = basket.summary;
+    const constituents = basket.constituents ?? [];
+    if (!summary || constituents.length === 0) {
+      skipped.push({ sector: sec.sector, reason: "empty basket — no eligible constituents" });
+      return;
+    }
+
+    const symbols = summary.symbols ?? [];
+    const weights = summary.weights_pct ?? [];
+    const assets: [string, number][] = symbols.map((sym, j) => [
+      sym,
+      Math.round(weights[j] ?? 0),
+    ]);
+
+    const composite = compositeFromBasket(basket);
+    const avgChange = summary.avg_change_24h_pct;
+    const momentumLabel: "POSITIVE" | "NEGATIVE" | "FLAT" =
+      avgChange > 0.5 ? "POSITIVE" : avgChange < -0.5 ? "NEGATIVE" : "FLAT";
+
+    proposals.push({
+      id: sec.ticker.toLowerCase().replace(/^ssi/, ""),
+      ticker: sec.ticker,
+      sector: sec.sector,
+      name: `HYPE-${sec.sector.toUpperCase()}-${basket.n_picked ?? constituents.length}`,
+      composite,
+      momentumLabel,
+      trigger: `Pool ${basket.n_pool ?? "?"} → picked ${basket.n_picked ?? constituents.length} · 24h avg ${
+        avgChange >= 0 ? "+" : ""
+      }${avgChange.toFixed(2)}% · weighting ${basket.weighting ?? "score"}`,
+      assets,
+      nPool: basket.n_pool ?? 0,
+      nPicked: basket.n_picked ?? constituents.length,
+      totalMcapUsd: summary.total_marketcap_usd,
+      avgChange24hPct: avgChange,
+      highlight: i === 0 && composite >= 60,
+    });
+  });
+
+  const live = proposals.length > 0;
 
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
@@ -143,16 +141,16 @@ export default async function ProposalsPage() {
             Pending Proposals
           </div>
           <Mono size={11}>
-            {proposals.length} drafts derived from sector-spotlight + SSI constituents · expires in
-            6h if untouched
+            {proposals.length} drafts derived from /sector-spotlight + agent /propose-basket ·
+            real basket data
           </Mono>
         </div>
         <div className="flex gap-1.5">
           <Tag small color={live ? tokens.emerald : tokens.textFaint} dot>
-            {live ? "live · /sector-spotlight + /indices" : "fallback"}
+            {live ? "live · sector momentum from /sector-spotlight (refreshed at request time)" : "no live proposals"}
           </Tag>
-          <Btn small>Rejected (4)</Btn>
-          <Btn small>Published (12)</Btn>
+          <Btn small>Rejected</Btn>
+          <Btn small>Published</Btn>
         </div>
       </div>
 
@@ -173,7 +171,7 @@ export default async function ProposalsPage() {
               style={{ padding: 16, gridTemplateColumns: "auto 1fr auto", gap: 20 }}
             >
               <div className="flex flex-col items-center">
-                <HypeGauge score={p.conf} sector="AGENT CONFIDENCE" size={84} />
+                <HypeGauge score={p.composite} sector="COMPOSITE SCORE" size={84} />
               </div>
               <div>
                 <div className="flex items-center gap-2 mb-1">
@@ -185,7 +183,19 @@ export default async function ProposalsPage() {
                       hot
                     </Tag>
                   )}
-                  <Mono size={10}>{p.time}</Mono>
+                  <Tag
+                    small
+                    color={
+                      p.momentumLabel === "POSITIVE"
+                        ? tokens.emerald
+                        : p.momentumLabel === "NEGATIVE"
+                          ? tokens.red
+                          : tokens.textFaint
+                    }
+                    dot
+                  >
+                    {p.momentumLabel}
+                  </Tag>
                   <Mono size={10} color={tokens.textFaint}>
                     · {p.ticker}
                   </Mono>
@@ -221,7 +231,7 @@ export default async function ProposalsPage() {
                       className="flex items-center justify-center font-mono"
                       style={{
                         width: `${w}%`,
-                        background: palette[j],
+                        background: palette[j % palette.length],
                         color: tokens.bg,
                         fontSize: 10,
                         fontWeight: 700,
@@ -239,8 +249,8 @@ export default async function ProposalsPage() {
                     </Mono>
                   ))}
                 </div>
-                <Mono size={11} color={tokens.emerald} className="mt-2 block">
-                  💰 {p.proj}
+                <Mono size={11} color={tokens.textDim} className="mt-2 block">
+                  Subscriber & earnings tracking pending billing layer
                 </Mono>
               </div>
               <div className="flex flex-col gap-1.5" style={{ minWidth: 160 }}>
@@ -259,6 +269,33 @@ export default async function ProposalsPage() {
             </div>
           </Card>
         ))}
+
+        {proposals.length === 0 && (
+          <Card pad={16}>
+            <Mono size={11} color={tokens.textDim}>
+              No live proposals — agent /propose-basket returned no eligible baskets for the top
+              sectors at this time.
+            </Mono>
+          </Card>
+        )}
+
+        {skipped.length > 0 && (
+          <div
+            style={{
+              padding: "8px 12px",
+              borderTop: `1px solid ${tokens.borderFaint}`,
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+            }}
+          >
+            {skipped.map((s, i) => (
+              <Mono key={i} size={10} color={tokens.textFaint}>
+                skipped {s.sector}: {s.reason}
+              </Mono>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

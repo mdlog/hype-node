@@ -91,13 +91,28 @@ export function SignInButton({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message: prepared, signature }),
       });
-      const verifyJson = (await verifyRes.json()) as { ok: boolean; address?: string; error?: string };
+      const verifyJson = (await verifyRes.json()) as {
+        ok: boolean;
+        address?: string;
+        role?: "indexer" | "publisher" | null;
+        error?: string;
+      };
       if (!verifyRes.ok || !verifyJson.ok) {
         throw new Error(verifyJson.error ?? "verify failed");
       }
       setSessionAddress(verifyJson.address ?? address.toLowerCase());
       setStatus("signed-in");
-      router.push(redirectTo);
+      // Routing decision:
+      //  - Caller passed an explicit (non-default) redirectTo → honour it.
+      //  - User has a saved role → land on that role's home.
+      //  - First-time user with no saved role → onboarding picker.
+      let dest = redirectTo;
+      if (redirectTo === "/dashboard") {
+        if (verifyJson.role === "publisher") dest = "/publisher/radar";
+        else if (verifyJson.role === "indexer") dest = "/dashboard";
+        else dest = "/onboarding/role";
+      }
+      router.push(dest);
       router.refresh();
     } catch (err) {
       setStatus("error");

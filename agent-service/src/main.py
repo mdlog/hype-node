@@ -7,6 +7,7 @@ AGENT_SERVICE_URL to call /state, /reasoning, /chat, /run.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -24,6 +25,8 @@ load_dotenv()
 from .chat_agent import run_agentic_chat  # noqa: E402
 from .graph import GRAPH, HypeState  # noqa: E402
 from .state import AgentNode, AgentState, ChatRequest, ChatTurn, ReasoningEntry  # noqa: E402
+from . import store  # noqa: E402
+from . import strategy_agent  # noqa: E402
 from .tools import basket as basket_tool  # noqa: E402
 from .tools import real_backtest  # noqa: E402
 from .tools import terminal  # noqa: E402
@@ -31,6 +34,19 @@ from .tools import terminal  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Bind the step-request event to the running event loop now that one
+    # exists (FastAPI's lifespan runs inside the asyncio loop, unlike module
+    # import where there is none).
+    global STEP_REQUEST
+    STEP_REQUEST = asyncio.Event()
+    # Eagerly init SQLite — schema migration runs here so a fresh disk's
+    # first /risk/config or /history call doesn't pay the cost mid-request.
+    try:
+        store.init()
+    except Exception as exc:  # noqa: BLE001 — never block startup on DB
+        # Log to stderr; the runner falls back to DEFAULT_THRESHOLDS and
+        # decision rows simply aren't persisted until the DB recovers.
+        print(f"[startup] store.init failed: {exc}")
     # Start the LangGraph driver as a background task; cancel it on shutdown.
     task = asyncio.create_task(_runner())
     try:
@@ -57,6 +73,45 @@ LATEST_LOG: list[ReasoningEntry] = []
 TOOL_CALLS = 0
 DECISIONS = 0
 GAS_VAL = 0.0
+
+# Run-control flags wired to /pause /step /reset /halt endpoints. The
+# background runner reads these every iteration:
+#   - paused: skip the iteration unless STEP_REQUEST is set
+#   - halted: stop running entirely; only /reset clears it
+#   - STEP_REQUEST: one-shot — execute one iteration and clear, even when
+#     paused. Created lazily inside lifespan() so we attach to the running
+#     event loop instead of FastAPI's import-time loop.
+RUN_STATE: dict[str, bool] = {"paused": False, "halted": False}
+STEP_REQUEST: asyncio.Event | None = None
+
+
+def _strategy_live_emit(kind: str, text: str) -> None:
+    """Forward strategy_agent's live reasoning entries directly to LATEST_LOG
+    so the /agent page reasoning stream updates as Claude reasons (within a
+    cycle), not just when the cycle finishes.
+
+    Also bumps TOOL_CALLS for kind=="TOOL" so the KPI strip reflects real
+    tool-use volume — strategy_agent emits TOOL entries here, bypassing the
+    state["log"] channel that the runner counts at end-of-cycle.
+    """
+    global TOOL_CALLS
+    LATEST_LOG.append(
+        ReasoningEntry(
+            ts=datetime.now(timezone.utc),
+            # state.ReasoningEntry constrains kind to a Literal; the strategy
+            # agent only emits valid values, but cast defensively to keep
+            # pydantic happy if a future caller drifts.
+            kind=kind,  # type: ignore[arg-type]
+            text=text,
+        )
+    )
+    if len(LATEST_LOG) > 250:
+        del LATEST_LOG[: len(LATEST_LOG) - 250]
+    if kind == "TOOL":
+        TOOL_CALLS += 1
+
+
+strategy_agent.set_emitter(_strategy_live_emit)
 NODE_LABELS: dict[str, tuple[str, str]] = {
     "signal": ("Signal Listener", "polls 2s"),
     "sentiment": ("Sentiment Analysis", "AI score"),
@@ -89,7 +144,65 @@ def _build_state_response() -> AgentState:
         model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
         current_node=current,
         nodes=nodes,
+        paused=RUN_STATE["paused"],
+        halted=RUN_STATE["halted"],
     )
+
+
+def _persist_cycle(state: dict[str, Any], sector: str) -> None:
+    """Build a summary row from the cycle's terminal state and append it to
+    the SQLite decision log. Runs synchronously inside the runner — sqlite3
+    is fast enough that this doesn't impact loop cadence (~ms per write)."""
+    basket = state.get("basket") or {}
+    top_symbol: str | None = None
+    top_weight: float | None = None
+    if basket:
+        top_symbol, top_weight = max(basket.items(), key=lambda kv: kv[1])
+    risk = state.get("risk") or {}
+    sodex_txs = state.get("sodex_txs") or []
+    placed = sum(1 for t in sodex_txs if t.get("ok"))
+    skipped = sum(1 for t in sodex_txs if t.get("skipped"))
+    errors = sum(1 for t in sodex_txs if not (t.get("ok") or t.get("skipped")))
+    ssi_tx = state.get("ssi_tx") or {}
+    backtest = state.get("backtest") or {}
+    sentiment = state.get("sentiment") or {}
+    flow = state.get("flow") or {}
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "sector": sector,
+        "idle": 1 if state.get("idle") else 0,
+        "basket_size": len(basket) if basket else 0,
+        "basket_top_symbol": top_symbol,
+        "basket_top_weight": float(top_weight) if top_weight is not None else None,
+        "basket_json": json.dumps(basket) if basket else None,
+        "strategy_source": state.get("strategy_source"),
+        "strategy_confidence": state.get("strategy_confidence"),
+        "strategy_reasoning": (state.get("strategy_reasoning") or "")[:400] or None,
+        "sentiment_score": _maybe_float(sentiment.get("score")),
+        "sentiment_delta": _maybe_float(sentiment.get("delta")),
+        "flow_inflow_usd": _maybe_float(flow.get("net_inflow_usd")),
+        "backtest_sharpe": _maybe_float(backtest.get("sharpe")),
+        "backtest_drawdown": _maybe_float(backtest.get("max_drawdown")),
+        "backtest_win_rate": _maybe_float(backtest.get("win_rate")),
+        "risk_verdict": risk.get("verdict"),
+        "risk_breaches_json": json.dumps(risk.get("breaches", [])) if risk else None,
+        "ssi_tx_hash": ssi_tx.get("tx_hash"),
+        "ssi_status": ssi_tx.get("status"),
+        "sodex_placed": placed,
+        "sodex_skipped": skipped,
+        "sodex_errors": errors,
+        "emergency": 1 if state.get("emergency") else 0,
+    }
+    store.append_decision(record)
+
+
+def _maybe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _runner() -> None:
@@ -98,11 +211,27 @@ async def _runner() -> None:
     Cadence is controlled by AGENT_LOOP_SEC, while SoSoValue request pacing and
     cache TTLs are controlled by SOSOVALUE_* env vars. Demo-tier deployments
     should use a much slower loop and longer cache than paid-tier/dev setups.
+
+    Honors three control flags exposed via the /pause /step /halt endpoints:
+      - RUN_STATE["halted"]: hard stop until /reset clears it. Idle-polls 1s.
+      - RUN_STATE["paused"]: skip the iteration unless STEP_REQUEST is set.
+        While paused, idle-polls every 0.5s so /step has snappy latency.
+      - STEP_REQUEST: one-shot — execute exactly one iteration and clear,
+        regardless of paused state.
     """
     global TOOL_CALLS, DECISIONS, GAS_VAL
     sectors_cycle = ["DePIN", "RWA", "AI", "Memes", "GameFi"]  # rotates through SSI indices
     i = 0
     while True:
+        # Halt is a latched safety stop — exits only via /reset.
+        if RUN_STATE["halted"]:
+            await asyncio.sleep(1)
+            continue
+        # Paused without a pending step → idle-poll. Cheap loop so the next
+        # /resume or /step doesn't have to wait the full AGENT_LOOP_SEC.
+        if RUN_STATE["paused"] and not (STEP_REQUEST and STEP_REQUEST.is_set()):
+            await asyncio.sleep(0.5)
+            continue
         try:
             sector = sectors_cycle[i % len(sectors_cycle)]
             i += 1
@@ -116,6 +245,19 @@ async def _runner() -> None:
                 GAS_VAL += tx.get("gas_val", 0.0)
             if len(LATEST_LOG) > 250:
                 del LATEST_LOG[: len(LATEST_LOG) - 250]
+            # Persist a one-row summary of this cycle. RAM logs are capped
+            # at 250 entries; this is the durable audit trail surfaced by
+            # the History page.
+            try:
+                _persist_cycle(state, sector)
+            except Exception as exc:  # noqa: BLE001 — DB issues never crash the loop
+                LATEST_LOG.append(
+                    ReasoningEntry(
+                        ts=datetime.now(timezone.utc),
+                        kind="WAIT",
+                        text=f"history · persist failed: {exc}",
+                    )
+                )
         except Exception as exc:  # noqa: BLE001
             LATEST_LOG.append(
                 ReasoningEntry(
@@ -124,6 +266,15 @@ async def _runner() -> None:
                     text=f"loop crash · {exc}",
                 )
             )
+        finally:
+            # Step is a one-shot — clear after the iteration regardless of
+            # success so the next paused tick goes back to idle-polling.
+            if STEP_REQUEST and STEP_REQUEST.is_set():
+                STEP_REQUEST.clear()
+        # If paused or halted, skip the long sleep so the next state-change
+        # control takes effect immediately.
+        if RUN_STATE["paused"] or RUN_STATE["halted"]:
+            continue
         # Override with AGENT_LOOP_SEC. Demo tier should usually be >=120s.
         await asyncio.sleep(int(os.getenv("AGENT_LOOP_SEC", "120")))
 
@@ -141,6 +292,80 @@ async def state() -> AgentState:
 @app.get("/reasoning", response_model=list[ReasoningEntry])
 async def reasoning() -> list[ReasoningEntry]:
     return LATEST_LOG[-100:]
+
+
+@app.post("/pause")
+async def pause_endpoint() -> dict[str, Any]:
+    """Toggle the paused flag. The runner finishes its current iteration
+    (uninterruptible inside GRAPH.ainvoke) and then idles."""
+    RUN_STATE["paused"] = not RUN_STATE["paused"]
+    LATEST_LOG.append(
+        ReasoningEntry(
+            ts=datetime.now(timezone.utc),
+            kind="WAIT",
+            text="agent paused via /pause" if RUN_STATE["paused"] else "agent resumed via /pause",
+        )
+    )
+    return {"paused": RUN_STATE["paused"], "halted": RUN_STATE["halted"]}
+
+
+@app.post("/step")
+async def step_endpoint() -> dict[str, Any]:
+    """Run exactly one LangGraph iteration. Works whether the agent is
+    paused or running — useful for nudging through the cycle deterministically.
+    No-op while halted."""
+    if RUN_STATE["halted"]:
+        return {"stepped": False, "reason": "halted"}
+    if STEP_REQUEST is None:
+        return {"stepped": False, "reason": "service warming up"}
+    STEP_REQUEST.set()
+    LATEST_LOG.append(
+        ReasoningEntry(
+            ts=datetime.now(timezone.utc),
+            kind="ACT",
+            text="single-step requested via /step",
+        )
+    )
+    return {"stepped": True}
+
+
+@app.post("/reset")
+async def reset_endpoint() -> dict[str, Any]:
+    """Wipe accumulated counters / log, clear halted+paused flags. Doesn't
+    cancel the running task — the next iteration starts fresh."""
+    global TOOL_CALLS, DECISIONS, GAS_VAL
+    LATEST_STATE.clear()
+    LATEST_LOG.clear()
+    TOOL_CALLS = 0
+    DECISIONS = 0
+    GAS_VAL = 0.0
+    RUN_STATE["halted"] = False
+    RUN_STATE["paused"] = False
+    LATEST_LOG.append(
+        ReasoningEntry(
+            ts=datetime.now(timezone.utc),
+            kind="ACT",
+            text="state reset via /reset",
+        )
+    )
+    return {"reset": True}
+
+
+@app.post("/halt")
+async def halt_endpoint() -> dict[str, Any]:
+    """Emergency stop. The runner finishes its current iteration then idles
+    until /reset clears the flag. /pause is implicitly cleared so the only
+    state is `halted=True`."""
+    RUN_STATE["halted"] = True
+    RUN_STATE["paused"] = False
+    LATEST_LOG.append(
+        ReasoningEntry(
+            ts=datetime.now(timezone.utc),
+            kind="WAIT",
+            text="agent halted via /halt — /reset to resume",
+        )
+    )
+    return {"halted": True}
 
 
 @app.post("/chat", response_model=ChatTurn)
@@ -182,6 +407,49 @@ async def run_backtest_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(constituents, list):
         return {"ok": False, "error": "constituents must be a list"}
     return await real_backtest.run_real_backtest(constituents=constituents, days=days)
+
+
+@app.get("/risk/config")
+async def get_risk_config_endpoint() -> dict[str, Any]:
+    """Live risk gate config — thresholds + per-rule enable flags. Read every
+    cycle by `risk_node`, edited by the Risk page UI."""
+    return store.get_risk_config()
+
+
+@app.post("/risk/config")
+async def update_risk_config_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Partial update — only fields present in the body are touched. Unknown
+    keys are silently dropped (whitelist enforced inside store.update_risk_config)."""
+    updated = store.update_risk_config(payload or {})
+    LATEST_LOG.append(
+        ReasoningEntry(
+            ts=datetime.now(timezone.utc),
+            kind="ACT",
+            text=(
+                f"risk config updated · "
+                f"vol≤{updated['volatility_max']} dd≤{updated['drawdown_max']} "
+                f"manual={updated['manual_override']}"
+            ),
+        )
+    )
+    return updated
+
+
+@app.get("/history")
+async def history_endpoint(
+    limit: int = 100,
+    sector: str | None = None,
+    since: str | None = None,
+) -> dict[str, Any]:
+    """Decision audit trail. `since` is an ISO timestamp; default returns
+    the most recent `limit` rows across all sectors."""
+    rows = store.list_decisions(limit=limit, sector=sector, since_iso=since)
+    return {"rows": rows, "count": len(rows)}
+
+
+@app.get("/history/stats")
+async def history_stats_endpoint() -> dict[str, Any]:
+    return store.decision_stats()
 
 
 @app.get("/terminal/sentiment")

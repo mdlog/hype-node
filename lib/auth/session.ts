@@ -6,6 +6,10 @@ export type SessionData = {
   chainId?: number;
   // Server-issued nonce for the in-flight SIWE flow. Cleared after verify.
   nonce?: string;
+  // Last surface the user picked from the landing page or header switcher.
+  // Drives the post-SIWE redirect and the landing CTA highlight. Independent
+  // of address — the user can express a preference before signing in.
+  preferredRole?: "indexer" | "publisher";
 };
 
 const password =

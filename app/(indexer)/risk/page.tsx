@@ -6,17 +6,15 @@ import {
   getSectorScores,
 } from "@/lib/api/sosovalue";
 import { closesFromKlines, computeMetrics } from "@/lib/metrics";
+import { getRiskConfig } from "@/lib/api/agent";
 import { RiskRules } from "@/components/live/RiskRules";
 
-export const revalidate = 60;
+// Persistent config means we can't statically revalidate — the agent's
+// thresholds change on user save.
+export const revalidate = 0;
 
 const FEATURED = "ssiDePIN";
 const TARGET_SECTOR = "DePIN";
-
-const VOL_LIMIT = 0.35;
-const DD_LIMIT = 0.15;
-const WEIGHT_CAP = 0.25;
-const SENT_DELTA_FLOOR = -20;
 
 function pctValue(n: number): string {
   return `${(n * 100).toFixed(2)}%`;
@@ -25,13 +23,22 @@ function pctValue(n: number): string {
 export default async function RiskPage() {
   // 100% SoSoValue. Volatility / drawdown / top-asset-weight derived from
   // ssiDePIN klines + constituents. Sentiment Δ from sector spotlight.
-  const [klines, constituents, sectors] = await Promise.all([
+  // Risk thresholds come from the persistent SQLite config — the same one
+  // the agent's risk_node reads every cycle. Editing values here re-renders
+  // the meters next request.
+  const [klines, constituents, sectors, riskConfig] = await Promise.all([
     getSsiKlines(FEATURED, { limit: 90 }),
     getSsiConstituents(FEATURED),
     getSectorScores(),
+    getRiskConfig(),
   ]);
   const closes = closesFromKlines(klines);
   const metrics = computeMetrics(closes);
+
+  const VOL_LIMIT = riskConfig.volatility_max;
+  const DD_LIMIT = riskConfig.drawdown_max;
+  const WEIGHT_CAP = riskConfig.single_asset_weight_max;
+  const SENT_DELTA_FLOOR = riskConfig.sentiment_delta_min;
 
   const topWeight = constituents.reduce((m, c) => (c.weight > m ? c.weight : m), 0);
   const topAsset = constituents.find((c) => c.weight === topWeight);
@@ -50,6 +57,7 @@ export default async function RiskPage() {
       v: vol.toFixed(2),
       prog: Math.min(1, vol / VOL_LIMIT),
       c: vol >= VOL_LIMIT ? tokens.red : vol >= VOL_LIMIT * 0.8 ? tokens.amber : tokens.emerald,
+      enabled: riskConfig.rule_volatility_enabled,
     },
     {
       k: "Max drawdown",
@@ -61,17 +69,19 @@ export default async function RiskPage() {
           : drawdown >= DD_LIMIT * 0.8
             ? tokens.amber
             : tokens.emerald,
+      enabled: riskConfig.rule_drawdown_enabled,
     },
     {
       k: `Sentiment Δ (${TARGET_SECTOR}, 24h)`,
       v: `${sentDelta >= 0 ? "+" : ""}${sentDelta}`,
-      prog: Math.min(1, Math.max(0, -sentDelta / Math.abs(SENT_DELTA_FLOOR))),
+      prog: Math.min(1, Math.max(0, -sentDelta / Math.abs(SENT_DELTA_FLOOR || 1))),
       c:
         sentDelta <= SENT_DELTA_FLOOR
           ? tokens.red
           : sentDelta < 0
             ? tokens.amber
             : tokens.emerald,
+      enabled: riskConfig.rule_sentiment_enabled,
     },
     {
       k: `Single-asset weight (top: ${topAsset?.symbol.toUpperCase() ?? "—"})`,
@@ -83,6 +93,7 @@ export default async function RiskPage() {
           : topWeight >= WEIGHT_CAP * 0.8
             ? tokens.amber
             : tokens.emerald,
+      enabled: riskConfig.rule_weight_enabled,
     },
     {
       k: "Win rate (90d)",
@@ -94,6 +105,7 @@ export default async function RiskPage() {
           : metrics.win_rate >= 0.45
             ? tokens.amber
             : tokens.red,
+      enabled: true,
     },
     {
       k: "Sharpe (90d)",
@@ -105,11 +117,14 @@ export default async function RiskPage() {
           : metrics.sharpe >= 0.5
             ? tokens.amber
             : tokens.red,
+      enabled: true,
     },
   ];
 
-  const breaches = thresholds.filter((t) => t.c === tokens.red).length;
-  const warnings = thresholds.filter((t) => t.c === tokens.amber).length;
+  // Disabled rules can never trip the gate; treat them as nominal so the
+  // header banner doesn't scream BREACH for a rule the user silenced.
+  const breaches = thresholds.filter((t) => t.enabled && t.c === tokens.red).length;
+  const warnings = thresholds.filter((t) => t.enabled && t.c === tokens.amber).length;
   const status = breaches > 0 ? "breach" : warnings > 0 ? "watch" : "nominal";
   const statusColor =
     status === "breach" ? tokens.red : status === "watch" ? tokens.amber : tokens.emerald;
@@ -126,10 +141,16 @@ export default async function RiskPage() {
       s: "/news + /currencies/sector-spotlight",
       c: tokens.textDim,
     },
-    { l: "Volatility > threshold?", s: `σ > ${VOL_LIMIT} for 30m`, c: tokens.amber },
+    {
+      l: "Volatility > threshold?",
+      s: `σ > ${VOL_LIMIT.toFixed(2)} for 30m`,
+      c: tokens.amber,
+    },
     { l: "Unwind via DEX", s: "market sells, 0.5% slippage cap", c: tokens.red },
     { l: "Wrap → USSI hedge", s: "hedged basket · await recovery", c: tokens.red },
   ];
+
+  const overrideActive = riskConfig.manual_override;
 
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5">
@@ -143,37 +164,54 @@ export default async function RiskPage() {
             {FEATURED}/klines + /constituents
           </Mono>
         </div>
-        <div
-          className="flex items-center gap-2.5"
-          style={{
-            padding: "8px 14px",
-            background: statusColor + "10",
-            border: `1px solid ${statusColor}40`,
-            borderRadius: 8,
-          }}
-        >
+        <div className="flex gap-2 items-center">
+          {overrideActive && (
+            <div
+              className="flex items-center gap-2"
+              style={{
+                padding: "6px 12px",
+                background: tokens.amber + "12",
+                border: `1px solid ${tokens.amber}50`,
+                borderRadius: 8,
+              }}
+            >
+              <Mono size={10} color={tokens.amber}>
+                MANUAL OVERRIDE · gate bypassed
+              </Mono>
+            </div>
+          )}
           <div
+            className="flex items-center gap-2.5"
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: statusColor,
-              boxShadow: `0 0 10px ${statusColor}`,
-            }}
-          />
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 600,
-              color: statusColor,
-              letterSpacing: "0.04em",
+              padding: "8px 14px",
+              background: statusColor + "10",
+              border: `1px solid ${statusColor}40`,
+              borderRadius: 8,
             }}
           >
-            {statusLabel}
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: statusColor,
+                boxShadow: `0 0 10px ${statusColor}`,
+              }}
+            />
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: statusColor,
+                letterSpacing: "0.04em",
+              }}
+            >
+              {statusLabel}
+            </div>
+            <Mono size={10}>
+              {breaches} red · {warnings} amber
+            </Mono>
           </div>
-          <Mono size={10}>
-            {breaches} red · {warnings} amber
-          </Mono>
         </div>
       </div>
 
@@ -183,14 +221,21 @@ export default async function RiskPage() {
             Thresholds (live · SSI)
           </div>
           {thresholds.map((t, i) => (
-            <div key={i} className="mb-3.5">
+            <div key={i} className="mb-3.5" style={{ opacity: t.enabled ? 1 : 0.45 }}>
               <div className="flex justify-between mb-1">
-                <div style={{ fontSize: 12, color: tokens.text }}>{t.k}</div>
-                <Mono size={11} color={t.c}>
+                <div className="flex items-center gap-1.5">
+                  <div style={{ fontSize: 12, color: tokens.text }}>{t.k}</div>
+                  {!t.enabled && (
+                    <Tag small color={tokens.textFaint}>
+                      muted
+                    </Tag>
+                  )}
+                </div>
+                <Mono size={11} color={t.enabled ? t.c : tokens.textFaint}>
                   {t.v}
                 </Mono>
               </div>
-              <Meter v={t.prog} color={t.c} h={5} />
+              <Meter v={t.prog} color={t.enabled ? t.c : tokens.textFaint} h={5} />
             </div>
           ))}
         </Card>
@@ -234,7 +279,7 @@ export default async function RiskPage() {
           </div>
         </Card>
 
-        <RiskRules />
+        <RiskRules initial={riskConfig} />
       </div>
     </div>
   );

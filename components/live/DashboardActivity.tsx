@@ -25,7 +25,10 @@ const FALLBACK: Entry[] = [
 function fmtTs(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso.slice(0, 8);
-  return d.toISOString().slice(11, 19);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
 }
 
 function splitLine(text: string): { headline: string; sub: string } {

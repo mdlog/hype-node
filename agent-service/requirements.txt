@@ -8,3 +8,6 @@ langchain-anthropic>=0.3
 langchain-core>=0.3
 anthropic>=0.40
 mcp>=1.2
+eth-account>=0.13
+eth-utils>=4.1
+web3>=7.0

@@ -765,12 +765,16 @@ function ProductCard({
         ))}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
-        <Link
-          className={`hype-btn ${kind === "publisher" ? "amber" : "primary"}`}
-          href={primaryHref}
-        >
-          {primaryLabel}
-        </Link>
+        <form action="/api/auth/role" method="POST" style={{ margin: 0 }}>
+          <input type="hidden" name="role" value={kind} />
+          <input type="hidden" name="redirect" value={primaryHref} />
+          <button
+            type="submit"
+            className={`hype-btn ${kind === "publisher" ? "amber" : "primary"}`}
+          >
+            {primaryLabel}
+          </button>
+        </form>
         <a className="hype-btn" href={`#${kind}-tour`}>Take the tour</a>
       </div>
     </div>

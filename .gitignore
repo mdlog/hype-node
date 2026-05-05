@@ -1,8 +1,10 @@
 node_modules
 .next
 out
-.env*.local
+cache/
 .env
+.env.*
+!.env.example
 *.log
 .DS_Store
 .vscode
@@ -12,4 +14,9 @@ agent-service/.venv
 agent-service/__pycache__
 agent-service/**/__pycache__
 agent-service/.env
+agent-service/.env.*
+!agent-service/.env.example
 agent-service/.checkpoints
+agent-service/data/
+# Per-deployment billing data (free-tier usage + paid balances)
+.billing/

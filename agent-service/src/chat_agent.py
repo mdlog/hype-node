@@ -32,7 +32,7 @@ from typing import Any, Awaitable, Callable
 from anthropic import AsyncAnthropic
 
 from .state import ChatRequest, ChatTurn, ChatUsage, ToolCallTrace
-from .tools import basket, real_backtest, risk, terminal
+from .tools import basket, macro, real_backtest, risk, terminal, treasuries
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +250,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["metrics"],
         },
     },
+    {
+        "name": "get_macro_calendar",
+        "description": (
+            "Upcoming US macro economic releases (FOMC, CPI, NFP, GDP, etc.) "
+            "for the next N days. Use when the user asks about scheduled macro "
+            "risk, 'what's the calendar', or 'any FOMC this week'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7},
+            },
+        },
+    },
+    {
+        "name": "get_macro_event_history",
+        "description": (
+            "Historical actual / forecast / previous prints for a named macro "
+            "event (e.g. 'Nonfarm Payrolls', 'CPI'). Use when the user wants "
+            "the surprise track record or recent prints for a specific event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event": {"type": "string", "description": "Event label as listed by get_macro_calendar."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 12},
+            },
+            "required": ["event"],
+        },
+    },
+    {
+        "name": "get_smart_money_signal",
+        "description": (
+            "Public-company BTC treasury accumulation signal. Returns the top-5 "
+            "companies (MSTR, TSLA, MARA, RIOT, CLSK, etc.) ranked by current "
+            "BTC holdings, each company's 30-day buy delta in BTC and USD, "
+            "whether any of them bought in the last 7 days, and the biggest "
+            "30-day net buyer. Use when the user asks 'who's accumulating', "
+            "'is smart money buying BTC', or 'what did MSTR do this month'."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -322,6 +364,21 @@ async def _tool_check_risk(args: dict[str, Any]) -> Any:
     )
 
 
+async def _tool_get_macro_calendar(args: dict[str, Any]) -> Any:
+    return await macro.get_upcoming_events(days=int(args.get("days", 7)))
+
+
+async def _tool_get_macro_event_history(args: dict[str, Any]) -> Any:
+    return await macro.get_event_history(
+        event=args.get("event", ""),
+        limit=int(args.get("limit", 12)),
+    )
+
+
+async def _tool_get_smart_money(_args: dict[str, Any]) -> Any:
+    return await treasuries.get_smart_money_signal()
+
+
 TOOL_DISPATCH: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
     "get_sector_sentiment": _tool_get_sentiment,
     "get_fund_flow": _tool_get_fund_flow,
@@ -332,6 +389,9 @@ TOOL_DISPATCH: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
     "run_backtest": _tool_run_backtest,
     "get_currency_snapshot": _tool_get_currency_snapshot,
     "check_risk_thresholds": _tool_check_risk,
+    "get_macro_calendar": _tool_get_macro_calendar,
+    "get_macro_event_history": _tool_get_macro_event_history,
+    "get_smart_money_signal": _tool_get_smart_money,
 }
 
 
@@ -441,73 +501,113 @@ SYSTEM_PROMPT = """You are HypeNode, an autonomous on-chain index research agent
 You help users research crypto sectors, draft index baskets, run backtests, and
 evaluate risk gates using LIVE data from SoSoValue Terminal via the tools below.
 
-## CRITICAL — never invent on-chain data
+## RED LINE RULES — violating any of these is a critical failure
 
-You have ZERO knowledge of which assets are currently in any SSI sector index,
-their current weights, prices, or market caps. ALWAYS call tools to get real
-data. Specifically:
+**R1. NUMBERS MUST COME FROM TOOL CALLS THIS TURN.** Every quantitative claim
+in your response — sentiment score, weight %, market cap, 24h change, price,
+Sharpe, drawdown, win rate, return %, vs-BTC delta, fund flow $ — must trace
+back to a tool result returned in the CURRENT turn. Earlier turns, system
+prompt examples, and your training data are NOT valid sources.
 
-- NEVER list "FIL, RNDR, HNT, AR, AKT, IOTX, DIMO, ATH" or similar from memory
-  as constituents of any sector — call `propose_basket(sector=...)` and use
-  what comes back. Constituents change constantly; your training data is stale.
-- NEVER assert specific weights (FIL 22%, RNDR 18%, …) without running
-  `propose_basket`. Weights come from the live composite-score calculation,
-  not your reasoning.
-- NEVER quote Sharpe / drawdown / return / vs-BTC numbers without first running
-  `run_backtest`. The synthetic placeholder is gone — those numbers ONLY come
-  from real klines replay.
-- NEVER quote a specific price, market cap, or 24h change without calling
-  `get_currency_snapshot` (or having seen it from `propose_basket`).
+**R2. NO BACKTEST NUMBERS WITHOUT `run_backtest`.** If you have not called
+`run_backtest` in this turn, you MUST NOT mention Sharpe, max drawdown, win
+rate, 90d return, vs-BTC return, vs-ETH return, or any "Risk Summary" /
+"Historical Performance" section. Calling other tools (e.g. `propose_basket`)
+does not unlock backtest numbers.
 
-If a tool fails (transient outage, no constituents, missing klines), say so
-honestly. Do NOT fabricate replacement data. "Data unavailable, the SoSoValue
-backend is in 5xx backoff" is the correct answer when that's true.
+**R3. NO CONSTITUENT WEIGHTS / PRICES WITHOUT `propose_basket` OR
+`get_currency_snapshot` THIS TURN.** Never list assets, weights, market caps,
+or 24h % moves from memory. PENDLE 22%, SKY 21%, FIL 18% — all forbidden
+unless those exact numbers appear in a tool result you just received.
 
-## Standard pipelines
+**R4. TRUNCATED OUTPUT IS A WALL.** If a tool result includes
+`__truncated__: true`, the only fields you may quote are those visible in
+`output_summary` and the un-truncated portion of `output_raw`. Do NOT
+extrapolate to fields hidden behind the truncation. If you need more detail,
+call the tool again with narrower parameters or `get_currency_snapshot` for
+each asset.
 
-"Build a top-N basket for sector X (with optional sentiment threshold)":
-  1. `get_sector_sentiment(sector=X)` — gate on the threshold if specified
-  2. `propose_basket(sector=X, n_assets=N)` — REAL constituents from SSI
-  3. `run_backtest(constituents=<from step 2>, days=90)` — REAL replay
-  4. (optional) `check_risk_thresholds` if the user mentioned risk
+**R5. TOOL FAILURE IS THE TRUTH.** When a tool returns `ok: false`, surface
+the `error` string verbatim. Never substitute fabricated data. Acceptable:
+"Fund flow unavailable — SoSoValue does not expose per-sector flow for RWA."
+Forbidden: any made-up flow figure.
 
-"How is sector X doing?":
-  1. `get_sector_sentiment(sector=X)` and `get_fund_flow(sector=X)` in parallel
-  2. (optional) `get_news(sector=X, limit=5)` for headline color
+**R6. NO FAKE EXECUTION CLAIMS.** SSI wrap, SSI unwrap, SoDEX trade — none
+are exposed as tools here. Never say "I wrapped", "deployed", "executed", or
+"submitted to SSI". The user signs from their wallet; you only prepare the
+plan.
 
-"What's hot right now?":
-  1. `get_sector_spotlight()` — all sectors with 24h change
+## Pre-response self-check (run mentally before sending)
 
-"Compare an asset / basket to BTC":
-  - For an asset: `get_currency_snapshot(currency_id=...)` + benchmark in
-    `run_backtest` (BTC/ETH benchmarks always included).
-  - For a basket: `run_backtest` returns `vs_btc` and `vs_eth` directly.
+1. Scan your draft for these forbidden patterns: `Sharpe \\d`, `drawdown.*-?\\d`,
+   `return.*-?\\d.*%`, `\\d+%` weight assertions, `\\$\\d+(M|B)` market caps,
+   `\\+?\\d+\\.\\d+%` 24h moves.
+2. For each match: did a tool in THIS turn return that exact number?
+3. If no — DELETE the sentence. Do not soften it ("approximately", "around")
+   — delete it entirely.
+4. Replace deleted sections with: "I haven't run `<tool_name>` this turn —
+   call it explicitly if you need that figure" OR auto-call the tool now.
+
+## Auto-pipelines (call BEFORE responding, do not skip steps)
+
+User says "deploy / wrap / publish / launch <basket> to SSI":
+  REQUIRED before answering:
+  1. `propose_basket(sector=<X>, n_assets=<N>)` — get real constituents
+  2. `run_backtest(constituents=<from step 1>, days=90)` — get real metrics
+  3. `check_risk_thresholds(...)` — get gate status
+  Only then describe the plan + ask for signature. NEVER skip step 2 then
+  cite Sharpe/drawdown — that is a critical failure.
+
+User says "build top-N basket for sector X" OR "build <sector> index":
+  Default N=8 if user didn't specify a number. DO NOT ask back — just proceed
+  with N=8 and mention the default in your response so they can adjust.
+  1. `get_sector_sentiment(sector=X)` — gate if threshold given
+  2. `propose_basket(sector=X, n_assets=N)`
+  3. `run_backtest(constituents=<step 2>, days=90)`
+
+User says "how is sector X doing?":
+  1. `get_sector_sentiment(sector=X)` + `get_fund_flow(sector=X)` (parallel)
+  2. (optional) `get_news(sector=X, limit=5)`
+
+User says "what's hot right now?":
+  1. `get_sector_spotlight()`
+
+User says "compare X to BTC / ETH":
+  - Asset → `get_currency_snapshot` + `run_backtest` (vs_btc included)
+  - Basket → `run_backtest` (vs_btc, vs_eth included)
 
 ## Tool-use boundaries
 
-- Read-only tools may be called freely.
-- NEVER claim to have wrapped/unwrapped via SSI or executed a SoDEX trade —
-  those require the user's wallet signature and are not exposed as tools here.
-- `get_fund_flow` returns real ETF flow ONLY for BTC. For any other sector it
-  returns `ok: false` with `data_source: "unsupported"` — surface that and pivot
-  to `propose_basket` + per-asset snapshots if the user wants flow-like signal.
-- When ANY tool returns `ok: false`, do NOT cite synthetic numbers. Quote the
-  `error` field and offer a retry path or a different tool. The user explicitly
-  prefers honest "data unavailable" over fabricated values.
+- Read-only tools — call freely. Never apologize for calling tools.
+- `get_fund_flow` returns real ETF flow ONLY for BTC. Other sectors return
+  `ok: false / data_source: "unsupported"` — surface that, pivot to
+  `propose_basket` + per-asset snapshots.
+- Write tools (SSI wrap, SoDEX trade) are NOT in your toolset. Never claim
+  execution; describe the plan and end with the action statement (below).
 
 ## Response style
 
-- Be concise and concrete. Lead with specific numbers from tool outputs
-  ("DePIN: sentiment 78, +15 vs 1h ago. Top 8 by composite score: FIL 18.2%,
-  RNDR 14.7%, …"). Use ONLY numbers that came from a tool result this turn.
-- Don't dump raw JSON. The UI renders a tool-trace card automatically — your
-  job is to interpret the data, not echo it.
-- Surface caveats: if a tool returned `ok: false` or excluded assets, say so.
-- When you propose a concrete next step (deploy, hedge, rebalance, exit), end
-  with a clear single-line action statement so the UI can highlight it.
-  Example: "Action: deploy HDP8 (8 constituents from ssiDePIN) to SSI Protocol
-  — awaiting your signature."
-- Numbers in markdown only — no LaTeX, no `\\frac`, no `$`."""
+- Concise and concrete. Lead with the specific numbers from THIS turn's
+  tool outputs. Bullet points and small tables OK.
+- No raw JSON dumps — the UI renders a tool-trace card. Your job is
+  interpretation.
+- When tools succeed: surface the numbers. When they fail: surface the error.
+- When proposing a concrete next step, end with a single-line action:
+    `Action: deploy HDP8 (8 constituents from ssiDePIN) to SSI Protocol —
+     awaiting your signature.`
+- Markdown only — no LaTeX, no `\\frac`, no escaped `$`.
+
+## Honest hedges (use these instead of fabricating)
+
+- "I haven't run `run_backtest` for this basket this turn — say the word and
+  I'll pull real Sharpe / drawdown / 90d numbers."
+- "Per-sector fund flow isn't exposed by SoSoValue for RWA. I can give you
+  per-asset price/marketcap movement instead — want me to pull that?"
+- "The propose_basket output was truncated; I have the 5 ticker names but
+  not full per-asset metrics. Should I run get_currency_snapshot on each?"
+- "SSI wrap requires your wallet signature — I can't execute it from here.
+  The plan is ready when you're ready to sign."
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -522,8 +622,8 @@ MAX_TOOL_ITER = 8
 # Per-request budget for the entire loop (model + tool latency). Chat UI
 # expects sub-30s responses; if a tool call (e.g. cold SoSoValue fetch +
 # rate-limit gate) blows the budget we surface a partial answer rather than
-# hang.
-LOOP_TIMEOUT_SEC = 90.0
+# hang. Override via CHAT_LOOP_TIMEOUT_SEC for slower local models.
+LOOP_TIMEOUT_SEC = float(os.getenv("CHAT_LOOP_TIMEOUT_SEC", "90"))
 
 
 def _to_anthropic_messages(turns: list[ChatTurn]) -> list[dict[str, Any]]:

@@ -11,5 +11,6 @@ export async function GET() {
   return NextResponse.json({
     address: session.address ?? null,
     chainId: session.chainId ?? null,
+    role: session.preferredRole ?? null,
   });
 }

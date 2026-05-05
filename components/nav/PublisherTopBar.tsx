@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { tokens } from "@/lib/tokens";
 import { Mono } from "@/components/ui/Mono";
 import { WalletBadge } from "@/components/auth/WalletBadge";
+import { RoleSwitcher } from "@/components/nav/RoleSwitcher";
 
 const items = [
   { k: "radar", l: "Hype Radar" },
@@ -128,18 +129,7 @@ export function PublisherTopBar() {
             WalletBadge below shows the actual wallet identity, and the
             earnings page surfaces the honest empty state. */}
         <WalletBadge />
-        <Link
-          href="/dashboard"
-          style={{
-            fontSize: 11,
-            color: tokens.emerald,
-            border: `1px solid ${tokens.emerald}40`,
-            padding: "3px 8px",
-            borderRadius: 4,
-          }}
-        >
-          → Indexer
-        </Link>
+        <RoleSwitcher current="publisher" />
       </div>
     </div>
   );

@@ -1,0 +1,98 @@
+export const SSI_REGISTRY_ABI = [
+  {
+    type: "function",
+    name: "registerIndex",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "symbol", type: "string" },
+      { name: "name", type: "string" },
+      { name: "base", type: "string" },
+      { name: "tokens", type: "string[]" },
+      { name: "weightsBps", type: "uint16[]" },
+      { name: "mgmtFeeBps", type: "uint16" },
+      { name: "perfFeeBps", type: "uint16" },
+      { name: "rebalanceCron", type: "string" },
+    ],
+    outputs: [{ name: "id", type: "bytes32" }],
+  },
+  {
+    type: "function",
+    name: "getIndex",
+    stateMutability: "view",
+    inputs: [{ name: "id", type: "bytes32" }],
+    outputs: [
+      {
+        name: "",
+        type: "tuple",
+        components: [
+          { name: "creator", type: "address" },
+          { name: "createdAt", type: "uint64" },
+          { name: "symbol", type: "string" },
+          { name: "name", type: "string" },
+          { name: "base", type: "string" },
+          { name: "tokens", type: "string[]" },
+          { name: "weightsBps", type: "uint16[]" },
+          { name: "mgmtFeeBps", type: "uint16" },
+          { name: "perfFeeBps", type: "uint16" },
+          { name: "rebalanceCron", type: "string" },
+        ],
+      },
+    ],
+  },
+  {
+    type: "function",
+    name: "indexCount",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "indexIdAt",
+    stateMutability: "view",
+    inputs: [{ name: "i", type: "uint256" }],
+    outputs: [{ type: "bytes32" }],
+  },
+  {
+    type: "function",
+    name: "exists",
+    stateMutability: "view",
+    inputs: [{ name: "id", type: "bytes32" }],
+    outputs: [{ type: "bool" }],
+  },
+  {
+    type: "event",
+    name: "IndexRegistered",
+    inputs: [
+      { name: "id", type: "bytes32", indexed: true },
+      { name: "creator", type: "address", indexed: true },
+      { name: "symbol", type: "string", indexed: false },
+      { name: "name", type: "string", indexed: false },
+    ],
+    anonymous: false,
+  },
+  { type: "error", name: "EmptySymbol", inputs: [] },
+  {
+    type: "error",
+    name: "WeightsLengthMismatch",
+    inputs: [
+      { name: "tokens", type: "uint256" },
+      { name: "weights", type: "uint256" },
+    ],
+  },
+  {
+    type: "error",
+    name: "WeightsSumInvalid",
+    inputs: [{ name: "got", type: "uint256" }],
+  },
+  {
+    type: "error",
+    name: "IndexAlreadyExists",
+    inputs: [{ name: "id", type: "bytes32" }],
+  },
+  {
+    type: "error",
+    name: "IndexNotFound",
+    inputs: [{ name: "id", type: "bytes32" }],
+  },
+] as const;

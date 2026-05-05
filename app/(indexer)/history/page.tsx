@@ -1,8 +1,13 @@
 import { Card, Label, Mono, Tag, Btn } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { getEtfHistory, listEtfs, getEtfSummaryHistory } from "@/lib/api/sosovalue";
+import { getDecisionHistory, getHistoryStats } from "@/lib/api/agent";
+import { EtfSnapshotPanel } from "@/components/history/EtfSnapshotPanel";
+import { AgentDecisionLog } from "@/components/history/AgentDecisionLog";
 
-export const revalidate = 60;
+// Decision log lives in agent-service SQLite — must be fresh on every load
+// (no static revalidate window) so a just-finished cycle shows up.
+export const revalidate = 0;
 
 const SYMBOL = "BTC";
 
@@ -34,10 +39,16 @@ function fmtRel(date: string): string {
 }
 
 export default async function HistoryPage() {
-  // Real audit trail: ETF flow history. Each daily row is treated as a
-  // "rebalance event" — direction & size of net inflow classifies the action.
-  // 1-month window cap from SoSoValue.
-  const [etfs, summary] = await Promise.all([
+  // Two audit trails on this page:
+  //   1. Agent decision log (top) — real persistent decisions from
+  //      agent-service SQLite. Each row = one LangGraph cycle.
+  //   2. ETF flow audit (bottom) — SoSoValue ETF history, kept as the
+  //      market-side reference. Each daily ETF inflow is treated as a
+  //      synthetic "rebalance event" so users with no agent activity yet
+  //      still see something meaningful.
+  const [agentRows, agentStats, etfs, summary] = await Promise.all([
+    getDecisionHistory({ limit: 50 }),
+    getHistoryStats(),
     listEtfs(SYMBOL, "US"),
     getEtfSummaryHistory(SYMBOL, "US", { limit: 30 }),
   ]);
@@ -103,24 +114,37 @@ export default async function HistoryPage() {
   const summaryLive = summary.length === 30 || (summary[0]?.total_net_inflow ?? 0) !== 15_000_000;
 
   return (
-    <div className="px-6 py-5 flex flex-col gap-3 h-[calc(100vh-48px)]">
+    <div className="px-6 py-5 flex flex-col gap-3">
       <div className="flex justify-between items-end">
         <div>
           <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>
-            ETF Flow Audit
+            Audit Trail
           </div>
           <Mono size={11}>
-            {SYMBOL} ETF history · {rows.length} rows · GET /etfs/summary-history +
-            /etfs/{`{ticker}`}/history
+            agent decisions · ETF flow reference · {agentStats?.total ?? 0} agent cycles
+            persisted · {rows.length} ETF rows
           </Mono>
         </div>
         <div className="flex gap-1.5">
           <Tag small color={summaryLive ? tokens.emerald : tokens.textFaint} dot>
             {summaryLive ? "live · 1mo cap" : "fallback"}
           </Tag>
-          <Btn small>Filter</Btn>
           <Btn small>Export CSV</Btn>
           <Btn small>Explorer ↗</Btn>
+        </div>
+      </div>
+
+      <AgentDecisionLog initialRows={agentRows} initialStats={agentStats} />
+
+      <div
+        className="flex justify-between items-end mt-2"
+        style={{ borderTop: `1px dashed ${tokens.border}`, paddingTop: 12 }}
+      >
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>ETF flow reference</div>
+          <Mono size={10}>
+            {SYMBOL} ETF history · GET /etfs/summary-history + /etfs/{`{ticker}`}/history
+          </Mono>
         </div>
       </div>
 
@@ -146,7 +170,9 @@ export default async function HistoryPage() {
         <Tag small>Last 30 days ▾</Tag>
       </div>
 
-      <Card pad={0} className="flex-1 overflow-hidden flex flex-col">
+      <EtfSnapshotPanel tickers={["IBIT", "FBTC", "ARKB", "BITB", "BRRR"]} />
+
+      <Card pad={0} className="overflow-hidden flex flex-col">
         <div
           className="grid"
           style={{
@@ -161,7 +187,7 @@ export default async function HistoryPage() {
             <Label key={i}>{k}</Label>
           ))}
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div style={{ maxHeight: 480, overflowY: "auto" }}>
           {rows.slice(0, 100).map((r, i) => (
             <div
               key={`${r.date}-${r.target}-${i}`}

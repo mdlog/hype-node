@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 
+import { TopUpModal } from "@/components/billing/TopUpModal";
 import { tokens } from "@/lib/tokens";
 
 /* ---------- palette aligned with the chat-redesign mock ---------- */
@@ -87,30 +90,26 @@ const SUGGESTIONS = [
 ];
 
 const STORAGE_KEY = "hype.chat.v1";
-const USAGE_KEY = "hype.usage.v1";
 
-// Anthropic pricing per 1M tokens, current as of 2026-04. Sonnet 4.5/4.6
-// share the same price card. Update if the env switches model. Cache writes
-// are 1.25× input (5-min TTL). Cache reads are 0.1× input.
-const PRICING = {
-  "claude-sonnet-4-5": { input: 3.0, output: 15.0 },
-  "claude-sonnet-4-6": { input: 3.0, output: 15.0 },
-  "claude-haiku-4-5": { input: 1.0, output: 5.0 },
-  "claude-opus-4-6": { input: 5.0, output: 25.0 },
-  "claude-opus-4-7": { input: 5.0, output: 25.0 },
-} as const;
-
-function priceForModel(model: string): { input: number; output: number } {
-  return (PRICING as Record<string, { input: number; output: number }>)[model]
-    ?? PRICING["claude-sonnet-4-5"];
-}
-
-function todayKey(): string {
-  // UTC day, matches the "resets 00:00 UTC" copy.
-  return new Date().toISOString().slice(0, 10);
-}
-
-type UsageBucket = { tokens: number; calls: number; spend_usd: number };
+// Server-side billing snapshot returned by /api/billing/usage and as the
+// `billing` field on each /api/chat reply. Client state is purely a mirror
+// of this — server is source of truth for free-quota accounting and paid
+// balance. Mirrors `AccountSnapshot` from lib/billing.ts.
+type BillingSnapshot = {
+  address: string;
+  daily: { date: string; spend_usd: number; tokens: number; calls: number };
+  paid_balance_usd: number;
+  caps: {
+    free_daily_spend_usd: number;
+    free_daily_tokens: number;
+    free_daily_calls: number;
+  };
+  free_daily_left_usd: number;
+  total_available_usd: number;
+  blocked: boolean;
+  block_reason: string | null;
+  top_ups: { ts: string; amount_usd: number }[];
+};
 
 /* ---------- helpers ---------- */
 
@@ -158,39 +157,45 @@ export default function ChatPage() {
   const [busy, setBusy] = useState(false);
   const [agent, setAgent] = useState<AgentState | null>(null);
   const [search, setSearch] = useState("");
-  const [usageToday, setUsageToday] = useState<UsageBucket>({
-    tokens: 0,
-    calls: 0,
-    spend_usd: 0,
-  });
+  const [billing, setBilling] = useState<BillingSnapshot | null>(null);
+  const [topUpOpen, setTopUpOpen] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
-  // Restore today's usage bucket. We key by UTC date so the panel auto-resets
-  // at 00:00 UTC (matches the "resets 00:00 UTC" copy in the panel header).
-  useEffect(() => {
+  // Hydrate the live billing snapshot from the server on mount. Server is
+  // the source of truth — per-wallet, persistent, includes paid balance and
+  // free-quota gating. Each /api/chat response also returns a fresh snapshot
+  // so we don't poll separately under normal use.
+  const refreshBilling = useCallback(async () => {
     try {
-      const raw = localStorage.getItem(USAGE_KEY);
-      if (!raw) return;
-      const stored = JSON.parse(raw) as { date: string; totals: UsageBucket };
-      if (stored.date === todayKey()) setUsageToday(stored.totals);
+      const res = await fetch("/api/billing/usage", { cache: "no-store" });
+      if (!res.ok) return;
+      setBilling((await res.json()) as BillingSnapshot);
     } catch {
-      /* noop */
+      /* noop — billing panel just stays in its previous state */
     }
   }, []);
 
-  // Persist on every change. Resets implicitly when todayKey() advances —
-  // the next save uses the new date, the old entry is overwritten.
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        USAGE_KEY,
-        JSON.stringify({ date: todayKey(), totals: usageToday }),
-      );
-    } catch {
-      /* quota / private mode */
+    refreshBilling();
+  }, [refreshBilling]);
+
+  // Hydrate the composer from `?q=` once on mount — research page deep-links
+  // here with a topic-anchored prompt. We strip the param afterwards so
+  // refreshing or sharing the URL doesn't re-prefill (potentially stomping
+  // user edits).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get("q");
+    if (q && q.trim()) {
+      setInput(q);
+      params.delete("q");
+      const qs = params.toString();
+      const next = window.location.pathname + (qs ? `?${qs}` : "");
+      window.history.replaceState({}, "", next);
+      composerRef.current?.focus();
     }
-  }, [usageToday]);
+  }, []);
 
   // Restore prior session from localStorage so refresh doesn't drop history.
   useEffect(() => {
@@ -206,6 +211,18 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    // Skip save when turns is the initial empty array — the restore effect
+    // above queues `setTurns(parsed)` but its re-render hasn't applied yet
+    // when this effect fires on mount. Without the guard we'd overwrite the
+    // localStorage history with `[]` and then never recover (since restore
+    // would read `[]` next refresh and bail-out the setState as no-op).
+    // `clearHistory()` calls `localStorage.removeItem` directly, so an
+    // intentional clear still works.
+    if (turns.length === 0) {
+      // Still scroll to top on a fresh empty thread.
+      messagesRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      return;
+    }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(turns));
     } catch {
@@ -283,6 +300,13 @@ export default function ChatPage() {
   async function send(text?: string) {
     const value = (text ?? input).trim();
     if (!value || busy) return;
+    // Pre-flight UX gate: if we already know the user is over quota, skip
+    // the round trip and prompt for a top-up immediately. The server still
+    // enforces — this is just to avoid a wasted chat round.
+    if (billing?.blocked) {
+      setTopUpOpen(true);
+      return;
+    }
     const next: Turn[] = [
       ...turns,
       { role: "user", content: value, ts: new Date().toISOString() },
@@ -297,55 +321,32 @@ export default function ChatPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ turns: next }),
       });
-      const reply = (await res.json()) as Turn;
+      // 402 = free quota exhausted AND paid balance empty. Server returned
+      // a fresh billing snapshot; surface the top-up modal and rewind the
+      // optimistic user turn so the prompt isn't lost.
+      if (res.status === 402) {
+        const body = (await res.json()) as {
+          error: string;
+          reason?: string;
+          billing: BillingSnapshot;
+        };
+        setBilling(body.billing);
+        setTurns(turns); // rewind — drop the user turn we optimistically appended
+        setInput(value); // restore the prompt to the composer
+        setTopUpOpen(true);
+        return;
+      }
+      const reply = (await res.json()) as Turn & { billing?: BillingSnapshot };
       setTurns([
         ...next,
         { ...reply, role: "agent", ts: reply.ts ?? new Date().toISOString() },
       ]);
-      // Accumulate today's usage from the live response. The spend formula
-      // applies per-token-class pricing — cache reads are 10× cheaper than
-      // raw input, so heavy reuse keeps the bar low even on long sessions.
-      if (reply.usage) {
-        const u = reply.usage;
-        const total =
-          (u.input_tokens ?? 0) +
-          (u.output_tokens ?? 0) +
-          (u.cache_read_tokens ?? 0) +
-          (u.cache_creation_tokens ?? 0);
-        const p = priceForModel(model);
-        const spend =
-          ((u.input_tokens ?? 0) * p.input +
-            (u.output_tokens ?? 0) * p.output +
-            (u.cache_creation_tokens ?? 0) * p.input * 1.25 +
-            (u.cache_read_tokens ?? 0) * p.input * 0.1) /
-          1_000_000;
-        const callsThisTurn = reply.tool_calls?.length ?? 0;
-        // If localStorage was last touched on a different UTC day, reset
-        // so the panel doesn't carry yesterday's totals into today.
-        setUsageToday((prev) => {
-          let raw: string | null = null;
-          try {
-            raw = localStorage.getItem(USAGE_KEY);
-          } catch {
-            /* noop */
-          }
-          let base = prev;
-          if (raw) {
-            try {
-              const stored = JSON.parse(raw) as { date: string };
-              if (stored.date !== todayKey()) {
-                base = { tokens: 0, calls: 0, spend_usd: 0 };
-              }
-            } catch {
-              /* noop */
-            }
-          }
-          return {
-            tokens: base.tokens + total,
-            calls: base.calls + callsThisTurn,
-            spend_usd: base.spend_usd + spend,
-          };
-        });
+      if (reply.billing) {
+        setBilling(reply.billing);
+      } else {
+        // Server didn't echo billing (older route, error mid-stream). Pull
+        // a fresh snapshot so the panel doesn't drift out of sync.
+        refreshBilling();
       }
     } catch (err) {
       setTurns([
@@ -424,7 +425,19 @@ export default function ChatPage() {
         toolCalls={toolCalls}
         currentNode={currentNode}
         model={model}
-        usageToday={usageToday}
+        billing={billing}
+        onTopUp={() => setTopUpOpen(true)}
+      />
+
+      <TopUpModal
+        open={topUpOpen}
+        onClose={() => setTopUpOpen(false)}
+        onSuccess={() => {
+          // Refresh from the server — the topup endpoint already wrote
+          // the new balance, this just ensures our snapshot includes the
+          // full updated record (top_ups list, etc).
+          refreshBilling();
+        }}
       />
     </div>
   );
@@ -1027,18 +1040,279 @@ function MsgBubble({ turn, model }: { turn: Turn; model: string }) {
           {tools.length > 0 && (
             <ToolTraceCard tools={tools} totalMs={toolsTotalMs} allOk={allOk} />
           )}
-          <div
-            style={{
-              fontSize: 14.5,
-              lineHeight: 1.55,
-              color: PAL.text,
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {turn.content}
-          </div>
+          <AgentMarkdown content={turn.content} />
         </>
       )}
+    </div>
+  );
+}
+
+/* ---------- markdown rendering for agent replies ---------- */
+
+// Tailored styles for the dark chat theme. We keep the prose narrow (max
+// 760px applied by the bubble container) and the heading scale tighter than
+// browser defaults — Claude tends to use ## / ### heavily and the default
+// H1 sizing would dominate the column.
+const MD_COMPONENTS: Components = {
+  h1: ({ children }) => (
+    <h3
+      style={{
+        fontSize: 18,
+        fontWeight: 600,
+        letterSpacing: "-0.02em",
+        margin: "16px 0 8px",
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </h3>
+  ),
+  h2: ({ children }) => (
+    <h4
+      style={{
+        fontSize: 16,
+        fontWeight: 600,
+        letterSpacing: "-0.015em",
+        margin: "14px 0 6px",
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </h4>
+  ),
+  h3: ({ children }) => (
+    <h5
+      style={{
+        fontSize: 13.5,
+        fontWeight: 600,
+        letterSpacing: "-0.01em",
+        margin: "12px 0 4px",
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </h5>
+  ),
+  h4: ({ children }) => (
+    <h6
+      style={{
+        fontSize: 12.5,
+        fontWeight: 600,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+        margin: "10px 0 4px",
+        color: PAL.dim,
+      }}
+    >
+      {children}
+    </h6>
+  ),
+  p: ({ children }) => (
+    <p
+      style={{
+        fontSize: 14.5,
+        lineHeight: 1.55,
+        margin: "6px 0",
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </p>
+  ),
+  strong: ({ children }) => (
+    <strong style={{ fontWeight: 600, color: PAL.text }}>{children}</strong>
+  ),
+  em: ({ children }) => (
+    <em style={{ fontStyle: "italic", color: PAL.dim }}>{children}</em>
+  ),
+  ul: ({ children }) => (
+    <ul
+      style={{
+        paddingLeft: 22,
+        margin: "6px 0",
+        listStyle: "disc",
+        fontSize: 14,
+        lineHeight: 1.55,
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol
+      style={{
+        paddingLeft: 22,
+        margin: "6px 0",
+        listStyle: "decimal",
+        fontSize: 14,
+        lineHeight: 1.55,
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => (
+    <li style={{ margin: "2px 0", paddingLeft: 4 }}>{children}</li>
+  ),
+  code: ({ children, className }) => {
+    // Inline code (no language class) gets pill styling. Block code is
+    // wrapped in <pre> by ReactMarkdown — handled by the `pre` override.
+    const isBlock = typeof className === "string" && className.includes("language-");
+    if (isBlock) {
+      return (
+        <code
+          className={className}
+          style={{
+            fontFamily: MONO,
+            fontSize: 12,
+            color: PAL.text,
+            display: "block",
+          }}
+        >
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code
+        style={{
+          fontFamily: MONO,
+          fontSize: 12.5,
+          padding: "1px 5px",
+          background: PAL.bg3,
+          border: `1px solid ${PAL.line}`,
+          borderRadius: 4,
+          color: PAL.cyan,
+        }}
+      >
+        {children}
+      </code>
+    );
+  },
+  pre: ({ children }) => (
+    <pre
+      style={{
+        fontFamily: MONO,
+        fontSize: 12,
+        padding: "10px 12px",
+        background: PAL.bg2,
+        border: `1px solid ${PAL.line}`,
+        borderRadius: 8,
+        margin: "8px 0",
+        overflowX: "auto",
+        color: PAL.text,
+      }}
+    >
+      {children}
+    </pre>
+  ),
+  a: ({ children, href }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{ color: PAL.cyan, textDecoration: "underline" }}
+    >
+      {children}
+    </a>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote
+      style={{
+        margin: "8px 0",
+        padding: "4px 12px",
+        borderLeft: `2px solid ${PAL.line2}`,
+        color: PAL.dim,
+        fontSize: 14,
+        lineHeight: 1.55,
+      }}
+    >
+      {children}
+    </blockquote>
+  ),
+  hr: () => (
+    <hr
+      style={{
+        border: "none",
+        borderTop: `1px solid ${PAL.line}`,
+        margin: "12px 0",
+      }}
+    />
+  ),
+  table: ({ children }) => (
+    <div style={{ overflowX: "auto", margin: "10px 0" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: 13,
+          background: PAL.bg2,
+          border: `1px solid ${PAL.line}`,
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
+      >
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children }) => (
+    <thead style={{ background: PAL.bg3 }}>{children}</thead>
+  ),
+  tbody: ({ children }) => <tbody>{children}</tbody>,
+  tr: ({ children }) => (
+    <tr style={{ borderBottom: `1px solid ${PAL.line}` }}>{children}</tr>
+  ),
+  th: ({ children, style }) => (
+    <th
+      style={{
+        padding: "8px 12px",
+        textAlign: "left",
+        fontWeight: 600,
+        color: PAL.dim,
+        fontSize: 11.5,
+        letterSpacing: "0.02em",
+        textTransform: "uppercase",
+        whiteSpace: "nowrap",
+        ...style,
+      }}
+    >
+      {children}
+    </th>
+  ),
+  td: ({ children, style }) => (
+    <td
+      style={{
+        padding: "8px 12px",
+        color: PAL.text,
+        verticalAlign: "top",
+        ...style,
+      }}
+    >
+      {children}
+    </td>
+  ),
+  del: ({ children }) => (
+    <del style={{ color: PAL.faint, textDecoration: "line-through" }}>
+      {children}
+    </del>
+  ),
+};
+
+function AgentMarkdown({ content }: { content: string }) {
+  return (
+    <div
+      style={{
+        fontSize: 14.5,
+        lineHeight: 1.55,
+        color: PAL.text,
+      }}
+    >
+      <ReactMarkdown components={MD_COMPONENTS} remarkPlugins={[remarkGfm]}>
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -1415,7 +1689,8 @@ function RightSidebar({
   toolCalls,
   currentNode,
   model,
-  usageToday,
+  billing,
+  onTopUp,
 }: {
   agentOnline: boolean;
   uptime: number;
@@ -1423,7 +1698,8 @@ function RightSidebar({
   toolCalls: number;
   currentNode: string | null;
   model: string;
-  usageToday: UsageBucket;
+  billing: BillingSnapshot | null;
+  onTopUp: () => void;
 }) {
   return (
     <aside
@@ -1446,7 +1722,7 @@ function RightSidebar({
         currentNode={currentNode}
         model={model}
       />
-      <UsagePanel usage={usageToday} />
+      <UsagePanel billing={billing} onTopUp={onTopUp} />
     </aside>
   );
 }
@@ -1651,18 +1927,45 @@ function CtxRow({
   );
 }
 
-function UsagePanel({ usage }: { usage: UsageBucket }) {
-  // All three figures come from real Anthropic `usage` blocks aggregated
-  // per UTC day in localStorage. Caps are soft visual ceilings — there's
-  // no enforcement layer yet, just a fill bar so the user can eyeball
-  // their daily spend at a glance.
-  const calls = { v: usage.calls, max: 500 };
-  const tokens = { v: usage.tokens, max: 200_000 };
-  const spend = { v: usage.spend_usd, max: 20 };
+function UsagePanel({
+  billing,
+  onTopUp,
+}: {
+  billing: BillingSnapshot | null;
+  onTopUp: () => void;
+}) {
+  // All four figures come from the server-side billing store. Caps are
+  // enforced — when SPEND fills, /api/chat returns 402 and the composer
+  // blocks until the user tops up.
+  if (!billing) {
+    return (
+      <PanelShell title="Usage today">
+        <div style={{ padding: "12px 14px" }}>
+          <span style={{ fontFamily: MONO, fontSize: 10, color: PAL.faint }}>
+            Loading billing snapshot…
+          </span>
+        </div>
+      </PanelShell>
+    );
+  }
+
+  const callsMax = billing.caps.free_daily_calls;
+  const tokensMax = billing.caps.free_daily_tokens;
+  const spendMax = billing.caps.free_daily_spend_usd;
+  const callsV = billing.daily.calls;
+  const tokensV = billing.daily.tokens;
+  const spendV = billing.daily.spend_usd;
+
   const tokensLabel =
-    tokens.v >= 1000
-      ? `${(tokens.v / 1000).toFixed(1)}k / ${(tokens.max / 1000).toFixed(0)}k`
-      : `${tokens.v} / ${(tokens.max / 1000).toFixed(0)}k`;
+    tokensV >= 1000
+      ? `${(tokensV / 1000).toFixed(1)}k / ${(tokensMax / 1000).toFixed(0)}k`
+      : `${tokensV} / ${(tokensMax / 1000).toFixed(0)}k`;
+
+  // The spend bar reflects free-quota consumption only; paid-balance usage
+  // is drawn on top of the cap so the bar can saturate at the free wall and
+  // stay there while paid covers further turns.
+  const spendPct = Math.min(100, (spendV / spendMax) * 100);
+
   return (
     <PanelShell
       title="Usage today"
@@ -1674,24 +1977,100 @@ function UsagePanel({ usage }: { usage: UsageBucket }) {
     >
       <UsageBar
         k="TOOL CALLS"
-        label={`${calls.v} / ${calls.max}`}
-        pct={(calls.v / calls.max) * 100}
+        label={`${callsV} / ${callsMax}`}
+        pct={(callsV / callsMax) * 100}
         color={PAL.emerald}
       />
       <UsageBar
         k="TOKENS"
         label={tokensLabel}
-        pct={(tokens.v / tokens.max) * 100}
+        pct={(tokensV / tokensMax) * 100}
         color={PAL.cyan}
         topBorder
       />
       <UsageBar
-        k="SPEND"
-        label={`$${spend.v.toFixed(2)} / $${spend.max.toFixed(2)}`}
-        pct={(spend.v / spend.max) * 100}
-        color={PAL.amber}
+        k="FREE SPEND"
+        label={`$${spendV.toFixed(3)} / $${spendMax.toFixed(2)}`}
+        pct={spendPct}
+        color={billing.blocked ? PAL.red : PAL.amber}
         topBorder
       />
+
+      {/* Balance + top-up CTA. Paid balance is permanent across days; once
+          free quota is exhausted, every chat turn deducts from this. */}
+      <div
+        style={{
+          padding: "12px 14px",
+          borderTop: `1px solid ${PAL.line}`,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 8,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: MONO,
+              fontSize: 10,
+              color: PAL.faint,
+              letterSpacing: "0.06em",
+            }}
+          >
+            PAID BALANCE
+          </span>
+          <span
+            style={{
+              fontFamily: MONO,
+              fontSize: 13,
+              fontWeight: 600,
+              color: billing.paid_balance_usd > 0 ? PAL.emerald : PAL.text,
+            }}
+          >
+            ${billing.paid_balance_usd.toFixed(2)}
+          </span>
+        </div>
+
+        {billing.blocked && billing.block_reason && (
+          <div
+            style={{
+              padding: "8px 10px",
+              background: "rgba(239,68,68,0.10)",
+              border: "1px solid rgba(239,68,68,0.4)",
+              borderRadius: 6,
+              fontSize: 11,
+              color: PAL.red,
+              lineHeight: 1.4,
+              marginBottom: 8,
+            }}
+          >
+            {billing.block_reason}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onTopUp}
+          style={{
+            width: "100%",
+            padding: "8px 12px",
+            background: billing.blocked ? PAL.emerald : "transparent",
+            color: billing.blocked ? PAL.bg : PAL.emerald,
+            border: `1px solid ${PAL.emerald}`,
+            borderRadius: 6,
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            fontFamily: "inherit",
+            transition: "all .15s",
+          }}
+        >
+          {billing.blocked ? "Top up to continue →" : "Top up"}
+        </button>
+      </div>
     </PanelShell>
   );
 }

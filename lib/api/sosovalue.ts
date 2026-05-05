@@ -194,14 +194,20 @@ export type NewsItem = {
 
 // ---------- transport: rate limiter + persistent cache ----------
 //
-// The Demo tier of the SoSoValue API allows ONE request per minute, total —
-// across every endpoint, every caller. Without a coordinator we'd burn the
-// quota on the first cold render. This module-level singleton enforces:
+// SoSoValue's per-tier rate limit is configured via SOSOVALUE_MIN_GAP_MS:
+//   - Demo tier (1 req/min)            → 65_000ms
+//   - High Frequency tier (100/min)    → 700ms     (default in .env)
+//   - Unlimited tier (no per-min cap)  → 1000ms or lower (still safe)
+// Without a coordinator we'd either burn quota on cold render OR collapse
+// every parallel widget into synthetic. This module-level singleton enforces:
 //
 //   1. Per-path in-memory cache with a long TTL (default 15 min). Once a path
 //      is warm, subsequent reads never touch the network until expiry.
-//   2. Global token bucket: minimum 60s between any two outbound calls,
-//      regardless of which endpoint they hit.
+//   2. Global queue: each call claims a dispatch slot ≥ MIN_GAP_MS after the
+//      previous one and awaits its slot, so a burst of N parallel widgets
+//      gets serialized at the wire level instead of triggering upstream 429.
+//      A safety cap (MAX_QUEUE_WAIT_MS) drops to fallback if the queue would
+//      back up beyond that, so cold renders never block indefinitely.
 //   3. In-flight dedup: parallel reads for the same path share one promise.
 //   4. Stale-on-failure: a 429 / network error returns the previous good
 //      payload (if any) rather than collapsing back to synthetic data.
@@ -218,7 +224,25 @@ export type NewsItem = {
 // The state lives in `globalThis` so Next.js HMR + route handler isolation
 // don't recreate the limiter on every render.
 
-const MIN_GAP_MS = Number(process.env.SOSOVALUE_MIN_GAP_MS ?? 65_000); // 60s + safety margin
+// Default 65_000ms is safe for Demo tier (1 req/min). High Frequency tier
+// (100 req/min) overrides this to 700ms via the .env file — see .env.example
+// for the full set of per-tier overrides.
+const MIN_GAP_MS = Number(process.env.SOSOVALUE_MIN_GAP_MS ?? 65_000);
+// Token-bucket capacity: max calls allowed to fire immediately before the
+// per-call gap kicks in. SoSoValue's 100 req/min limit tolerates a healthy
+// burst as long as the per-minute average is respected, so a fan-out from a
+// dashboard SSR with ~20 widgets dispatches in parallel without serializing
+// behind the gap. After the bucket drains, refills at one token per
+// MIN_GAP_MS. Tunable via env in case upstream tightens its burst policy.
+const BUCKET_CAPACITY = Math.max(
+  1,
+  Math.floor(Number(process.env.SOSOVALUE_BUCKET_CAPACITY ?? 20)),
+);
+// If a parallel burst would push our slot-claim past this threshold, drop
+// the request to fallback instead of waiting indefinitely. 5s keeps SSR
+// renders snappy — beyond that the widget shows synthetic and refreshes
+// once a slot frees up.
+const MAX_QUEUE_WAIT_MS = Number(process.env.SOSOVALUE_MAX_QUEUE_WAIT_MS ?? 5_000);
 const CACHE_TTL_MS = Number(process.env.SOSOVALUE_CACHE_TTL_MS ?? 15 * 60_000);
 // "Monthly quota exceeded" (code 402901, message mentions monthly) → 6h.
 const QUOTA_BACKOFF_MS = Number(process.env.SOSOVALUE_QUOTA_BACKOFF_MS ?? 6 * 3600_000);
@@ -264,6 +288,13 @@ type CacheEntry<T = unknown> = { data: T; expiresAt: number; updatedAt: number }
 
 type RateState = {
   lastRequestAt: number;
+  // Token-bucket fields. `tokens` is fractional (refills at rate of one per
+  // MIN_GAP_MS); `tokensUpdatedAt` is the wall-clock anchor for refill math.
+  // `nextSlotAt` is the deferred-claim cursor used once the bucket is drained
+  // — tracks the earliest time a queued caller can be dispatched.
+  tokens: number;
+  tokensUpdatedAt: number;
+  nextSlotAt: number;
   quotaExhaustedUntil: number;
   rateLimitedUntil: number;
   transientErrorUntil: number;
@@ -276,7 +307,7 @@ type RateState = {
 
 // Bump this whenever RateState's shape changes so HMR / hot-reload doesn't
 // keep a stale object missing the new fields.
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 
 const G = globalThis as unknown as {
   __sosoState?: RateState;
@@ -286,6 +317,9 @@ const G = globalThis as unknown as {
 function freshState(): RateState {
   return {
     lastRequestAt: 0,
+    tokens: BUCKET_CAPACITY,
+    tokensUpdatedAt: Date.now(),
+    nextSlotAt: 0,
     quotaExhaustedUntil: 0,
     rateLimitedUntil: 0,
     transientErrorUntil: 0,
@@ -356,7 +390,7 @@ function fresh(entry: CacheEntry | undefined): boolean {
   return !!entry && entry.expiresAt > Date.now();
 }
 
-async function request<T>(path: string, fallback: () => T): Promise<T> {
+export async function request<T>(path: string, fallback: () => T): Promise<T> {
   if (!KEY) return fallback();
 
   const cached = state.cache.get(path) as CacheEntry<T> | undefined;
@@ -370,8 +404,8 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
   if (now < state.rateLimitedUntil) return cached ? cached.data : fallback();
   if (now < state.transientErrorUntil) return cached ? cached.data : fallback();
 
-  // Per-path negative cache: this endpoint returned 403/404 recently, no point
-  // burning a 1-req-per-min slot on it. Other paths still go through.
+  // Per-path negative cache: this endpoint returned 403/404 recently, no
+  // point burning a quota slot on it. Other paths still go through.
   const blockedUntil = state.notFoundUntil.get(path);
   if (blockedUntil && now < blockedUntil) {
     return cached ? cached.data : fallback();
@@ -381,17 +415,42 @@ async function request<T>(path: string, fallback: () => T): Promise<T> {
   const existing = state.inflight.get(path) as Promise<T> | undefined;
   if (existing) return existing;
 
-  // Rate-limit gate: if we'd violate the 60s gap, return whatever we have
-  // (stale cache → synthetic fallback). Don't queue — that would back up
-  // requests indefinitely under traffic.
-  const sinceLast = now - state.lastRequestAt;
-  if (sinceLast < MIN_GAP_MS) {
-    if (cached) return cached.data;
-    return fallback();
+  // Token bucket + deferred-claim queue:
+  //   1. Refill the bucket from `tokensUpdatedAt` to `now` at one token per
+  //      MIN_GAP_MS, capped at BUCKET_CAPACITY. Allows a fan-out burst
+  //      (e.g., a dashboard SSR with 20 widgets) to dispatch in parallel
+  //      without serializing each behind the gap.
+  //   2. If a token is available, consume it and dispatch immediately.
+  //   3. Otherwise, claim the next free slot at
+  //        max(state.nextSlotAt, now) + MIN_GAP_MS
+  //      (advancing nextSlotAt synchronously so the next caller sees the
+  //      bumped cursor) and wait until then.
+  //   4. Hard cap MAX_QUEUE_WAIT_MS — if our slot is further out than that,
+  //      drop to fallback so SSR renders never block longer than the cap.
+  const elapsed = now - state.tokensUpdatedAt;
+  const refilled = Math.min(BUCKET_CAPACITY, state.tokens + elapsed / MIN_GAP_MS);
+  state.tokens = refilled;
+  state.tokensUpdatedAt = now;
+
+  let waitMs = 0;
+  if (state.tokens >= 1) {
+    state.tokens -= 1;
+    state.lastRequestAt = now;
+  } else {
+    const cursorBase = Math.max(state.nextSlotAt, now);
+    const slot = cursorBase + MIN_GAP_MS;
+    waitMs = slot - now;
+    if (waitMs > MAX_QUEUE_WAIT_MS) {
+      return cached ? cached.data : fallback();
+    }
+    state.nextSlotAt = slot;
+    state.lastRequestAt = slot;
   }
 
   const promise = (async (): Promise<T> => {
-    state.lastRequestAt = Date.now();
+    if (waitMs > 0) {
+      await new Promise<void>((r) => setTimeout(r, waitMs));
+    }
     try {
       // Hard timeout so a slow / hanging upstream never blocks page render.
       // The catch path treats a timeout as a transient error → 5min backoff,
@@ -641,7 +700,7 @@ export async function getSsiKlines(
   sp.set("limit", String(opts.limit ?? 90));
   if (opts.startTime) sp.set("start_time", String(opts.startTime));
   if (opts.endTime) sp.set("end_time", String(opts.endTime));
-  return request<SsiKline[]>(`/indices/${encodeURIComponent(ticker)}/klines?${sp}`, () => {
+  const live = await request<SsiKline[]>(`/indices/${encodeURIComponent(ticker)}/klines?${sp}`, () => {
     // Synthetic 90-day klines shaped exactly like the live response.
     const now = Date.now();
     let p = 0.95;
@@ -660,6 +719,99 @@ export async function getSsiKlines(
         close: Number(close.toFixed(4)),
       };
     });
+  });
+  // SoSoValue's `/indices/{ticker}/klines` is shipping an empty array on the
+  // live API for SSI baskets (verified 2026-05-01). The snapshot endpoint
+  // works, the constituent endpoint works, but per-basket history is a gap.
+  // Reconstruct the chart from constituent klines so consumers (dashboard,
+  // backtest, risk, portfolio, publisher) all get something usable.
+  if (live.length === 0) {
+    return synthesizeNavKlinesFromConstituents(ticker, opts.limit ?? 90);
+  }
+  return live;
+}
+
+// Compose a weighted-NAV time-series from constituent klines and rebase the
+// final close to the live snapshot price, so the chart shape is real and
+// the y-axis lines up with what the user sees in the KPI row.
+async function synthesizeNavKlinesFromConstituents(
+  ticker: string,
+  limit: number,
+): Promise<SsiKline[]> {
+  let constituents: IndexConstituent[];
+  try {
+    constituents = await getSsiConstituents(ticker);
+  } catch {
+    return [];
+  }
+  if (!constituents.length) return [];
+
+  // Pull each constituent's daily klines in parallel. Failures degrade
+  // gracefully — we just skip that asset (its weight is effectively dropped
+  // and the remaining weights are renormalized).
+  const klineSets = await Promise.all(
+    constituents.map(async (c) => {
+      try {
+        const k = await getCurrencyKlines(c.currency_id, { limit });
+        return { c, k };
+      } catch {
+        return { c, k: [] as CurrencyKline[] };
+      }
+    }),
+  );
+  const valid = klineSets.filter(({ k }) => k.length > 0);
+  if (!valid.length) return [];
+
+  // Bucket every candle to its UTC day so series align even when the upstream
+  // returns slightly drifting timestamps. tsMap[dayMs] -> Map<currency_id, close>.
+  const tsMap = new Map<number, Map<string, number>>();
+  for (const { c, k } of valid) {
+    for (const candle of k) {
+      const dayMs = Math.floor(candle.timestamp / 86_400_000) * 86_400_000;
+      let bucket = tsMap.get(dayMs);
+      if (!bucket) {
+        bucket = new Map();
+        tsMap.set(dayMs, bucket);
+      }
+      bucket.set(c.currency_id, candle.close);
+    }
+  }
+  // Keep only days where ALL valid constituents have a close — avoids
+  // partial-coverage spikes when a newer asset has shorter history.
+  const requiredIds = valid.map(({ c }) => c.currency_id);
+  const sorted = Array.from(tsMap.entries())
+    .filter(([, bucket]) => requiredIds.every((id) => bucket.has(id)))
+    .sort((a, b) => a[0] - b[0]);
+  if (!sorted.length) return [];
+
+  // Renormalize weights across the surviving constituents.
+  const weightSum =
+    valid.reduce((s, { c }) => s + c.weight, 0) || valid.length;
+
+  const rawNav = sorted.map(([ts, bucket]) => {
+    let weighted = 0;
+    for (const { c } of valid) {
+      const close = bucket.get(c.currency_id) ?? 0;
+      weighted += (c.weight / weightSum) * close;
+    }
+    return { timestamp: ts, weighted };
+  });
+
+  // Rebase: scale every point so the most-recent weighted value equals the
+  // live SSI snapshot price. The shape is honest (driven by real constituent
+  // moves), the y-axis matches the KPI row.
+  let scale = 1;
+  try {
+    const snap = await getSsiSnapshot(ticker);
+    const tail = rawNav[rawNav.length - 1].weighted;
+    if (snap.price > 0 && tail > 0) scale = snap.price / tail;
+  } catch {
+    /* keep raw scale */
+  }
+
+  return rawNav.map(({ timestamp, weighted }) => {
+    const close = Number((weighted * scale).toFixed(6));
+    return { timestamp, open: close, high: close, low: close, close };
   });
 }
 

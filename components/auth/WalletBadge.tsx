@@ -1,10 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDisconnect } from "wagmi";
 
 import { tokens } from "@/lib/tokens";
+import { notifySessionChanged } from "@/lib/auth/useSessionGuard";
 
 // Compact pill rendered inside the protected-route topbars. Middleware
 // guarantees a session is present here, so the un-signed state is purely
@@ -16,21 +17,32 @@ export function WalletBadge() {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/auth/me", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d: { address: string | null }) => {
-        if (!cancelled) setAddress(d.address);
-      })
-      .catch(() => {
-        // Silent: on a protected route this shouldn't happen, but if it
-        // does the dropdown just stays in its empty state.
-      });
-    return () => {
-      cancelled = true;
-    };
+  // Re-fetchable session readout. The badge listens for the global
+  // "hypenode:session-changed" event (fired by useSessionGuard.signIn or
+  // a sign-out elsewhere) so it stays in sync after a re-auth without a
+  // hard reload.
+  const refreshSession = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/me", { cache: "no-store" });
+      const d = (await res.json()) as { address: string | null };
+      setAddress(d.address);
+    } catch {
+      // Silent: on a protected route this shouldn't happen, but if it
+      // does the dropdown just stays in its empty state.
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshSession();
+    if (typeof window === "undefined") return;
+    const onChanged = () => {
+      void refreshSession();
+    };
+    window.addEventListener("hypenode:session-changed", onChanged);
+    return () => {
+      window.removeEventListener("hypenode:session-changed", onChanged);
+    };
+  }, [refreshSession]);
 
   // Close menu on outside click.
   useEffect(() => {
@@ -46,6 +58,10 @@ export function WalletBadge() {
     await fetch("/api/auth/logout", { method: "POST" });
     disconnect();
     setAddress(null);
+    // Fan out so any open useSessionGuard instance (portfolio, builder)
+    // drops their cached session address and routes to the disconnected
+    // empty state instead of stale data.
+    notifySessionChanged();
     setOpen(false);
     router.push("/");
     router.refresh();
