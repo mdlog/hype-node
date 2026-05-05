@@ -17,7 +17,7 @@
 
 import { http, createPublicClient, type Address, type Hex } from "viem";
 import { mainnet, sepolia } from "viem/chains";
-import { valueChainMainnet, valueChainTestnet } from "@/lib/auth/wagmi";
+import { valueChainMainnet, valueChainTestnet } from "@/lib/chains";
 import { SSI_REGISTRY_ABI } from "@/lib/contracts/ssiRegistryAbi";
 
 // Use the SSI_* env (server-side) for the registry chain. Sepolia is the

@@ -1,33 +1,8 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import { mainnet, sepolia } from "wagmi/chains";
-import { defineChain } from "viem";
+import { valueChainMainnet, valueChainTestnet } from "@/lib/chains";
 
-// SoDEX runs on ValueChain L1. We define both nets so wagmi can prompt the
-// user to switch when the SoDEX execute path triggers a typed-data signature.
-export const valueChainMainnet = defineChain({
-  id: 286623,
-  name: "ValueChain",
-  nativeCurrency: { name: "VAL", symbol: "VAL", decimals: 18 },
-  rpcUrls: {
-    default: { http: ["https://rpc.valuechain.io"] },
-  },
-  blockExplorers: {
-    default: { name: "ValueChain Explorer", url: "https://explorer.valuechain.io" },
-  },
-});
-
-export const valueChainTestnet = defineChain({
-  id: 138565,
-  name: "ValueChain Testnet",
-  nativeCurrency: { name: "VAL", symbol: "VAL", decimals: 18 },
-  rpcUrls: {
-    default: { http: ["https://testnet-rpc.valuechain.io"] },
-  },
-  blockExplorers: {
-    default: { name: "ValueChain Testnet Explorer", url: "https://testnet-explorer.valuechain.io" },
-  },
-  testnet: true,
-});
+export { valueChainMainnet, valueChainTestnet };
 
 const PLACEHOLDER_PROJECT_ID = "YOUR_WALLETCONNECT_PROJECT_ID";
 const projectId =

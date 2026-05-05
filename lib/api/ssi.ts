@@ -16,7 +16,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia, mainnet } from "viem/chains";
-import { valueChainMainnet, valueChainTestnet } from "@/lib/auth/wagmi";
+import { valueChainMainnet, valueChainTestnet } from "@/lib/chains";
 import { SSI_REGISTRY_ABI } from "@/lib/contracts/ssiRegistryAbi";
 
 const RPC = process.env.SSI_RPC_URL ?? "";

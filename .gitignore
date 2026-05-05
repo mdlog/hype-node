@@ -20,3 +20,4 @@ agent-service/.checkpoints
 agent-service/data/
 # Per-deployment billing data (free-tier usage + paid balances)
 .billing/
+docs/
