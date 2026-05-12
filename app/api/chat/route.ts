@@ -7,6 +7,10 @@ import { chat, type ChatTurn } from "@/lib/api/agent";
 import { canSend, getSnapshot, recordUsage } from "@/lib/billing";
 
 export const dynamic = "force-dynamic";
+// Vercel Pro default is 10s, which is too tight for agent turns that hit the
+// LLM + tool chain (typical 5-15s, occasional 30s+ on cold starts). 60s is
+// the Pro tier ceiling without a special plan.
+export const maxDuration = 60;
 
 /**
  * Authenticated, billing-gated chat endpoint.
