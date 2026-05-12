@@ -723,16 +723,14 @@ export default function ChatPage() {
     [persistAuthed, refreshThreads],
   );
 
-  // Rename via PATCH /title. window.prompt is intentionally lo-fi — a real
-  // inline editor is a follow-up. Title null/empty resets to the auto-
-  // generated "New conversation" placeholder.
+  // Commit a renamed title. The sidebar row enters edit mode locally and
+  // calls this with the trimmed final value when the user presses Enter or
+  // the input blurs. Empty value clears the title back to the auto-derived
+  // "New conversation" placeholder.
   const handleRenameThread = useCallback(
-    async (id: string, currentTitle: string) => {
+    async (id: string, newTitle: string) => {
       if (!persistAuthed) return;
-      if (typeof window === "undefined") return;
-      const next = window.prompt("Rename conversation:", currentTitle);
-      if (next === null) return;
-      const trimmed = next.trim();
+      const trimmed = newTitle.trim();
       try {
         await fetch(`/api/chat/threads/${id}`, {
           method: "PATCH",
@@ -1003,7 +1001,7 @@ function LeftSidebar({
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
   onPin: (id: string, pinned: boolean) => void;
-  onRename: (id: string, currentTitle: string) => void;
+  onRename: (id: string, newTitle: string) => void;
   onArchive: (id: string) => void;
   legacyChatPending: boolean;
   legacyCount: number;
@@ -1192,7 +1190,7 @@ function LeftSidebar({
                 canManage
                   ? {
                       onPin: () => onPin(it.id, !it.pinned),
-                      onRename: () => onRename(it.id, it.title),
+                      onRename: (next: string) => onRename(it.id, next),
                       onArchive: () => onArchive(it.id),
                       onDelete: () => onDelete(it.id),
                     }
@@ -1248,7 +1246,7 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
 
 type ConvRowActions = {
   onPin: () => void;
-  onRename: () => void;
+  onRename: (newTitle: string) => void;
   onArchive: () => void;
   onDelete: () => void;
 };
@@ -1264,7 +1262,44 @@ function ConvRow({
 }) {
   const [hover, setHover] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(item.title);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Sync draft when the canonical title changes from outside (e.g. another
+  // device renamed the same thread). Only updates when not actively editing
+  // so we don't blow away the user's in-progress text on a poll cycle.
+  useEffect(() => {
+    if (!renaming) setDraftTitle(item.title);
+  }, [item.title, renaming]);
+
+  // Focus + select the input the moment edit mode activates so the user can
+  // start typing immediately (mirrors the standard rename UX in IDEs).
+  useEffect(() => {
+    if (renaming && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [renaming]);
+
+  function commitRename() {
+    if (!actions) {
+      setRenaming(false);
+      return;
+    }
+    const next = draftTitle.trim();
+    setRenaming(false);
+    // Skip the network round trip when nothing changed — keeps the polled
+    // sidebar from flickering on stray Enter presses.
+    if (next === (item.title ?? "").trim()) return;
+    actions.onRename(next);
+  }
+
+  function cancelRename() {
+    setDraftTitle(item.title);
+    setRenaming(false);
+  }
 
   // Close the menu on outside click / Escape so the dropdown doesn't get
   // stuck open when the user moves on. Listening on document means we don't
@@ -1327,7 +1362,7 @@ function ConvRow({
             flex: 1,
           }}
         >
-          {item.pinned && (
+          {item.pinned && !renaming && (
             <svg
               width={11}
               height={11}
@@ -1343,9 +1378,43 @@ function ConvRow({
               <path d="M6.5 9.5L3 13" stroke={PAL.amber} strokeWidth={1.4} fill="none" strokeLinecap="round" />
             </svg>
           )}
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {item.title}
-          </span>
+          {renaming ? (
+            <input
+              ref={inputRef}
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitRename();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelRename();
+                }
+              }}
+              onBlur={commitRename}
+              maxLength={120}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                padding: "1px 5px",
+                fontFamily: "inherit",
+                fontSize: 12.5,
+                fontWeight: item.active ? 600 : 500,
+                color: PAL.text,
+                background: PAL.bg,
+                border: `1px solid ${PAL.emerald}`,
+                borderRadius: 4,
+                outline: "none",
+              }}
+            />
+          ) : (
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {item.title}
+            </span>
+          )}
         </span>
         {actions && (hover || menuOpen) ? (
           <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
@@ -1398,7 +1467,8 @@ function ConvRow({
                 }}
                 onRename={() => {
                   setMenuOpen(false);
-                  actions.onRename();
+                  setDraftTitle(item.title);
+                  setRenaming(true);
                 }}
                 onArchive={() => {
                   setMenuOpen(false);
@@ -1465,7 +1535,7 @@ function ConvRowMenu({
       }}
     >
       <ConvRowMenuItem
-        label={pinned ? "Lepas sematan" : "Sematkan"}
+        label={pinned ? "Unpin" : "Pin"}
         onClick={onPin}
         icon={
           <svg width={12} height={12} viewBox="0 0 16 16" fill={pinned ? PAL.amber : "none"} stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round">
@@ -1475,7 +1545,7 @@ function ConvRowMenu({
         }
       />
       <ConvRowMenuItem
-        label="Ganti nama"
+        label="Rename"
         onClick={onRename}
         icon={
           <svg width={12} height={12} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
@@ -1485,7 +1555,7 @@ function ConvRowMenu({
         }
       />
       <ConvRowMenuItem
-        label="Arsipkan"
+        label="Archive"
         onClick={onArchive}
         icon={
           <svg width={12} height={12} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
@@ -1497,7 +1567,7 @@ function ConvRowMenu({
       />
       <div style={{ height: 1, background: PAL.line, margin: "4px 0" }} />
       <ConvRowMenuItem
-        label="Hapus"
+        label="Delete"
         onClick={onDelete}
         danger
         icon={
