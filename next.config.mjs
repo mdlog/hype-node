@@ -44,11 +44,6 @@ const config = {
       // ws import on the Node side.
       bufferutil: false,
       "utf-8-validate": false,
-      // siwe v2 ships an ethers-compat module (siwe/dist/ethersCompat.js)
-      // that imports `ethers` eagerly. We don't use ethers — signatures go
-      // through wagmi/viem — so the ethers code path is never hit at
-      // runtime. Mark as resolved-empty to keep ethers out of the bundle.
-      ethers: false,
     };
     return cfg;
   },

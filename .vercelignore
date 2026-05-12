@@ -1,5 +1,6 @@
 .next
-.vercel
+.vercel/output
+.vercel/.env*
 node_modules
 out
 cache
