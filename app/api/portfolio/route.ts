@@ -7,6 +7,9 @@ import { getUserPortfolio } from "@/lib/api/portfolio";
 // data is per-address so URL-based revalidate doesn't apply cleanly).
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+// On-chain index scan (sequential indexCount × 2 RPC reads) plus SoDEX
+// fetch can run long on the public Sepolia RPC. Default 10s is too tight.
+export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   const param = req.nextUrl.searchParams.get("address")?.trim() ?? "";

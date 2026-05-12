@@ -225,23 +225,35 @@ async function readSodexBalances(
       return { balances: [], error: `SoDEX HTTP ${res.status}` };
     }
     const body = (await res.json()) as unknown;
-    // The gateway sometimes wraps payloads as `{ data: [...] }` and sometimes
-    // returns a bare array. Accept both.
+    // Live SoDEX gateway (verified 2026-05) returns:
+    //   { code: 0, timestamp, data: { blockHeight, blockTime, balances: [...] } }
+    // Earlier shapes ({data: [...]} or a bare array) are kept as fallbacks
+    // since the gateway has changed shape before.
+    const envelope = body as {
+      data?:
+        | SodexBalanceWire[]
+        | { balances?: SodexBalanceWire[] };
+    };
     const list: SodexBalanceWire[] = Array.isArray(body)
       ? (body as SodexBalanceWire[])
-      : Array.isArray((body as { data?: unknown }).data)
-        ? ((body as { data: SodexBalanceWire[] }).data)
-        : [];
+      : Array.isArray(envelope.data)
+        ? envelope.data
+        : Array.isArray(envelope.data?.balances)
+          ? envelope.data!.balances!
+          : [];
     const balances: SpotBalance[] = list.map((b) => {
-      const free = pickAmount(b.free, b.available);
       const locked = pickAmount(b.locked, b.frozen);
-      // Sum manually so the UI doesn't depend on the gateway's `total` field
-      // (which some endpoints omit). All amounts are decimal strings to
-      // avoid float precision drift on common token decimals (6/8/18).
+      // Live wire returns `total` and `locked` only — `free` and `available`
+      // are absent. Derive free = total - locked when only total is available.
+      const explicitFree = pickAmount(b.free, b.available);
       const total = pickAmount(
         b.total,
-        (Number(free) + Number(locked)).toString(),
+        (Number(explicitFree) + Number(locked)).toString(),
       );
+      const free =
+        explicitFree !== "0" || (b.free !== undefined || b.available !== undefined)
+          ? explicitFree
+          : (Number(total) - Number(locked)).toString();
       return {
         asset: pickAsset(b),
         free,
