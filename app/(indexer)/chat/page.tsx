@@ -671,6 +671,35 @@ export default function ChatPage() {
     void createThread(null);
   }, [persistAuthed, createThread]);
 
+  // Per-row delete. Confirms inline so an accidental click on a dense
+  // thread list can't wipe a saved conversation. When the active thread
+  // is deleted we either jump to the next remaining thread or create a
+  // fresh empty one — never leave the chat with a dangling activeThreadId.
+  const handleDeleteThread = useCallback(
+    async (id: string) => {
+      if (!persistAuthed) return;
+      if (typeof window !== "undefined" && !window.confirm("Delete this conversation? This cannot be undone.")) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/chat/threads/${id}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) return;
+      } catch {
+        return;
+      }
+      const list = await refreshThreads();
+      if (id === activeThreadId) {
+        const next = (list ?? []).find((t) => t.id !== id);
+        if (next) {
+          await loadThread(next.id);
+        } else {
+          await createThread(null);
+        }
+      }
+    },
+    [persistAuthed, activeThreadId, refreshThreads, loadThread, createThread],
+  );
+
   async function send(text?: string) {
     const value = (text ?? input).trim();
     if (!value || busy) return;
@@ -786,6 +815,7 @@ export default function ChatPage() {
         items={filteredConvs}
         onNew={handleNewThread}
         onPick={handlePickThread}
+        onDelete={handleDeleteThread}
         legacyChatPending={!!legacyTurns}
         legacyCount={legacyTurns?.length ?? 0}
         onImportLegacy={importLegacyChat}
@@ -873,6 +903,7 @@ function LeftSidebar({
   items,
   onNew,
   onPick,
+  onDelete,
   legacyChatPending,
   legacyCount,
   onImportLegacy,
@@ -886,6 +917,7 @@ function LeftSidebar({
   items: ConvItem[];
   onNew: () => void;
   onPick: (id: string) => void;
+  onDelete: (id: string) => void;
   legacyChatPending: boolean;
   legacyCount: number;
   onImportLegacy: () => void;
@@ -919,25 +951,30 @@ function LeftSidebar({
           type="button"
           onClick={onNew}
           style={{
-            padding: "4px 8px",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            padding: "5px 10px",
             fontSize: 11,
-            fontWeight: 500,
-            color: PAL.dim,
-            background: "transparent",
-            border: "1px solid transparent",
+            fontWeight: 600,
+            color: PAL.bg,
+            background: PAL.emerald,
+            border: `1px solid ${PAL.emerald}`,
             borderRadius: 6,
             cursor: "pointer",
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.color = PAL.text;
-            e.currentTarget.style.background = PAL.bg3;
+            e.currentTarget.style.filter = "brightness(1.08)";
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.color = PAL.dim;
-            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.filter = "none";
           }}
+          title="Start a new conversation"
         >
-          + New
+          <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round">
+            <path d="M8 3v10M3 8h10" />
+          </svg>
+          New chat
         </button>
       </div>
 
@@ -1058,7 +1095,16 @@ function LeftSidebar({
         )}
         <GroupLabel>{persistAuthed ? "Threads" : "Today"}</GroupLabel>
         {items.map((it) => (
-          <ConvRow key={it.id} item={it} onClick={() => onPick(it.id)} />
+          <ConvRow
+            key={it.id}
+            item={it}
+            onClick={() => onPick(it.id)}
+            onDelete={
+              persistAuthed && it.id !== "current"
+                ? () => onDelete(it.id)
+                : undefined
+            }
+          />
         ))}
       </div>
 
@@ -1105,12 +1151,24 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ConvRow({ item, onClick }: { item: ConvItem; onClick?: () => void }) {
+function ConvRow({
+  item,
+  onClick,
+  onDelete,
+}: {
+  item: ConvItem;
+  onClick?: () => void;
+  onDelete?: () => void;
+}) {
+  const [hover, setHover] = useState(false);
   return (
     <div
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       role={onClick ? "button" : undefined}
       style={{
+        position: "relative",
         padding: "10px 12px",
         borderRadius: 8,
         cursor: "pointer",
@@ -1126,6 +1184,7 @@ function ConvRow({ item, onClick }: { item: ConvItem; onClick?: () => void }) {
           justifyContent: "space-between",
           alignItems: "center",
           marginBottom: 4,
+          gap: 6,
         }}
       >
         <span
@@ -1133,13 +1192,55 @@ function ConvRow({ item, onClick }: { item: ConvItem; onClick?: () => void }) {
             fontSize: 12.5,
             fontWeight: item.active ? 600 : 500,
             color: PAL.text,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flex: 1,
           }}
         >
           {item.title}
         </span>
-        <span style={{ fontFamily: MONO, fontSize: 9.5, color: PAL.faint }}>
-          {item.when}
-        </span>
+        {onDelete && hover ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+            title="Delete conversation"
+            aria-label="Delete conversation"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 3,
+              width: 22,
+              height: 22,
+              border: `1px solid ${PAL.line2}`,
+              borderRadius: 5,
+              background: PAL.bg4,
+              color: PAL.dim,
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = PAL.red;
+              e.currentTarget.style.borderColor = PAL.red;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = PAL.dim;
+              e.currentTarget.style.borderColor = PAL.line2;
+            }}
+          >
+            <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 4h10M6.5 4V2.5h3V4M5 4l.6 9.5h4.8L11 4M7 7v4M9 7v4" />
+            </svg>
+          </button>
+        ) : (
+          <span style={{ fontFamily: MONO, fontSize: 9.5, color: PAL.faint, flexShrink: 0 }}>
+            {item.when}
+          </span>
+        )}
       </div>
       <div
         style={{
