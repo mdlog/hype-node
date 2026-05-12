@@ -100,7 +100,7 @@ const MCP_TOOLS: Array<{ name: string; desc: string; kind: ToolKind }> = [
 ];
 
 const SUGGESTIONS = [
-  "Buy $20 of SOL on SoDEX testnet",
+  "Buy $20 of SOSO on SoDEX testnet",
   "Show my SoDEX balances",
   "Latest VC fundraising rounds",
   "Who funded Avalanche?",
