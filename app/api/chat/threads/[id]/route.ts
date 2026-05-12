@@ -73,7 +73,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   const userAddress = auth.user.address;
 
   const body = (await req.json().catch(() => null)) as
-    | { title?: string | null; archived?: boolean }
+    | { title?: string | null; archived?: boolean; pinned?: boolean }
     | null;
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: "invalid body" }, { status: 400 });
@@ -83,6 +83,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   if ("title" in body) update.title = body.title?.toString().trim() || null;
   if ("archived" in body && typeof body.archived === "boolean") {
     update.archived = body.archived;
+  }
+  if ("pinned" in body && typeof body.pinned === "boolean") {
+    update.pinned = body.pinned;
   }
   if (Object.keys(update).length === 0) {
     return NextResponse.json({ error: "nothing to update" }, { status: 400 });

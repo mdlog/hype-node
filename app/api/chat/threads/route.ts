@@ -36,9 +36,13 @@ export async function GET(req: NextRequest) {
 
   const archivedParam = req.nextUrl.searchParams.get("archived");
 
+  // Pinned threads sort to the top, then most-recent activity within each
+  // group. The composite index idx_ch_threads_user_pinned_updated serves
+  // this without a sort step.
   let query = threads()
     .select("*")
     .eq("user_address", userAddress)
+    .order("pinned", { ascending: false })
     .order("updated_at", { ascending: false });
 
   // Default = active threads only. The sidebar wants the unarchived list

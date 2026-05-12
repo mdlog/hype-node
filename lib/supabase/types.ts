@@ -88,12 +88,17 @@ export type ChThreadRow = {
   updated_at: string;
   title: string | null;
   archived: boolean;
+  pinned: boolean;
 };
-export type ChThreadInsert = Omit<ChThreadRow, "id" | "created_at" | "updated_at" | "archived"> & {
+export type ChThreadInsert = Omit<
+  ChThreadRow,
+  "id" | "created_at" | "updated_at" | "archived" | "pinned"
+> & {
   id?: string;
   created_at?: string;
   updated_at?: string;
   archived?: boolean;
+  pinned?: boolean;
 };
 export type ChThreadUpdate = Partial<ChThreadInsert>;
 

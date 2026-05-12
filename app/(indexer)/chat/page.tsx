@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -120,6 +120,7 @@ type ThreadWire = {
   updated_at: string;
   title: string | null;
   archived: boolean;
+  pinned: boolean;
 };
 
 type MessageWire = {
@@ -619,6 +620,7 @@ export default function ChatPage() {
             : "saved thread",
           tag: isActive && agentOnline ? "live" : null,
           active: isActive,
+          pinned: !!t.pinned,
         };
       });
     } else {
@@ -633,6 +635,7 @@ export default function ChatPage() {
               : `${userTurns} prompts · ${agentTurns} replies`,
           tag: agentOnline ? "live" : null,
           active: true,
+          pinned: false,
         },
       ];
     }
@@ -684,6 +687,80 @@ export default function ChatPage() {
       try {
         const res = await fetch(`/api/chat/threads/${id}`, { method: "DELETE" });
         if (!res.ok && res.status !== 404) return;
+      } catch {
+        return;
+      }
+      const list = await refreshThreads();
+      if (id === activeThreadId) {
+        const next = (list ?? []).find((t) => t.id !== id);
+        if (next) {
+          await loadThread(next.id);
+        } else {
+          await createThread(null);
+        }
+      }
+    },
+    [persistAuthed, activeThreadId, refreshThreads, loadThread, createThread],
+  );
+
+  // Pin / unpin. Pinned threads sort to the top of the sidebar. The server
+  // PATCH returns the updated row but we just refresh the whole list so the
+  // sort order is consistent with what the GET endpoint returns.
+  const handlePinThread = useCallback(
+    async (id: string, pinned: boolean) => {
+      if (!persistAuthed) return;
+      try {
+        await fetch(`/api/chat/threads/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pinned }),
+        });
+      } catch {
+        return;
+      }
+      await refreshThreads();
+    },
+    [persistAuthed, refreshThreads],
+  );
+
+  // Rename via PATCH /title. window.prompt is intentionally lo-fi — a real
+  // inline editor is a follow-up. Title null/empty resets to the auto-
+  // generated "New conversation" placeholder.
+  const handleRenameThread = useCallback(
+    async (id: string, currentTitle: string) => {
+      if (!persistAuthed) return;
+      if (typeof window === "undefined") return;
+      const next = window.prompt("Rename conversation:", currentTitle);
+      if (next === null) return;
+      const trimmed = next.trim();
+      try {
+        await fetch(`/api/chat/threads/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: trimmed || null }),
+        });
+      } catch {
+        return;
+      }
+      await refreshThreads();
+    },
+    [persistAuthed, refreshThreads],
+  );
+
+  // Archive hides the thread from the default list (the GET endpoint filters
+  // archived=false unless the caller asks otherwise). Archived threads still
+  // exist on the server and can be unarchived later via a future surface.
+  // When archiving the active thread we move to the next visible thread or
+  // open a fresh empty one, mirroring the delete flow.
+  const handleArchiveThread = useCallback(
+    async (id: string) => {
+      if (!persistAuthed) return;
+      try {
+        await fetch(`/api/chat/threads/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ archived: true }),
+        });
       } catch {
         return;
       }
@@ -816,6 +893,9 @@ export default function ChatPage() {
         onNew={handleNewThread}
         onPick={handlePickThread}
         onDelete={handleDeleteThread}
+        onPin={handlePinThread}
+        onRename={handleRenameThread}
+        onArchive={handleArchiveThread}
         legacyChatPending={!!legacyTurns}
         legacyCount={legacyTurns?.length ?? 0}
         onImportLegacy={importLegacyChat}
@@ -895,6 +975,7 @@ type ConvItem = {
   meta: string;
   tag: string | null;
   active: boolean;
+  pinned: boolean;
 };
 
 function LeftSidebar({
@@ -904,6 +985,9 @@ function LeftSidebar({
   onNew,
   onPick,
   onDelete,
+  onPin,
+  onRename,
+  onArchive,
   legacyChatPending,
   legacyCount,
   onImportLegacy,
@@ -918,6 +1002,9 @@ function LeftSidebar({
   onNew: () => void;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  onPin: (id: string, pinned: boolean) => void;
+  onRename: (id: string, currentTitle: string) => void;
+  onArchive: (id: string) => void;
   legacyChatPending: boolean;
   legacyCount: number;
   onImportLegacy: () => void;
@@ -1094,18 +1181,26 @@ function LeftSidebar({
           </div>
         )}
         <GroupLabel>{persistAuthed ? "Threads" : "Today"}</GroupLabel>
-        {items.map((it) => (
-          <ConvRow
-            key={it.id}
-            item={it}
-            onClick={() => onPick(it.id)}
-            onDelete={
-              persistAuthed && it.id !== "current"
-                ? () => onDelete(it.id)
-                : undefined
-            }
-          />
-        ))}
+        {items.map((it) => {
+          const canManage = persistAuthed && it.id !== "current";
+          return (
+            <ConvRow
+              key={it.id}
+              item={it}
+              onClick={() => onPick(it.id)}
+              actions={
+                canManage
+                  ? {
+                      onPin: () => onPin(it.id, !it.pinned),
+                      onRename: () => onRename(it.id, it.title),
+                      onArchive: () => onArchive(it.id),
+                      onDelete: () => onDelete(it.id),
+                    }
+                  : null
+              }
+            />
+          );
+        })}
       </div>
 
       <div
@@ -1151,16 +1246,47 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+type ConvRowActions = {
+  onPin: () => void;
+  onRename: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+};
+
 function ConvRow({
   item,
   onClick,
-  onDelete,
+  actions,
 }: {
   item: ConvItem;
   onClick?: () => void;
-  onDelete?: () => void;
+  actions?: ConvRowActions | null;
 }) {
   const [hover, setHover] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close the menu on outside click / Escape so the dropdown doesn't get
+  // stuck open when the user moves on. Listening on document means we don't
+  // have to thread an open-state up to the sidebar level.
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onDocClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
   return (
     <div
       onClick={onClick}
@@ -1189,6 +1315,9 @@ function ConvRow({
       >
         <span
           style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
             fontSize: 12.5,
             fontWeight: item.active ? 600 : 500,
             color: PAL.text,
@@ -1198,44 +1327,90 @@ function ConvRow({
             flex: 1,
           }}
         >
-          {item.title}
-        </span>
-        {onDelete && hover ? (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-            title="Delete conversation"
-            aria-label="Delete conversation"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 3,
-              width: 22,
-              height: 22,
-              border: `1px solid ${PAL.line2}`,
-              borderRadius: 5,
-              background: PAL.bg4,
-              color: PAL.dim,
-              cursor: "pointer",
-              flexShrink: 0,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = PAL.red;
-              e.currentTarget.style.borderColor = PAL.red;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = PAL.dim;
-              e.currentTarget.style.borderColor = PAL.line2;
-            }}
-          >
-            <svg width={11} height={11} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 4h10M6.5 4V2.5h3V4M5 4l.6 9.5h4.8L11 4M7 7v4M9 7v4" />
+          {item.pinned && (
+            <svg
+              width={11}
+              height={11}
+              viewBox="0 0 16 16"
+              fill={PAL.amber}
+              stroke={PAL.amber}
+              strokeWidth={1.2}
+              strokeLinejoin="round"
+              style={{ flexShrink: 0 }}
+              aria-label="pinned"
+            >
+              <path d="M9.5 2L14 6.5l-3 1L8 10.5 6.5 12 4 9.5 5.5 8l3-3 1-3z" />
+              <path d="M6.5 9.5L3 13" stroke={PAL.amber} strokeWidth={1.4} fill="none" strokeLinecap="round" />
             </svg>
-          </button>
+          )}
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {item.title}
+          </span>
+        </span>
+        {actions && (hover || menuOpen) ? (
+          <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen((v) => !v);
+              }}
+              title="More actions"
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 22,
+                height: 22,
+                padding: 0,
+                border: `1px solid ${menuOpen ? PAL.line2 : "transparent"}`,
+                borderRadius: 5,
+                background: menuOpen ? PAL.bg4 : "transparent",
+                color: PAL.dim,
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = PAL.bg4;
+                e.currentTarget.style.color = PAL.text;
+              }}
+              onMouseLeave={(e) => {
+                if (!menuOpen) {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.color = PAL.dim;
+                }
+              }}
+            >
+              <svg width={14} height={14} viewBox="0 0 16 16" fill="currentColor">
+                <circle cx="3" cy="8" r="1.4" />
+                <circle cx="8" cy="8" r="1.4" />
+                <circle cx="13" cy="8" r="1.4" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <ConvRowMenu
+                pinned={item.pinned}
+                onPin={() => {
+                  setMenuOpen(false);
+                  actions.onPin();
+                }}
+                onRename={() => {
+                  setMenuOpen(false);
+                  actions.onRename();
+                }}
+                onArchive={() => {
+                  setMenuOpen(false);
+                  actions.onArchive();
+                }}
+                onDelete={() => {
+                  setMenuOpen(false);
+                  actions.onDelete();
+                }}
+              />
+            )}
+          </div>
         ) : (
           <span style={{ fontFamily: MONO, fontSize: 9.5, color: PAL.faint, flexShrink: 0 }}>
             {item.when}
@@ -1256,6 +1431,131 @@ function ConvRow({
         <span>{item.meta}</span>
       </div>
     </div>
+  );
+}
+
+function ConvRowMenu({
+  pinned,
+  onPin,
+  onRename,
+  onArchive,
+  onDelete,
+}: {
+  pinned: boolean;
+  onPin: () => void;
+  onRename: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      role="menu"
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: "absolute",
+        right: 0,
+        top: "calc(100% + 4px)",
+        minWidth: 168,
+        padding: 4,
+        background: PAL.bg2,
+        border: `1px solid ${PAL.line2}`,
+        borderRadius: 7,
+        boxShadow: "0 10px 24px rgba(0,0,0,0.45)",
+        zIndex: 50,
+      }}
+    >
+      <ConvRowMenuItem
+        label={pinned ? "Lepas sematan" : "Sematkan"}
+        onClick={onPin}
+        icon={
+          <svg width={12} height={12} viewBox="0 0 16 16" fill={pinned ? PAL.amber : "none"} stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round">
+            <path d="M9.5 2L14 6.5l-3 1L8 10.5 6.5 12 4 9.5 5.5 8l3-3 1-3z" />
+            <path d="M6.5 9.5L3 13" strokeLinecap="round" />
+          </svg>
+        }
+      />
+      <ConvRowMenuItem
+        label="Ganti nama"
+        onClick={onRename}
+        icon={
+          <svg width={12} height={12} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M11 2l3 3-9 9H2v-3z" />
+            <path d="M9 4l3 3" />
+          </svg>
+        }
+      />
+      <ConvRowMenuItem
+        label="Arsipkan"
+        onClick={onArchive}
+        icon={
+          <svg width={12} height={12} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="3" width="12" height="3" rx="1" />
+            <path d="M3 6v7h10V6" />
+            <path d="M6 9h4" />
+          </svg>
+        }
+      />
+      <div style={{ height: 1, background: PAL.line, margin: "4px 0" }} />
+      <ConvRowMenuItem
+        label="Hapus"
+        onClick={onDelete}
+        danger
+        icon={
+          <svg width={12} height={12} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 4h10M6.5 4V2.5h3V4M5 4l.6 9.5h4.8L11 4M7 7v4M9 7v4" />
+          </svg>
+        }
+      />
+    </div>
+  );
+}
+
+function ConvRowMenuItem({
+  label,
+  onClick,
+  icon,
+  danger,
+}: {
+  label: string;
+  onClick: () => void;
+  icon: ReactNode;
+  danger?: boolean;
+}) {
+  const baseColor = danger ? PAL.red : PAL.text;
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        width: "100%",
+        padding: "7px 9px",
+        fontSize: 12,
+        textAlign: "left",
+        background: "transparent",
+        color: baseColor,
+        border: "none",
+        borderRadius: 5,
+        cursor: "pointer",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = danger
+          ? "rgba(239,68,68,0.08)"
+          : PAL.bg3;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+      }}
+    >
+      <span style={{ display: "inline-flex", color: baseColor }}>{icon}</span>
+      <span>{label}</span>
+    </button>
   );
 }
 
