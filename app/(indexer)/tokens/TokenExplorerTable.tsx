@@ -8,8 +8,50 @@ import { tokens } from "@/lib/tokens";
 import { getCurrencySnapshot, type CurrencySnapshot } from "@/lib/api/sosovalue";
 import type { CurrencyListItem } from "@/lib/api/sosovalue/tokens";
 
-const PAGE_SIZE = 50;
+// Page size capped at 20 so each table-page render fans out at most 20
+// snapshot calls to /api/sosovalue. The previous 50 saturated SoSoValue's
+// 100 req/min HF tier in one render and the resulting 5xx put the proxy in
+// a 5min transient backoff — every subsequent snapshot served 502 until the
+// window cleared. 20 keeps a comfortable margin under the per-minute cap.
+const PAGE_SIZE = 20;
 const CHUNK = 50;
+
+// Snapshots barely change minute-to-minute (price moves are ≤ 2% intraday
+// for the typical token). Caching successful snapshots in localStorage for
+// 5min cuts repeat-load fan-out to zero across page refreshes and tab
+// re-opens. Failed snapshots are NOT cached so a transient 5xx doesn't
+// stick to the user's browser.
+const SNAPSHOT_CACHE_TTL_MS = 5 * 60_000;
+const SNAPSHOT_CACHE_PREFIX = "soso_snap:";
+
+type CachedSnapshot = { data: CurrencySnapshot; exp: number };
+
+function readCachedSnapshot(id: string): CurrencySnapshot | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(SNAPSHOT_CACHE_PREFIX + id);
+    if (!raw) return null;
+    const entry = JSON.parse(raw) as CachedSnapshot;
+    if (!entry || typeof entry.exp !== "number" || entry.exp < Date.now()) {
+      window.localStorage.removeItem(SNAPSHOT_CACHE_PREFIX + id);
+      return null;
+    }
+    return entry.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedSnapshot(id: string, data: CurrencySnapshot): void {
+  if (typeof window === "undefined") return;
+  try {
+    const entry: CachedSnapshot = { data, exp: Date.now() + SNAPSHOT_CACHE_TTL_MS };
+    window.localStorage.setItem(SNAPSHOT_CACHE_PREFIX + id, JSON.stringify(entry));
+  } catch {
+    // localStorage may throw on quota exceeded / private mode — silently drop
+    // the cache write rather than break the UI for it.
+  }
+}
 
 type Snap = CurrencySnapshot | "loading" | "error" | undefined;
 
@@ -107,23 +149,37 @@ export function TokenExplorerTable({ rows }: { rows: CurrencyListItem[] }) {
   const slice = sorted.slice(start, start + PAGE_SIZE);
 
   // ---- Snapshot fan-out for the visible page ----
-  // Fire one snapshot fetch per row not yet loaded. The server-side cache in
-  // request() (30s TTL on market-snapshot per PATH_TTL_RULES) plus the
-  // browser-side proxy means subsequent paginations hit memory not network.
-  // We mark "loading" synchronously so the UI shows spinners instead of "—".
+  // For each visible row we first try the localStorage cache (5min TTL),
+  // and only fall back to /api/sosovalue for rows that are missing or
+  // expired. This cuts the fan-out to zero across page refreshes when the
+  // cache is warm, and matches the in-memory state shape so the rest of
+  // the table renders identically regardless of cache hits.
   useEffect(() => {
-    const ids = slice.map((r) => r.currency_id).filter((id) => snapshots[id] === undefined);
-    if (ids.length === 0) return;
+    const visibleIds = slice
+      .map((r) => r.currency_id)
+      .filter((id) => snapshots[id] === undefined);
+    if (visibleIds.length === 0) return;
+
+    const fromCache: Record<string, CurrencySnapshot> = {};
+    const toFetch: string[] = [];
+    for (const id of visibleIds) {
+      const cached = readCachedSnapshot(id);
+      if (cached) fromCache[id] = cached;
+      else toFetch.push(id);
+    }
 
     setSnapshots((prev) => {
       const next = { ...prev };
-      for (const id of ids) next[id] = "loading";
+      for (const [id, snap] of Object.entries(fromCache)) next[id] = snap;
+      for (const id of toFetch) next[id] = "loading";
       return next;
     });
 
+    if (toFetch.length === 0) return;
+
     let cancelled = false;
     void Promise.allSettled(
-      ids.map(async (id) => {
+      toFetch.map(async (id) => {
         try {
           const snap = await getCurrencySnapshot(id);
           return { id, snap };
@@ -146,6 +202,7 @@ export function TokenExplorerTable({ rows }: { rows: CurrencyListItem[] }) {
             next[id] = "error";
           } else {
             next[id] = snap;
+            writeCachedSnapshot(id, snap);
           }
         }
         return next;
