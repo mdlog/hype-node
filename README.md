@@ -14,10 +14,14 @@ on the frontend, with a Python LangGraph + MCP backend powering the
 Two products live in one app:
 
 - **Indexer** (`/dashboard`, `/builder`, `/portfolio`, `/agent`, …) — manage your
-  own on-chain indices end-to-end. Connect MetaMask → research → build basket →
-  simulate → deploy to SSI Registry on Sepolia → monitor.
+  own on-chain indices end-to-end. Sign in with email / Google / Twitter / wallet
+  via Privy → research → build basket → simulate → deploy to SSI Registry on
+  Sepolia → monitor.
 - **Publisher** (`/publisher/radar`, `/publisher/proposals`, …) — agent drafts
   hype-driven indices, you review & publish them on-chain to earn fees.
+
+Public surface (no sign-in required): `/discover` marketplace, `/docs`,
+`/privacy`, `/status` (live endpoint probes).
 
 For the full product roadmap and current status see
 [`docs/product-roadmap.md`](docs/product-roadmap.md). For a deeper architecture
@@ -27,13 +31,13 @@ overview see [`docs/dokumentasi-aplikasi.md`](docs/dokumentasi-aplikasi.md).
 
 | Layer        | Tech                                                                |
 |--------------|---------------------------------------------------------------------|
-| Frontend     | Next.js 14 App Router · React 18 · TypeScript · Tailwind 3          |
-| Wallet       | wagmi · viem · RainbowKit · MetaMask                                |
+| Frontend     | Next.js 14.2.32 App Router · React 18 · TypeScript · Tailwind 3     |
+| Wallet       | Privy (email / Google / Twitter / wallet) · wagmi · viem            |
 | Auth         | SIWE (Sign-In With Ethereum) · iron-session cookies                 |
-| API surface  | Next.js route handlers (`/app/api/*` — 38 endpoints)                |
+| API surface  | Next.js route handlers (`/app/api/*` — 56 endpoints)                |
 | Data         | SoSoValue OpenAPI v1 (rate-limited proxy + per-path TTL cache)      |
-| Agent        | Python 3.11 · FastAPI · LangGraph · langchain-anthropic · MCP       |
-| Storage      | SQLite (`agent-service/data/hypenode.db`) — risk config, decision log |
+| LLM agent    | Python 3.11 · FastAPI · LangGraph · MCP · pluggable Anthropic / OpenAI |
+| Storage      | Supabase Postgres (saved runs, threads, billing) · SQLite (`agent-service/data/hypenode.db` for risk config + decision log) |
 | Execution    | SSI Registry (Sepolia) via wagmi `useWriteContract` ·  SoDEX REST v1 |
 | Risk hedge   | Auto-route to USSI on threshold breach (planned for Wave 3)         |
 
@@ -41,58 +45,80 @@ overview see [`docs/dokumentasi-aplikasi.md`](docs/dokumentasi-aplikasi.md).
 
 ```
 app/
+  layout.tsx                    Root layout — Providers + AppFooter (every page)
   page.tsx                      Landing — pick Indexer or Publisher
+  providers.tsx                 PrivyProvider → QueryClient → WagmiProvider stack
   onboarding/role/              First-time role selection
   (indexer)/                    16 indexer pages share IndexerTopBar layout
     dashboard, research, analyses, builder, agent, portfolio, risk,
-    history, chat, backtest, settings, tokens, tokens/[id],
-    fundraising, fundraising/[id], stocks
+    history, chat, backtest (page + BacktestClient + RunHistoryModal),
+    settings, tokens, tokens/[id], fundraising, fundraising/[id], stocks
   publisher/                    6 publisher pages share PublisherTopBar layout
     radar, proposals, proposals/[id], published, earnings, config
-  api/                          38 route handlers
+  (public)/                     Unauthenticated info surface
+    docs, privacy, status (live endpoint probes every 30s)
+  discover, discover/[id]       Public marketplace (no sign-in)
+  share/backtest/[code]         Public share link for a saved backtest run
+  api/                          56 route handlers
     auth/{nonce,verify,me,logout,role}     SIWE sign-in flow
     sosovalue/[...path]                    Catch-all proxy (browser → server)
     terminal/{sentiment,fund-flow,news,sectors}
     ssi/{list,wrap,snapshot/[ticker],constituents/[ticker],klines/[ticker]}
     currencies/[id]/klines · currencies-list
     etfs/[symbol]/{history,summary}
-    agent/{state,reasoning,history,step,pause,halt,reset,
+    agent/{state,reasoning,history,step,pause,halt,reset,tools,
            propose-basket,run-backtest,risk-config}
-    sodex/execute · portfolio · proposals · chat · backtest/run
+    backtest/{run, runs, runs/[id], share}      Saved runs + share links
+    builder/drafts (+ [id])                     Builder draft persistence
+    chat/threads (+ [id]/messages)              Chat thread storage
+    portfolio + portfolio/snapshots             Wallet positions + snapshots
+    proposals (+ [id]) · publisher · risk · settings · sodex/submit
+    cron/portfolio-snapshot                     Periodic snapshot job
     asset-logos · stock-logos · billing/{usage,topup}
 components/
-  auth/                         SignInButton, WalletBadge, WalletBalance,
+  auth/                         SignInButton (Privy login + SIWE), WalletBadge
+                                (with Export wallet for embedded), WalletBalance,
                                 WalletMismatchBanner, CreatorIdentityCard
   ui/                           Card, Btn, Tag, Spark, LineChart, Meter,
                                 Toggle, HypeGauge, ProjectLogo, StockLogo,
                                 SectionLabel, LogoSplash, Metric, Mono, Label
-  nav/                          IndexerTopBar, PublisherTopBar
+  nav/                          IndexerTopBar, PublisherTopBar, AppFooter,
+                                RoleSwitcher
   dashboard/                    SmartMoneyWidget, StablecoinFlowWidget,
                                 MacroCalendar, SsiCompositeLogo
-  builder/, portfolio/, agent/, chat/, publisher/, live/
+  builder/, portfolio/, agent/, chat/, publisher/, live/, history/, research/,
+  billing/                      Inline + modal top-up flows
 lib/
   tokens.ts                     Design tokens (matches hifi-kit colors exactly)
-  auth/session.ts               iron-session cookie config
+  text.ts                       cleanText / safeSlice — strips lone UTF-16
+                                surrogates so emoji-tailed news titles don't
+                                trip SSR-vs-CSR hydration
+  auth/{session.ts, wagmi.ts, useSessionGuard.ts, role.ts}
+  hooks/{useAutoRefetch.ts, useTabActivity.ts}
   api/
     sosovalue.ts                Shared rate-limiter / cache / dedup transport
     sosovalue/                  Per-endpoint typed wrappers:
       tokens, treasuries, analyses, news-trending, news-search,
       fundraising, macro, etf-snapshot, crypto-stocks
     ssi.ts                      SSI Registry contract reads
-    sodex.ts, sodex/            EIP-712 signed exchange actions
-    portfolio.ts                Wallet → on-chain index positions
+    sodex/{client,typedData,serverSigner}     EIP-712 signed exchange actions
+    portfolio.ts, portfolio-snapshot.ts
     agent.ts, backtest.ts       Agent service & backtest clients
+  supabase/{server.ts, auth.ts, types.ts}   Postgres persistence client
   stock-logos.ts, project-slugs.ts   Curated logo mappings
 middleware.ts                   SIWE auth guard for protected routes
+supabase/migrations/            SQL migrations (bt_runs, chat_threads, etc.)
 agent-service/                  Python FastAPI + LangGraph + MCP
   src/
     main.py                     HTTP surface for Next.js (port 8001)
+    chat_agent.py               Multi-provider (Anthropic / OpenAI) tool-use loop
     graph.py                    10-node state machine: signal → … → exec
                                 with emergency_exit branch (USSI hedge)
     mcp_server.py               Standalone MCP server (stdio)
     state.py                    Pydantic models
-    tools/                      terminal · ssi · sodex · risk · backtest
-    storage/                    SQLite-backed persistence
+    tools/                      terminal · ssi · sodex · risk · real_backtest ·
+                                basket · macro · treasuries · rootdata
+    store.py                    SQLite-backed persistence
 docs/
   product-roadmap.md            Current 3-wave roadmap (MVP → Publisher → Production)
   dokumentasi-aplikasi.md       Architecture & UX reference (Indonesian)
@@ -102,19 +128,35 @@ docs/
 
 ## Authentication flow
 
-Every page except the landing (`/`) and `/api/*` routes is gated by SIWE
-through [`middleware.ts`](middleware.ts):
+Every page except the landing (`/`), the public surface (`/discover`, `/docs`,
+`/privacy`, `/status`), and `/api/*` routes is gated by SIWE through
+[`middleware.ts`](middleware.ts):
 
-1. User connects wallet (MetaMask, RainbowKit) on the landing page
-2. `POST /api/auth/nonce` → server generates SIWE nonce
-3. Wallet signs an EIP-4361 message; client `POST /api/auth/verify` with the signature
-4. Server verifies via [`siwe`](https://www.npmjs.com/package/siwe), seals
+1. User clicks "Get access" — [`SignInButton`](components/auth/SignInButton.tsx)
+   opens the Privy modal with email · Google · Twitter · wallet options
+2. Privy authenticates the user:
+   - Email/social → auto-creates an **embedded EOA** (managed by Privy MPC)
+   - External wallet (MetaMask / Rabby / WC) → bridges through the
+     [`@privy-io/wagmi`](https://www.npmjs.com/package/@privy-io/wagmi) connector
+3. The embedded wallet is set as the wagmi active connector so the next
+   `useSignMessage` dispatches to the right address (this avoids the
+   "logged in with Gmail but signed with MetaMask" bug)
+4. `POST /api/auth/nonce` → server generates SIWE nonce
+5. Wallet signs the EIP-4361 message; client `POST /api/auth/verify` with the signature
+6. Server verifies via [`siwe`](https://www.npmjs.com/package/siwe), seals
    `{address, chainId, role}` into an iron-session cookie
-5. Subsequent requests pass the auth check; mismatched wallet shows
+7. Subsequent requests pass the auth check; mismatched wallet shows
    [`WalletMismatchBanner`](components/auth/WalletMismatchBanner.tsx)
 
-Sign out via `POST /api/auth/logout`. Role selection at `/onboarding/role`
-distinguishes Indexer-only users from Publishers.
+Sign out via `POST /api/auth/logout` + Privy `useLogout()` (drops the
+iron-session cookie, Privy session, and wagmi connector in one call). Role
+selection at `/onboarding/role` distinguishes Indexer-only users from
+Publishers.
+
+Embedded-wallet users can self-custody by clicking **Export wallet** in the
+WalletBadge dropdown — Privy reveals the private key after passkey/PIN
+verification, after which it can be imported into MetaMask for use on
+external dApps like sodex.dev.
 
 `SESSION_PASSWORD` (32+ chars high-entropy) is **required** in production —
 without it the cookie seal is forgeable.
@@ -136,7 +178,11 @@ npm run dev
 cd agent-service
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # set ANTHROPIC_API_KEY + SOSOVALUE_API_KEY if you have them
+cp .env.example .env
+# Pick your LLM provider + key:
+#   LLM_PROVIDER=anthropic  →  ANTHROPIC_API_KEY=...
+#   LLM_PROVIDER=openai     →  OPENAI_API_KEY=...   (recommended model: gpt-4o)
+# Also set SOSOVALUE_API_KEY for live market data.
 python -m src.main      # http://localhost:8001
 ```
 
@@ -148,9 +194,12 @@ Wave 3).
 
 With the agent service running:
 - Agent Console (`/agent`) reasoning log polls every 5 s
-- MCP Chat composer talks to Claude through `langchain-anthropic`
+- Chat composer (`/chat`) talks to Claude or GPT-4o depending on
+  `LLM_PROVIDER`; the same `TOOL_SCHEMAS` is converted to each provider's
+  tool-call format internally so the UX is identical across backends
 - Decision log persists to SQLite (`agent-service/data/hypenode.db`)
 - Risk config persists across restarts
+- Saved backtest runs, chat threads, and share links live in Supabase
 
 ## Production build
 
@@ -158,9 +207,16 @@ With the agent service running:
 npm run build && npm start
 ```
 
-The build produces 65 routes (24 pages · 38 API handlers · landing · 404 +
+The build produces ~90 routes (30 pages · 56 API handlers · landing · 404 +
 chunked layout shells). `npm run typecheck` runs `tsc --noEmit` for a quick
 type sweep. `npm run lint` runs `next lint`.
+
+ESLint is currently set to `ignoreDuringBuilds: true` in
+[`next.config.mjs`](next.config.mjs) — the `@typescript-eslint` plugin was
+pruned during the Privy install, which makes any `eslint-disable-next-line
+@typescript-eslint/...` comment fail the build. Lint manually before commit:
+`npm run lint` (or re-add the plugin in `Sosovalue/package.json` to restore
+build-time linting).
 
 ## Environment variables
 
@@ -170,12 +226,13 @@ See [`.env.example`](.env.example) for the canonical list. Highlights:
 |---------------------------------------------|-----------------------------------------------------|------------------------------------------|
 | `AGENT_SERVICE_URL`                         | `http://localhost:8001`                             | Frontend → Python agent                  |
 | `SESSION_PASSWORD`                          | _empty (required in prod)_                          | iron-session cookie seal                 |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`      | _empty_                                             | RainbowKit / mobile pairing              |
+| `NEXT_PUBLIC_PRIVY_APP_ID`                  | _empty → login UI disabled_                         | Privy app id (get one at dashboard.privy.io) |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`      | _empty (legacy — Privy bundles WC internally)_      | RainbowKit / standalone WC pairing       |
 | `SOSOVALUE_API_KEY`                         | _empty → synthetic_                                 | SoSoValue OpenAPI v1                     |
 | `SOSOVALUE_API_BASE`                        | `https://openapi.sosovalue.com/openapi/v1`          | API base URL                             |
 | `SOSOVALUE_MIN_GAP_MS`                      | `700` (HF tier; bump to `65000` on Demo tier)       | Min ms between outbound calls            |
 | `SOSOVALUE_BUCKET_CAPACITY`                 | `20`                                                | Token bucket burst capacity              |
-| `SOSOVALUE_CACHE_TTL_MS`                    | `60000`                                             | Default per-path cache TTL               |
+| `SOSOVALUE_CACHE_TTL_MS`                    | `60000` (bump to `600000` for slower dashboards)    | Default per-path cache TTL               |
 | `SOSOVALUE_QUOTA_BACKOFF_MS`                | `1800000` (30 min)                                  | Backoff after monthly quota error        |
 | `SSI_CHAIN_ID`                              | `11155111` (Sepolia)                                | SSI Registry chain                       |
 | `SSI_RPC_URL`                               | _empty_                                             | RPC endpoint                             |
@@ -185,8 +242,12 @@ See [`.env.example`](.env.example) for the canonical list. Highlights:
 | `SODEX_ENV`                                 | `testnet`                                           | `mainnet` (286623) or `testnet` (138565) |
 | `SODEX_SPOT_BASE` / `SODEX_PERPS_BASE`      | testnet endpoints                                   | SoDEX gateway URLs                       |
 | `SODEX_PRIVATE_KEY` / `SODEX_API_KEY_NAME`  | _empty_                                             | Master-wallet or delegated API key       |
-| `ANTHROPIC_API_KEY`                         | _empty → echo response_                             | Claude tool-use in agent                 |
-| `ANTHROPIC_MODEL`                           | `claude-sonnet-4-5`                                 | Model id                                 |
+| `LLM_PROVIDER`                              | `anthropic`                                         | `anthropic` or `openai` — chat backend   |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL`     | _empty_ / `claude-sonnet-4-5`                       | Used when `LLM_PROVIDER=anthropic`       |
+| `OPENAI_API_KEY` / `OPENAI_MODEL`           | _empty_ / `gpt-4o`                                  | Used when `LLM_PROVIDER=openai`          |
+| `NEXT_PUBLIC_SUPABASE_URL`                  | _empty_                                             | Supabase project URL                     |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY`             | _empty_                                             | Supabase anon key (browser-safe)         |
+| `SUPABASE_SERVICE_ROLE_KEY`                 | _empty_                                             | Server-only Supabase role for writes     |
 | `LANGGRAPH_CHECKPOINT_DIR`                  | `./.checkpoints`                                    | LangGraph state store                    |
 
 ## SoSoValue OpenAPI v1
@@ -266,8 +327,8 @@ message = { payloadHash: keccak256(json.Marshal({type, params})), nonce: uint64 
 The signature is `0x01 || ECDSA(...)` (the leading byte tells the gateway it's
 an EIP-712 action). Use a wallet (viem `signTypedData`, ethers v6, or
 `window.ethereum`) — never bake a private key into the agent process.
-[`lib/api/sodex.ts → buildExchangeAction`](lib/api/sodex.ts) returns the
-typed-data envelope to feed into your wallet.
+[`lib/api/sodex/typedData.ts → buildSignedEnvelope`](lib/api/sodex/typedData.ts)
+returns the typed-data envelope to feed into your wallet.
 
 ## SSI Registry (on-chain)
 
@@ -306,8 +367,14 @@ Outstanding items at the README layer (not in the per-wave roadmap):
   any public exposure
 - Several typed wrappers substitute synthetic payloads when SoSoValue returns
   empty data — masks real outages; needs honest empty states
-- Reasoning stream is still polling, not SSE
-- `ANTHROPIC_MODEL` default may lag (Claude 4.6/4.7 already shipped)
+- Chat agent is non-streaming — full response returned after tool loop
+  completes. SSE streaming is the highest-leverage UX win still on the table
+- No stop-generation button on chat (timeout-bounded at `CHAT_LOOP_TIMEOUT_SEC`,
+  default 90 s) and no message edit / regenerate
+- Reasoning stream on `/agent` is still polling, not SSE
+- ESLint disabled at build time — restore by adding `@typescript-eslint/*`
+  back to the parent `Sosovalue/package.json` devDependencies
+- Mobile-responsive pass pending — most app pages assume ≥900px width
 
 ## License
 
