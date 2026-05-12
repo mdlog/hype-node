@@ -55,11 +55,6 @@ A personal trader or quant can **research → execute → monitor** a strategy w
 | **Loading states (LogoSplash)** | ✅ Done | Centered logo + ring-ripple animation. |
 | **Strategy agent (Claude tool-use)** | ✅ Done | Opt-in via `ANTHROPIC_API_KEY`; replaces the rule-based version. |
 | **Anthropic retry logic** | ✅ Done | Token bucket + exponential backoff for 529 responses. |
-
-### What's still outstanding in Wave 1 ⚠️
-
-| Component | Status | Estimate |
-|---|---|---|
 | **Sector picker UI in dropdown** | ✅ Done | — |
 | **State-driven step indicator** | ✅ Done | — |
 | **Triggers field in `registerIndex`** | ✅ Done | "Rebalance triggers" UI in builder + `rebalanceCron` ABI field wired. |
