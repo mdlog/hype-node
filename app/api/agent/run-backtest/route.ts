@@ -1,16 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runBacktest } from "@/lib/api/agent";
+import { runBacktest, type BacktestCostParams } from "@/lib/api/agent";
 
 // Forward the basket → POST /run-backtest on the FastAPI agent service.
 // The Python side replays SoSoValue klines for each constituent, computes
 // Sharpe / max-dd / win-rate / vs BTC+ETH benchmarks, and returns a result
 // envelope with an equity_preview series for the chart.
+//
+// Cost / risk knobs are optional — when present they are passed through to
+// the agent service so the same Python backtester applies fees, slippage,
+// position caps, the risk-free rate, and an initial-capital scale factor.
+
+const COST_KEYS: Array<keyof BacktestCostParams> = [
+  "fee_bps",
+  "slippage_bps",
+  "position_cap",
+  "risk_free_rate",
+  "init_capital",
+  "rebalance_days",
+];
 
 export async function POST(req: NextRequest) {
   let payload: {
     constituents?: Array<{ currency_id: string; symbol?: string; weight: number }>;
     days?: number;
-  };
+  } & Partial<BacktestCostParams>;
   try {
     payload = await req.json();
   } catch {
@@ -27,7 +40,16 @@ export async function POST(req: NextRequest) {
     );
   }
   const days = typeof payload.days === "number" && payload.days > 0 ? payload.days : 90;
-  const result = await runBacktest(constituents, days);
+
+  const costs: BacktestCostParams = {};
+  for (const k of COST_KEYS) {
+    const v = payload[k];
+    if (typeof v === "number" && Number.isFinite(v)) {
+      costs[k] = v;
+    }
+  }
+
+  const result = await runBacktest(constituents, days, costs);
   if (!result) {
     return NextResponse.json(
       { ok: false, error: "agent service unreachable" },

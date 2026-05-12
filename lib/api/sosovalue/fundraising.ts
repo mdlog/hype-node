@@ -1,19 +1,25 @@
-// SoSoValue OpenAPI v1 — `GET /fundraising/projects` and
-// `GET /fundraising/projects/{project_id}`.
+// SoSoValue OpenAPI v1 — fundraising surface.
 //
-// Fundraising tracker surface: project list (id + name only) and per-project
-// detail (rounds, investors, team, stats, portfolio). Wraps `request<T>` from
-// `@/lib/api/sosovalue` so backoff / caching / synthetic fallback behavior
-// stays consistent with the rest of the SoSoValue surface.
+// As of 2026-05, `/fundraising/projects` and `/fundraising/projects/{id}`
+// return HTTP 404 + code 400401 ("Bad request to upstream service") — those
+// endpoints have been retired upstream. We migrated to:
 //
-// When the API key is absent or upstream is in backoff, `request` invokes the
-// fallback() — we return deterministic synthetic payloads so the UI stays
-// interactive offline (20 projects, 3 rounds each, 4-6 lead investors per
-// round drawn from a curated VC roster).
+//   - `GET /currencies` (full list, ~1281 items) for the listing
+//   - `GET /currencies/{currency_id}/fundraising` for per-project detail
+//
+// IDs are now SoSoValue `currency_id` strings (e.g. "1673723677362319866")
+// — too large for JS Number, so the type is `string` end-to-end. The list
+// page treats id as opaque; the detail page passes it through unchanged.
+//
+// Wraps the shared `request<T>` helper so the rate-limiter / per-path cache
+// behavior stays consistent. When upstream is missing or in backoff we now
+// return EMPTY arrays + null details — pages render an explicit "data
+// unavailable" state instead of seeding synthetic content that could be
+// mistaken for live data.
 import { request } from "@/lib/api/sosovalue";
 
 export type FundingProjectListItem = {
-  project_id: number;
+  project_id: string;
   project_name: string;
 };
 
@@ -47,14 +53,15 @@ export type FundraisingInvestmentStats = {
 };
 
 export type FundraisingPortfolioItem = {
-  project_id: number;
+  project_id: string;
   name: string;
   ecosystem: string;
   funding_status: string;
+  logo_url?: string | null;
 };
 
 export type FundraisingProjectDetail = {
-  project_id: number;
+  project_id: string;
   project_name: string;
   twitter_username: string | null;
   create_time: string;
@@ -66,203 +73,333 @@ export type FundraisingProjectDetail = {
   portfolio: FundraisingPortfolioItem[];
 };
 
-const SYNTHETIC_NAMES: string[] = [
-  "Crossover Markets",
-  "Eigen Labs",
-  "Berachain",
-  "Monad Labs",
-  "Celestia Labs",
-  "Anoma",
-  "Nillion",
-  "Movement Labs",
-  "Babylon",
-  "Avail",
-  "Initia",
-  "Story Protocol",
-  "Espresso Systems",
-  "Penumbra Labs",
-  "Polymer Labs",
-  "Hyperliquid",
-  "Pyth Network",
-  "Worldcoin",
-  "Ethena Labs",
-  "Renzo Protocol",
-];
+// ---------- wire types matching SoSoValue's actual response shape ----------
 
-const VC_ROSTER: { name: string; type: string }[] = [
-  { name: "Paradigm", type: "VC" },
-  { name: "a16z crypto", type: "VC" },
-  { name: "Pantera Capital", type: "VC" },
-  { name: "Multicoin Capital", type: "VC" },
-  { name: "Polychain Capital", type: "VC" },
-  { name: "Coinbase Ventures", type: "Strategic" },
-  { name: "Binance Labs", type: "Strategic" },
-  { name: "Dragonfly", type: "VC" },
-  { name: "Galaxy Digital", type: "VC" },
-  { name: "Jump Crypto", type: "VC" },
-  { name: "Variant Fund", type: "VC" },
-  { name: "Electric Capital", type: "VC" },
-];
+type WireCurrency = {
+  currency_id: string;
+  name: string;
+  symbol: string | null;
+};
 
-const ROUND_TEMPLATES: { name: string; raisedRange: [number, number]; valRange: [number, number] }[] = [
-  { name: "Seed", raisedRange: [5_000_000, 12_000_000], valRange: [40_000_000, 90_000_000] },
-  { name: "Series A", raisedRange: [15_000_000, 30_000_000], valRange: [150_000_000, 400_000_000] },
-  { name: "Series B", raisedRange: [30_000_000, 50_000_000], valRange: [600_000_000, 1_500_000_000] },
-];
+type WireRoundInvestor = {
+  investor_id: number | string;
+  name: string;
+  logo_url?: string | null;
+  type?: string | null;
+  is_lead_investor?: boolean | null;
+};
 
-function hash(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+type WireRound = {
+  round_id?: number | string;
+  // Wire field is `round` (not `round_name`). Sometimes empty string.
+  round?: string | null;
+  // Wire `amount` is a STRING in MILLIONS USD (e.g. "2000" = $2B). Multiply
+  // by 1e6 in normalizeRound. The companion `amount_display` is pre-formatted
+  // ("$2000M") and we use it as a fallback when the numeric parse fails.
+  amount?: string | number | null;
+  amount_display?: string | null;
+  // Same string/numeric mix as amount; sometimes localized non-numeric
+  // ("néant" = French for "none") — coerce safely.
+  valuation?: string | number | null;
+  // Date is exposed as `timestamp` (millis since epoch, as STRING).
+  // Older docs called it `date` — keep both for compat.
+  timestamp?: string | number | null;
+  date?: string | null;
+  investors?: WireRoundInvestor[] | null;
+};
+
+type WireFundraisingDetail = {
+  project_id?: string | number | null;
+  twitter_username?: string | null;
+  create_time?: string | number | null;
+  update_time?: string | number | null;
+  fundraising_rounds?: WireRound[] | null;
+  investors?: WireRoundInvestor[] | null;
+  team?: { name?: string; role?: string; twitter?: string | null }[] | null;
+  investment_stats?: {
+    total_rounds?: number | null;
+    rounds_last_year?: number | null;
+    lead_invest_count?: number | null;
+    last_invest_date?: string | null;
+    portfolio_count?: number | null;
+  } | null;
+  portfolio?: {
+    project_id?: string | number | null;
+    // Wire field is `project_name` (not `name`) per the live SoSoValue
+    // /currencies/{id}/fundraising response. Older clients sent `name`,
+    // keep both for tolerant decoding.
+    project_name?: string | null;
+    name?: string | null;
+    logo_url?: string | null;
+    // Wire field is `ecosystems` array (not `ecosystem` string).
+    ecosystems?: string[] | null;
+    ecosystem?: string | null;
+    funding_status?: string | null;
+    established_timestamp?: string | number | null;
+    regions?: string[] | null;
+  }[] | null;
+};
+
+// ---------- normalization ----------
+
+function toIsoMaybe(v: string | number | null | undefined): string {
+  if (v == null || v === "") return "";
+  const n = typeof v === "string" ? Number(v) : v;
+  if (Number.isFinite(n) && n > 1_000_000_000_000) {
+    // Looks like millis since epoch
+    return new Date(n).toISOString();
   }
-  return Math.abs(h);
+  if (typeof v === "string") return v;
+  return "";
 }
 
-function rand(seed: number, lo: number, hi: number): number {
-  // Deterministic LCG so synthetic data is stable per-seed.
-  const x = (seed * 1664525 + 1013904223) >>> 0;
-  const t = (x % 10_000) / 10_000;
-  return Math.round(lo + (hi - lo) * t);
+function normalizeInvestor(w: WireRoundInvestor): FundraisingInvestor {
+  return {
+    investor_id: Number(w.investor_id) || 0,
+    name: w.name ?? "Unknown",
+    logo_url: w.logo_url ?? null,
+    type: w.type ?? "Investor",
+    is_lead_investor: !!w.is_lead_investor,
+  };
 }
 
-function pickInvestors(seed: number, count: number, leadCount: number): FundraisingInvestor[] {
-  const out: FundraisingInvestor[] = [];
-  const used = new Set<number>();
-  for (let i = 0; i < count; i++) {
-    let idx = (seed + i * 37) % VC_ROSTER.length;
-    while (used.has(idx)) idx = (idx + 1) % VC_ROSTER.length;
-    used.add(idx);
-    const v = VC_ROSTER[idx];
-    out.push({
-      investor_id: 1000 + idx,
-      name: v.name,
-      logo_url: null,
-      type: v.type,
-      is_lead_investor: i < leadCount,
-    });
+// `amount` is in millions USD on the wire. Returns absolute USD (e.g.
+// "2000" → 2_000_000_000). Non-numeric values fall back to 0.
+function parseAmountMillions(v: string | number | null | undefined): number {
+  if (v == null || v === "") return 0;
+  const n = typeof v === "string" ? Number(v) : v;
+  if (!Number.isFinite(n)) return 0;
+  return n * 1_000_000;
+}
+
+function parseDate(
+  ts: string | number | null | undefined,
+  date: string | null | undefined,
+): string {
+  // Prefer the numeric timestamp (millis since epoch) when present.
+  if (ts != null && ts !== "") {
+    const n = typeof ts === "string" ? Number(ts) : ts;
+    if (Number.isFinite(n) && n > 1_000_000_000_000) {
+      return new Date(n).toISOString().slice(0, 10);
+    }
   }
-  return out;
+  return date ?? "";
 }
 
-/**
- * List all fundraising projects (id + name only).
- *
- * @throws never — synthetic fallback is returned on missing key / backoff.
- */
-export async function listFundingProjects(): Promise<FundingProjectListItem[]> {
-  return request<FundingProjectListItem[]>("/fundraising/projects", () =>
-    SYNTHETIC_NAMES.map((name, i) => ({
-      project_id: 9000 + i,
-      project_name: name,
-    })),
-  );
+function normalizeRound(w: WireRound): FundraisingRound {
+  return {
+    round_name: w.round?.trim() || "Disclosed round",
+    raised_amount: parseAmountMillions(w.amount),
+    valuation: parseAmountMillions(w.valuation),
+    date: parseDate(w.timestamp, w.date),
+    investors: (w.investors ?? []).map(normalizeInvestor),
+  };
 }
 
-/**
- * Fetch full fundraising detail for a single project.
- *
- * @throws never — synthetic fallback is returned on missing key / backoff.
- */
-export async function getProjectFundraising(
-  projectId: number,
-  knownName?: string,
-): Promise<FundraisingProjectDetail> {
-  return request<FundraisingProjectDetail>(
-    `/fundraising/projects/${encodeURIComponent(String(projectId))}`,
-    () => syntheticDetail(projectId, knownName),
-  );
-}
-
-function syntheticDetail(
-  projectId: number,
-  knownName?: string,
+function normalizeDetail(
+  w: WireFundraisingDetail | null | undefined,
+  fallbackId: string,
+  fallbackName: string,
 ): FundraisingProjectDetail {
-  // Only treat the projectId as a synthetic-list index when it falls inside
-  // the canonical 9000+i range we generate ourselves. For any other id (live
-  // API project that we're falling back for) use the caller-provided name or
-  // a neutral placeholder — never invent an unrelated synthetic project name,
-  // which would silently swap "Bitcoin" → "Pyth Network" in the detail page.
-  const synIdx = projectId - 9000;
-  const inSyntheticRange =
-    Number.isFinite(projectId) &&
-    synIdx >= 0 &&
-    synIdx < SYNTHETIC_NAMES.length;
-  const name =
-    knownName?.trim() ||
-    (inSyntheticRange ? SYNTHETIC_NAMES[synIdx] : `Project #${projectId}`);
-  const seed = hash(name);
+  const data = w ?? {};
+  const rounds = (data.fundraising_rounds ?? []).map(normalizeRound);
 
-  const now = Date.now();
-  const created = now - (180 + (seed % 540)) * 86_400_000;
-  const updated = now - ((seed >> 4) % 14) * 86_400_000;
-
-  const rounds: FundraisingRound[] = ROUND_TEMPLATES.map((tpl, i) => {
-    const rseed = seed + i * 101;
-    const raised = rand(rseed, tpl.raisedRange[0], tpl.raisedRange[1]);
-    const valuation = rand(rseed + 7, tpl.valRange[0], tpl.valRange[1]);
-    const investorCount = 4 + ((rseed >> 3) % 3); // 4..6
-    const investors = pickInvestors(rseed, investorCount, 1 + ((rseed >> 5) % 2));
-    const date = new Date(now - (ROUND_TEMPLATES.length - i) * 220 * 86_400_000)
-      .toISOString()
-      .slice(0, 10);
-    return {
-      round_name: tpl.name,
-      raised_amount: raised,
-      valuation,
-      date,
-      investors,
-    };
-  });
-
-  // Aggregate unique investors across rounds.
-  const investorMap = new Map<number, FundraisingInvestor>();
+  // Aggregate unique investors across rounds when the top-level investors
+  // list is missing — happens for some upstream responses.
+  const aggInvestors = new Map<number, FundraisingInvestor>();
   for (const r of rounds) {
     for (const inv of r.investors) {
-      const existing = investorMap.get(inv.investor_id);
+      const existing = aggInvestors.get(inv.investor_id);
       if (!existing || (!existing.is_lead_investor && inv.is_lead_investor)) {
-        investorMap.set(inv.investor_id, inv);
+        aggInvestors.set(inv.investor_id, inv);
       }
     }
   }
-  const investors = Array.from(investorMap.values());
+  const investors =
+    (data.investors ?? []).length > 0
+      ? data.investors!.map(normalizeInvestor)
+      : Array.from(aggInvestors.values());
 
-  const team: FundraisingTeamMember[] = [
-    { name: "Alex Chen", role: "Co-Founder & CEO", twitter: "alexchen" },
-    { name: "Maria Rodriguez", role: "Co-Founder & CTO", twitter: "mrodriguez" },
-    { name: "Sam Patel", role: "Head of Research", twitter: null },
-  ];
-
-  const ecosystems = ["Ethereum", "Solana", "Bitcoin", "Cosmos", "Polkadot"];
-  const fundingStatuses = ["Active", "Funded", "Stealth", "Pre-Seed"];
-  const portfolio: FundraisingPortfolioItem[] = Array.from({ length: 4 }, (_, i) => {
-    const pseed = seed + i * 53;
-    return {
-      project_id: 8000 + ((pseed >> 2) % 200),
-      name: `${name} Portfolio ${i + 1}`,
-      ecosystem: ecosystems[(pseed >> 1) % ecosystems.length],
-      funding_status: fundingStatuses[(pseed >> 3) % fundingStatuses.length],
-    };
-  });
-
-  const investment_stats: FundraisingInvestmentStats = {
-    total_rounds: rounds.length,
-    lead_investments: investors.filter((i) => i.is_lead_investor).length,
-    portfolio_count: portfolio.length,
-    rounds_in_past_year: rounds.filter(
-      (r) => now - new Date(r.date).getTime() < 365 * 86_400_000,
-    ).length,
-  };
+  const stats = data.investment_stats ?? {};
 
   return {
-    project_id: projectId,
-    project_name: name,
-    twitter_username: name.toLowerCase().replace(/\s+/g, ""),
-    create_time: new Date(created).toISOString(),
-    update_time: new Date(updated).toISOString(),
+    project_id: String(data.project_id ?? fallbackId),
+    project_name: fallbackName,
+    twitter_username: data.twitter_username ?? null,
+    create_time: toIsoMaybe(data.create_time ?? null),
+    update_time: toIsoMaybe(data.update_time ?? null),
     fundraising_rounds: rounds,
     investors,
-    team,
-    investment_stats,
-    portfolio,
+    team: (data.team ?? []).map((t) => ({
+      name: t.name ?? "—",
+      role: t.role ?? "—",
+      twitter: t.twitter ?? null,
+    })),
+    investment_stats: {
+      total_rounds: stats.total_rounds ?? rounds.length,
+      lead_investments: stats.lead_invest_count ?? 0,
+      portfolio_count: stats.portfolio_count ?? (data.portfolio?.length ?? 0),
+      rounds_in_past_year: stats.rounds_last_year ?? undefined,
+    },
+    portfolio: (data.portfolio ?? []).map((p) => ({
+      project_id: String(p.project_id ?? ""),
+      // Live wire uses `project_name`; legacy / synthetic shape used `name`.
+      // Fall back to "—" only if both are missing — don't lose real names.
+      name: (p.project_name?.trim() || p.name?.trim() || "—"),
+      // `ecosystems` is an array on the wire — pick the first / join — fall
+      // back to legacy `ecosystem` string when present.
+      ecosystem: Array.isArray(p.ecosystems) && p.ecosystems.length > 0
+        ? p.ecosystems.join(", ")
+        : (p.ecosystem ?? ""),
+      funding_status: p.funding_status ?? "",
+      logo_url: p.logo_url ?? null,
+    })),
   };
 }
+
+// ---------- public API ----------
+
+// How many currencies to probe for the listing page. Each fetch costs ~1
+// SoSoValue API call (cached 15min by the request layer), so the cold-load
+// budget is ~LIST_PROBE_LIMIT * MIN_GAP_MS. With HF tier (700ms gap), 60
+// probes = ~42s first load, ~free after cache warms.
+const LIST_PROBE_LIMIT = 60;
+
+/**
+ * List currencies that have at least one disclosed fundraising round.
+ *
+ * Returns an EMPTY array when /currencies is unreachable or no listed
+ * currency has disclosed rounds. Callers must render an explicit empty
+ * state — never substitute synthetic placeholder names.
+ */
+export async function listFundingProjects(): Promise<FundingProjectListItem[]> {
+  const currencies = await request<WireCurrency[]>("/currencies", () => []);
+  if (!Array.isArray(currencies) || currencies.length === 0) return [];
+
+  const head = currencies.slice(0, LIST_PROBE_LIMIT);
+  const probes = await Promise.all(
+    head.map((c) =>
+      request<WireFundraisingDetail | null>(
+        `/currencies/${encodeURIComponent(c.currency_id)}/fundraising`,
+        () => null,
+      ).then((data) => ({ currency: c, data })),
+    ),
+  );
+
+  return probes
+    .filter((p) => {
+      const rounds = p.data?.fundraising_rounds ?? [];
+      return Array.isArray(rounds) && rounds.length > 0;
+    })
+    .map<FundingProjectListItem>((p) => ({
+      project_id: p.currency.currency_id,
+      project_name: p.currency.name,
+    }));
+}
+
+// Flat per-round timeline event — what the listing page renders as table rows.
+export type FundingRoundEvent = {
+  // Stable composite id for React keys + analytics. Combines currency_id and
+  // round_id (or fallback hash of round + date) so two events from the same
+  // project on the same date with the same round name still get unique ids.
+  event_id: string;
+  project_id: string; // currency_id — drives the detail link
+  project_name: string;
+  project_symbol: string | null;
+  round_name: string;
+  raised_amount: number; // absolute USD
+  valuation: number; // absolute USD; 0 when undisclosed
+  date: string; // YYYY-MM-DD
+  date_ts: number; // millis since epoch — for sorting
+  investors: FundraisingInvestor[];
+};
+
+/**
+ * Cross-currency funding round timeline.
+ *
+ * Probes the top LIST_PROBE_LIMIT entries of /currencies, flattens every
+ * disclosed round, sorts by date desc. Returns an empty array on failure
+ * or when no currency has disclosed rounds.
+ *
+ * Coverage limitations vs sosovalue.com/assets/fundraising:
+ *   - Bound by LIST_PROBE_LIMIT (60 currencies). Smaller / pre-launch
+ *     projects not in the top of /currencies won't show up.
+ *   - The website's `gw.sosovalue.com/v1/fundraising/list` endpoint that
+ *     drives the public table requires user-session auth — not reachable
+ *     from OpenAPI.
+ *   - Per-round metadata (categories, region, token issuance) is not
+ *     exposed by /currencies/{id}/fundraising.
+ */
+export async function listFundingRoundEvents(): Promise<FundingRoundEvent[]> {
+  const currencies = await request<WireCurrency[]>("/currencies", () => []);
+  if (!Array.isArray(currencies) || currencies.length === 0) return [];
+
+  const head = currencies.slice(0, LIST_PROBE_LIMIT);
+  const probes = await Promise.all(
+    head.map((c) =>
+      request<WireFundraisingDetail | null>(
+        `/currencies/${encodeURIComponent(c.currency_id)}/fundraising`,
+        () => null,
+      ).then((data) => ({ currency: c, data })),
+    ),
+  );
+
+  const events: FundingRoundEvent[] = [];
+  for (const { currency, data } of probes) {
+    const wireRounds = data?.fundraising_rounds ?? [];
+    if (!Array.isArray(wireRounds) || wireRounds.length === 0) continue;
+    for (const w of wireRounds) {
+      const r = normalizeRound(w);
+      const ts = Number(w.timestamp);
+      const dateTs = Number.isFinite(ts) && ts > 1_000_000_000_000 ? ts : 0;
+      const eventId =
+        w.round_id != null
+          ? `${currency.currency_id}-${w.round_id}`
+          : `${currency.currency_id}-${r.date}-${r.round_name}`;
+      events.push({
+        event_id: eventId,
+        project_id: currency.currency_id,
+        project_name: currency.name,
+        project_symbol: currency.symbol ?? null,
+        round_name: r.round_name,
+        raised_amount: r.raised_amount,
+        valuation: r.valuation,
+        date: r.date,
+        date_ts: dateTs,
+        investors: r.investors,
+      });
+    }
+  }
+
+  if (events.length === 0) return [];
+
+  // Sort: known dates first (descending), then unknown-date events at the end.
+  events.sort((a, b) => {
+    if (a.date_ts && b.date_ts) return b.date_ts - a.date_ts;
+    if (a.date_ts) return -1;
+    if (b.date_ts) return 1;
+    return 0;
+  });
+
+  return events;
+}
+
+/**
+ * Fetch full fundraising detail for a single currency. Returns null when
+ * upstream is unreachable or the currency has no disclosed funding history —
+ * the detail page renders an explicit "data unavailable" state.
+ */
+export async function getProjectFundraising(
+  currencyId: string,
+  knownName?: string,
+): Promise<FundraisingProjectDetail | null> {
+  const id = String(currencyId);
+  const fallbackName = knownName?.trim() || `Project #${id}`;
+  const wire = await request<WireFundraisingDetail | null>(
+    `/currencies/${encodeURIComponent(id)}/fundraising`,
+    () => null,
+  );
+  if (!wire) return null;
+  return normalizeDetail(wire, id, fallbackName);
+}
+

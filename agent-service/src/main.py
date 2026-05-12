@@ -401,12 +401,36 @@ async def propose_basket_endpoint(
 @app.post("/run-backtest")
 async def run_backtest_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     """REST surface for the chat agent's backtest tool. Body shape:
-    `{constituents: [{currency_id, symbol, weight}, ...], days?: int}`."""
+    `{constituents: [{currency_id, symbol, weight}, ...], days?: int,
+       fee_bps?, slippage_bps?, position_cap?, risk_free_rate?,
+       init_capital?, rebalance_days? }`. Cost knobs are all optional and
+    fall through to no-op defaults so the existing chat-agent callers
+    keep their current behaviour."""
     constituents = payload.get("constituents") or []
     days = int(payload.get("days", 90))
     if not isinstance(constituents, list):
         return {"ok": False, "error": "constituents must be a list"}
-    return await real_backtest.run_real_backtest(constituents=constituents, days=days)
+
+    def _opt(key: str, default: float) -> float:
+        v = payload.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    cap = _opt("position_cap", 0.0)
+    return await real_backtest.run_real_backtest(
+        constituents=constituents,
+        days=days,
+        fee_bps=_opt("fee_bps", 0.0),
+        slippage_bps=_opt("slippage_bps", 0.0),
+        position_cap=cap if cap > 0 else None,
+        risk_free_rate=_opt("risk_free_rate", 0.0),
+        init_capital=_opt("init_capital", 1.0),
+        rebalance_days=int(_opt("rebalance_days", 7.0)),
+    )
 
 
 @app.get("/risk/config")
@@ -472,6 +496,138 @@ async def news(sector: str = "DePIN", limit: int = 10) -> Any:
 @app.get("/terminal/status")
 async def terminal_status() -> dict[str, Any]:
     return terminal.status()
+
+
+@app.post("/sodex/submit")
+async def sodex_submit(req: dict[str, Any]) -> dict[str, Any]:
+    """Forward a browser-signed SoDEX trade envelope to the upstream gateway.
+
+    Body shape:
+      {
+        "submit_payload": { domain_name, base_url, path, method, wire_body, nonce, signer_address },
+        "signature":      "0x...130hex"   # wagmi signTypedDataAsync output
+      }
+
+    The signing happens in the browser via wagmi — server only re-formats the
+    signature (v normalization + 0x01 type tag) and adds auth headers before
+    relaying.
+    """
+    from .tools import sodex as _sodex
+    payload = req.get("submit_payload") or {}
+    sig = req.get("signature")
+    if not isinstance(payload, dict) or not isinstance(sig, str):
+        return {"ok": False, "error": "submit_payload (object) and signature (hex string) required"}
+    try:
+        result = await _sodex.submit_signed_envelope(payload, sig)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    # SoDEX batch responses double-wrap: outer envelope (code: 0/error) and a
+    # per-item code inside `data`. The outer can be 0 while individual orders
+    # are rejected — e.g. price violates min/max, side restricted, asset paused
+    # for one direction. The previous handler only checked outer code so the
+    # UI rendered "ORDER SUBMITTED" green even though the order never went on
+    # the book. Surface the inner failure as a hard error.
+    items = result.get("data") or []
+    first = items[0] if isinstance(items, list) and items else {}
+    if not isinstance(first, dict):
+        return {"ok": False, "error": "unexpected SoDEX response shape", "raw": result}
+
+    inner_code = first.get("code", 0)
+    order_id = first.get("orderID")
+    if inner_code not in (0, "0", None) or order_id in (None, 0, "0"):
+        return {
+            "ok": False,
+            "error": (
+                first.get("error")
+                or first.get("message")
+                or f"SoDEX rejected order (inner code={inner_code}): {first}"
+            ),
+            "raw": result,
+        }
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "cl_ord_id": first.get("clOrdID"),
+        "raw": result,
+    }
+
+
+@app.get("/tools/health")
+async def tools_health() -> dict[str, Any]:
+    """Per-tool readiness probe for the chat UI's MCP panel.
+
+    Cheap config + state checks only — never fires the actual tool, so this
+    endpoint can be polled freely without burning SoSoValue quota or paying
+    on-chain gas. Each tool resolves to one of:
+      - ok                : config present, no active backoff
+      - degraded          : config present but upstream is in backoff
+      - missing_config    : a required env var is unset
+    """
+
+    sv = terminal.status()
+    sv_key = bool(sv.get("has_api_key"))
+    sv_backoff = (
+        (sv.get("backoff", {}).get("quota_exhausted_for_sec") or 0) > 0
+        or (sv.get("backoff", {}).get("transient_error_for_sec") or 0) > 0
+    )
+
+    def terminal_check() -> dict[str, Any]:
+        if not sv_key:
+            return {"status": "missing_config", "reason": "SOSOVALUE_API_KEY not set"}
+        if sv_backoff:
+            return {"status": "degraded", "reason": "upstream in backoff"}
+        return {"status": "ok", "reason": None}
+
+    def env_check(required: list[str]) -> dict[str, Any]:
+        missing = [k for k in required if not os.getenv(k)]
+        if missing:
+            return {
+                "status": "missing_config",
+                "reason": f"missing env: {', '.join(missing)}",
+            }
+        return {"status": "ok", "reason": None}
+
+    rootdata_status: dict[str, Any]
+    if not os.getenv("ROOTDATA_API_KEY"):
+        rootdata_status = {
+            "status": "missing_config",
+            "reason": "ROOTDATA_API_KEY not set",
+        }
+    else:
+        rootdata_status = {"status": "ok", "reason": None}
+
+    sodex_pk_status = env_check(["SODEX_PRIVATE_KEY"])
+    tools = {
+        "terminal.get_sentiment": terminal_check(),
+        "terminal.get_fund_flow": terminal_check(),
+        "terminal.get_news": terminal_check(),
+        "list_funding_rounds": terminal_check(),
+        "get_project_fundraising": terminal_check(),
+        "search_rootdata": rootdata_status,
+        "get_rootdata_project": rootdata_status,
+        "get_rootdata_investor": rootdata_status,
+        "backtest.run": {"status": "ok", "reason": None},
+        "ssi.wrap / unwrap": env_check(
+            ["SSI_PRIVATE_KEY", "SSI_REGISTRY_ADDRESS", "SSI_RPC_URL"],
+        ),
+        "sodex_execute_trade": sodex_pk_status,
+        "sodex_sell_trade": sodex_pk_status,
+        "sodex_get_balances": sodex_pk_status,
+        "sodex_list_orders": sodex_pk_status,
+        "sodex_cancel_order": sodex_pk_status,
+        "risk.check_thresholds": {"status": "ok", "reason": None},
+    }
+
+    summary = {
+        "ok": sum(1 for v in tools.values() if v["status"] == "ok"),
+        "degraded": sum(1 for v in tools.values() if v["status"] == "degraded"),
+        "missing_config": sum(
+            1 for v in tools.values() if v["status"] == "missing_config"
+        ),
+        "total": len(tools),
+    }
+    return {"tools": tools, "summary": summary}
 
 
 if __name__ == "__main__":

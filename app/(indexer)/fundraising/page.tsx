@@ -1,15 +1,15 @@
 import { Card, Label, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
-import { listFundingProjects } from "@/lib/api/sosovalue/fundraising";
+import { listFundingRoundEvents } from "@/lib/api/sosovalue/fundraising";
 import { FundraisingList } from "./FundraisingList";
 
-export const revalidate = 60;
+// Listing aggregates /currencies + per-currency /fundraising probes — the
+// cold path is ~10–15s and cached 15min by the request layer, so we revalidate
+// every 30min to keep most renders instant.
+export const revalidate = 1800;
 
-// Stats strip is intentionally synthetic — round/raised counts require a
-// per-project fetch which we defer to the detail route. We surface a
-// transparent "synthetic until per-project fetch" pill so the number isn't
-// mistaken for live aggregate.
 function fmtUsdShort(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "$0";
   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(0)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
@@ -17,12 +17,15 @@ function fmtUsdShort(n: number): string {
 }
 
 export default async function FundraisingPage() {
-  const projects = await listFundingProjects();
+  const events = await listFundingRoundEvents();
 
-  // Synthetic aggregate hint: assume ~3 rounds and ~$30M raised per project.
-  // Tagged below so this isn't mistaken for live data.
-  const estimatedRounds = projects.length * 3;
-  const estimatedRaised = projects.length * 30_000_000;
+  const projectsCount = new Set(events.map((e) => e.project_id)).size;
+  const totalRaised = events.reduce((s, e) => s + e.raised_amount, 0);
+
+  // 30-day rolling window for the "last 30d" stat.
+  const cutoff = Date.now() - 30 * 86_400_000;
+  const recentRounds = events.filter((e) => e.date_ts > cutoff);
+  const recentRaised = recentRounds.reduce((s, e) => s + e.raised_amount, 0);
 
   return (
     <div className="px-6 py-5 flex flex-col gap-4">
@@ -32,51 +35,65 @@ export default async function FundraisingPage() {
             Fundraising Tracker
           </div>
           <Mono size={11}>
-            crypto venture activity · GET /fundraising/projects
+            crypto venture activity · GET /currencies/{`{id}`}/fundraising · flattened to round events
           </Mono>
         </div>
-        <Tag small color={tokens.amber} dot>
-          synthetic until per-project fetch
+        <Tag small color={tokens.emerald} dot>
+          live · {events.length} rounds across {projectsCount} projects
         </Tag>
       </div>
 
       <Card pad={14}>
         <div className="flex items-center gap-6 flex-wrap">
           <div>
-            <Label>Tracked</Label>
+            <Label>Projects</Label>
             <div style={{ fontSize: 18, fontWeight: 600, color: tokens.text, marginTop: 2 }}>
-              {projects.length} projects
+              {projectsCount}
             </div>
           </div>
           <div style={{ width: 1, height: 28, background: tokens.border }} />
           <div>
-            <Label>Rounds (est)</Label>
+            <Label>Rounds tracked</Label>
             <div style={{ fontSize: 18, fontWeight: 600, color: tokens.text, marginTop: 2 }}>
-              {estimatedRounds}
+              {events.length}
             </div>
           </div>
           <div style={{ width: 1, height: 28, background: tokens.border }} />
           <div>
-            <Label>Raised (est)</Label>
+            <Label>Total raised</Label>
+            <div
+              style={{
+                fontSize: 18,
+                fontWeight: 600,
+                color: tokens.emerald,
+                marginTop: 2,
+              }}
+            >
+              {fmtUsdShort(totalRaised)}
+            </div>
+          </div>
+          <div style={{ width: 1, height: 28, background: tokens.border }} />
+          <div>
+            <Label>Last 30d</Label>
             <div style={{ fontSize: 18, fontWeight: 600, color: tokens.text, marginTop: 2 }}>
-              {fmtUsdShort(estimatedRaised)}
+              {recentRounds.length} rounds · {fmtUsdShort(recentRaised)}
             </div>
           </div>
           <div style={{ flex: 1 }} />
           <Mono size={10} color={tokens.textFaint}>
-            list endpoint returns id + name only — open a card for rounds & investors
+            click a row for round detail · investors · portfolio
           </Mono>
         </div>
       </Card>
 
-      {projects.length === 0 ? (
+      {events.length === 0 ? (
         <Card>
           <Mono size={11} color={tokens.textFaint}>
-            No fundraising projects available right now.
+            No fundraising rounds available right now.
           </Mono>
         </Card>
       ) : (
-        <FundraisingList projects={projects} />
+        <FundraisingList events={events} />
       )}
     </div>
   );

@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Card, Mono, Tag } from "@/components/ui";
+import { cleanText } from "@/lib/text";
 import { tokens } from "@/lib/tokens";
 import {
   getFeaturedNews,
@@ -63,7 +64,12 @@ function relativeTime(ms: number | string | undefined): string {
 
 function stripHtml(html: string | null | undefined): string {
   if (!html) return "";
-  return html.replace(/<[^>]+>/g, "").trim();
+  // Strip lone surrogates alongside HTML tags. SoSoValue's trending feed
+  // sometimes returns titles ending in an emoji whose surrogate pair
+  // gets split somewhere upstream; the orphan would render as U+FFFD on
+  // the client and trip a hydration check if this card ever ends up in
+  // an SSR path.
+  return cleanText(html.replace(/<[^>]+>/g, "").trim());
 }
 
 const CATEGORY_LABEL: Record<number, string> = {

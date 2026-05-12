@@ -1,52 +1,52 @@
-"""Lightweight in-process backtester. Real implementation would replay historical
-sentiment + flow series; here we generate deterministic synthetic equity curves
-so the agent's tool surface stays callable end-to-end."""
+"""DEPRECATED: legacy synthetic backtest stub.
+
+This module's previous implementation generated deterministic-but-fake
+equity curves to keep the LangGraph loop callable when the real backtest
+path wasn't wired. That seeded misleading "Sharpe 1.5+" numbers into the
+risk gate even when no real klines were ever fetched.
+
+Use `tools.real_backtest.run_real_backtest(constituents, days)` instead.
+That helper replays actual SoSoValue klines for the basket constituents.
+
+`run()` is kept as a thin shim that returns an explicit error envelope so
+older callers (graph.py backtest_node, mcp_server.py backtest.run tool)
+don't crash — they just see `{"ok": False, ...}` and skip downstream
+gates that depend on backtest output.
+"""
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 
-def _series(n: int, base: float, vol: float, seed: int = 1) -> list[float]:
-    s = seed
-    out: list[float] = []
-    for _ in range(n):
-        s = (s * 9301 + 49297) % 233280
-        r = s / 233280 - 0.5
-        base = base * (1 + r * vol)
-        out.append(base)
-    return out
-
-
 async def run(
-    strategy_id: str,
+    strategy_id: str = "",
     days: int = 90,
     rebalance_hours: int = 6,
     n_assets: int = 8,
     min_sentiment: int = 60,
     slippage_bps: int = 25,
 ) -> dict[str, Any]:
-    equity = [v + i * 0.6 for i, v in enumerate(_series(60, 100, 0.025, 1))]
-    btc = [v + i * 0.3 for i, v in enumerate(_series(60, 100, 0.03, 9))]
-    eth = [v + i * 0.2 for i, v in enumerate(_series(60, 100, 0.035, 7))]
-    sector = [v + i * 0.15 for i, v in enumerate(_series(60, 100, 0.02, 11))]
-
-    ret = (equity[-1] - equity[0]) / equity[0]
-    sharpe = round(1.5 + math.log1p(n_assets) * 0.1, 2)
     return {
+        "ok": False,
+        "error": (
+            "Synthetic backtest removed. Call run_real_backtest with explicit "
+            "{currency_id, symbol, weight} constituents."
+        ),
         "strategy_id": strategy_id,
         "days": days,
         "rebalance_hours": rebalance_hours,
         "n_assets": n_assets,
         "min_sentiment": min_sentiment,
         "slippage_bps": slippage_bps,
-        "return": round(ret, 4),
-        "sharpe": sharpe,
-        "sortino": round(sharpe * 1.32, 2),
-        "max_drawdown": -0.081,
-        "win_rate": 0.61,
-        "trades": 142,
-        "equity": equity,
-        "benchmarks": {"BTC": btc, "ETH": eth, "Sector": sector},
+        # Neutral defaults so graph.py risk_node still works on .get() fallbacks
+        # without claiming a fake sharpe/drawdown.
+        "sharpe": 0,
+        "sortino": 0,
+        "max_drawdown": 0,
+        "win_rate": 0,
+        "trades": 0,
+        "return": 0,
+        "equity": [],
+        "benchmarks": {},
     }

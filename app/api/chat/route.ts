@@ -54,7 +54,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const reply = await chat(body.turns);
+  // Pass the SIWE-connected wallet address to the agent service so the
+  // SoDEX balance / order tools query the user's wallet (not the server's
+  // signer key). Trade execution still uses SODEX_PRIVATE_KEY.
+  const reply = await chat(body.turns, address);
 
   // Record usage from the live `usage` block on the agent reply. If for any
   // reason it's missing (e.g. agent service crashed mid-turn), we still

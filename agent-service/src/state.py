@@ -82,6 +82,11 @@ class ChatTurn(BaseModel):
 
 class ChatRequest(BaseModel):
     turns: list[ChatTurn]
+    # SIWE-resolved EVM address of the user (lowercased). Threaded into
+    # tool dispatch via a contextvar in chat_agent so balance / order tools
+    # query the connected wallet instead of the server's signer key.
+    # Optional so legacy callers / non-auth contexts still work.
+    wallet_address: str | None = None
 
 
 class IndexSpec(BaseModel):

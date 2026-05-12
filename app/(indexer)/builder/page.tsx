@@ -69,7 +69,16 @@ const TARGET_CHAIN_ID = Number(
   process.env.NEXT_PUBLIC_SSI_CHAIN_ID ?? sepolia.id,
 );
 
-const DRAFT_KEY = "hypenode.builder.drafts.v1";
+// Legacy localStorage key — kept for one-time migration of pre-Phase-2
+// drafts into Supabase the first time a signed-in user lands on this page.
+// After migration we delete the key so subsequent visits skip the import
+// step entirely.
+const LEGACY_DRAFT_KEY = "hypenode.builder.drafts.v1";
+
+// Local UI shape, populated either from Supabase rows (BdDraftRow) or
+// from a legacy localStorage entry during migration. We intentionally keep
+// `id` a string (uuid for Supabase, timestamp string for legacy) and
+// `savedAt` as ms since epoch derived from `updated_at`.
 type Draft = {
   id: string;
   savedAt: number;
@@ -80,6 +89,93 @@ type Draft = {
   triggers: Record<string, boolean>;
   extraAssets: ExtraAsset[];
 };
+
+type LegacyDraft = Draft;
+
+// Wire shape of a row coming from /api/builder/drafts. We don't import
+// BdDraftRow into a "use client" file (that would pull in server-only
+// types via the chain), so this is a hand-mirrored subset.
+type DraftWire = {
+  id: string;
+  updated_at: string;
+  sector: string | null;
+  n_assets: number | null;
+  weighting_rule: string | null;
+  meta: unknown;
+  rebalance_triggers: unknown;
+  extra_assets: unknown;
+  status: string;
+};
+
+const DEFAULT_META = {
+  name: "HYPE-DEPIN-8",
+  symbol: "HDP8",
+  base: "USDC",
+  chain: "ValueChain L1",
+} as const;
+
+const DEFAULT_TRIGGERS: Record<string, boolean> = {
+  cron: true,
+  sentiment: true,
+  flow: false,
+  vol: true,
+  news: false,
+};
+
+function isWeightingKey(v: unknown): v is WeightingKey {
+  return v === "score" || v === "marketcap" || v === "equal" || v === "ssi_reference";
+}
+
+function wireToDraft(w: DraftWire): Draft {
+  // The server stores meta as jsonb. We hydrate defensively because the
+  // shape isn't enforced in Postgres beyond "is JSON".
+  const m = (w.meta && typeof w.meta === "object" ? w.meta : {}) as Partial<
+    typeof DEFAULT_META
+  >;
+  const t = (w.rebalance_triggers && typeof w.rebalance_triggers === "object"
+    ? w.rebalance_triggers
+    : {}) as Record<string, unknown>;
+  const triggers: Record<string, boolean> = {};
+  for (const k of Object.keys(DEFAULT_TRIGGERS)) {
+    triggers[k] = typeof t[k] === "boolean" ? (t[k] as boolean) : DEFAULT_TRIGGERS[k];
+  }
+  const extras = Array.isArray(w.extra_assets)
+    ? (w.extra_assets as unknown[]).filter(
+        (e): e is ExtraAsset =>
+          !!e && typeof e === "object" &&
+          typeof (e as ExtraAsset).currency_id === "string" &&
+          typeof (e as ExtraAsset).symbol === "string",
+      )
+    : [];
+  return {
+    id: w.id,
+    savedAt: new Date(w.updated_at).getTime(),
+    sector: w.sector ?? "DePIN",
+    nAssets: w.n_assets ?? 8,
+    weightingKey: isWeightingKey(w.weighting_rule) ? w.weighting_rule : "score",
+    meta: {
+      name: typeof m.name === "string" ? m.name : DEFAULT_META.name,
+      symbol: typeof m.symbol === "string" ? m.symbol : DEFAULT_META.symbol,
+      base: typeof m.base === "string" ? m.base : DEFAULT_META.base,
+      chain: typeof m.chain === "string" ? m.chain : DEFAULT_META.chain,
+    },
+    triggers,
+    extraAssets: extras,
+  };
+}
+
+// Body sent on POST/PUT — matches the route handler's BdDraftInsert shape.
+function draftToBody(d: Omit<Draft, "id" | "savedAt">): Record<string, unknown> {
+  return {
+    name: d.meta.name,
+    sector: d.sector,
+    n_assets: d.nAssets,
+    weighting_rule: d.weightingKey,
+    meta: d.meta,
+    rebalance_triggers: d.triggers,
+    extra_assets: d.extraAssets,
+  };
+}
 
 function fmtMcap(v: number): string {
   if (!Number.isFinite(v) || v <= 0) return "—";
@@ -170,8 +266,25 @@ export default function BuilderPage() {
   const [logos, setLogos] = useState<Record<string, string | null>>({});
 
   // ---- Drafts panel ----
+  // Drafts are now persisted server-side in `bd_drafts` (Phase 2). The
+  // client mirrors them in state for the dropdown UI; mutations always go
+  // through the API and re-list to stay consistent.
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [draftsOpen, setDraftsOpen] = useState(false);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  // Tracks the draft currently being edited so "Save draft" can PUT instead
+  // of POST. Cleared after Load/Save so the next "Save draft" click starts
+  // a fresh row.
+  const [currentDraftId, setCurrentDraftId] = useState<string | null>(null);
+  // Auth gate — surfaced in the UI when the API returns 401 so the user
+  // knows they need to sign in for cloud save.
+  const [draftsAuthRequired, setDraftsAuthRequired] = useState(false);
+  // Set when a legacy localStorage payload is detected and the user hasn't
+  // yet decided whether to import or discard. Holds the parsed array so we
+  // don't re-parse during render.
+  const [legacyDrafts, setLegacyDrafts] = useState<LegacyDraft[] | null>(null);
+  const [migrating, setMigrating] = useState(false);
 
   // ---- Auth + Wagmi for deploy ----
   // Session guard reconciles SIWE session cookie ↔ wagmi-active wallet.
@@ -250,65 +363,220 @@ export default function BuilderPage() {
     };
   }, [proposal, extraAssets]);
 
-  // ---- Drafts (localStorage) ----
+  // ---- Drafts (Supabase via /api/builder/drafts) ----
+  //
+  // Drafts moved out of localStorage in Phase 2 — they now live in the
+  // `bd_drafts` table keyed on the user's wallet address. The first effect
+  // below pulls the current list. If the user is unauthenticated we get a
+  // 401, surface that in the UI, and skip persistence (the form still
+  // works, but Save is disabled with an "Sign in" hint).
+  //
+  // Legacy migration: if localStorage still has the old `hypenode.builder
+  // .drafts.v1` blob we parse it once and offer a banner to import the
+  // entries into the user's account. Auto-importing silently was avoided
+  // — the user might prefer to discard them.
+
+  const refreshDrafts = useCallback(async () => {
+    setDraftsLoading(true);
+    setDraftsAuthRequired(false);
+    try {
+      const res = await fetch("/api/builder/drafts?status=draft", {
+        cache: "no-store",
+      });
+      if (res.status === 401) {
+        setDraftsAuthRequired(true);
+        setDrafts([]);
+        return;
+      }
+      if (!res.ok) {
+        setDrafts([]);
+        return;
+      }
+      const rows = (await res.json()) as DraftWire[];
+      setDrafts(rows.map(wireToDraft));
+    } catch {
+      /* network blip — leave existing list alone */
+    } finally {
+      setDraftsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDrafts();
+  }, [refreshDrafts]);
+
+  // Detect legacy localStorage drafts on mount. We do this separately from
+  // the API call so it surfaces even if the user is signed out (we hold
+  // the banner until they sign in and import, or click Discard).
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(DRAFT_KEY);
+      const raw = localStorage.getItem(LEGACY_DRAFT_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as Draft[];
-      if (Array.isArray(parsed)) setDrafts(parsed);
+      const parsed = JSON.parse(raw) as LegacyDraft[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        setLegacyDrafts(parsed);
+      } else {
+        // Empty or junk — clear it so we don't keep checking.
+        localStorage.removeItem(LEGACY_DRAFT_KEY);
+      }
     } catch {
-      /* ignore corrupted draft state */
+      // Corrupted blob — drop it; nothing useful to migrate.
+      try {
+        localStorage.removeItem(LEGACY_DRAFT_KEY);
+      } catch {
+        /* private mode */
+      }
     }
   }, []);
 
-  const saveDrafts = useCallback((next: Draft[]) => {
-    setDrafts(next);
-    try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(next));
-    } catch {
-      /* localStorage unavailable */
-    }
-  }, []);
-
-  const saveCurrentDraft = useCallback(() => {
-    const draft: Draft = {
-      id: `${Date.now()}`,
-      savedAt: Date.now(),
+  const saveCurrentDraft = useCallback(async () => {
+    if (savingDraft) return;
+    setSavingDraft(true);
+    const body = draftToBody({
       sector,
       nAssets,
       weightingKey,
       meta,
       triggers,
       extraAssets,
-    };
-    const next = [draft, ...drafts].slice(0, 20);
-    saveDrafts(next);
-    setDraftsOpen(true);
-  }, [sector, nAssets, weightingKey, meta, triggers, extraAssets, drafts, saveDrafts]);
+    });
+    try {
+      // PUT when we already loaded a server-side draft and the user wants
+      // to persist further edits to the same row; POST otherwise creates
+      // a fresh entry.
+      if (currentDraftId) {
+        const res = await fetch(`/api/builder/drafts/${currentDraftId}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (res.status === 401) {
+          setDraftsAuthRequired(true);
+          return;
+        }
+        if (!res.ok) return;
+      } else {
+        const res = await fetch("/api/builder/drafts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (res.status === 401) {
+          setDraftsAuthRequired(true);
+          return;
+        }
+        if (!res.ok) return;
+        const out = (await res.json()) as { id?: string };
+        if (out.id) setCurrentDraftId(out.id);
+      }
+      setDraftsOpen(true);
+      await refreshDrafts();
+    } finally {
+      setSavingDraft(false);
+    }
+  }, [
+    sector,
+    nAssets,
+    weightingKey,
+    meta,
+    triggers,
+    extraAssets,
+    currentDraftId,
+    savingDraft,
+    refreshDrafts,
+  ]);
 
-  const loadDraft = useCallback(
-    (d: Draft) => {
-      setSector(d.sector);
-      setNAssets(d.nAssets);
-      const ruleIdx = RULES.findIndex((r) => r.key === d.weightingKey);
-      setRule(ruleIdx >= 0 ? ruleIdx : 0);
-      setMeta(d.meta);
-      setTriggers(d.triggers);
-      setExtraAssets(d.extraAssets);
-      setRemovedIds(new Set());
-      setSimulateResult(null);
-      setDraftsOpen(false);
-    },
-    [],
-  );
+  const loadDraft = useCallback(async (d: Draft) => {
+    // Source of truth is the server — re-fetch by id to pick up any edits
+    // made in another tab or via PATCH.
+    let next = d;
+    try {
+      const res = await fetch(`/api/builder/drafts/${d.id}`, {
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const wire = (await res.json()) as DraftWire;
+        next = wireToDraft(wire);
+      }
+    } catch {
+      /* fall back to the cached row */
+    }
+    setSector(next.sector);
+    setNAssets(next.nAssets);
+    const ruleIdx = RULES.findIndex((r) => r.key === next.weightingKey);
+    setRule(ruleIdx >= 0 ? ruleIdx : 0);
+    setMeta(next.meta);
+    setTriggers(next.triggers);
+    setExtraAssets(next.extraAssets);
+    setRemovedIds(new Set());
+    setSimulateResult(null);
+    setCurrentDraftId(next.id);
+    setDraftsOpen(false);
+  }, []);
 
   const deleteDraft = useCallback(
-    (id: string) => {
-      saveDrafts(drafts.filter((d) => d.id !== id));
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/builder/drafts/${id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok && res.status !== 404) return;
+      } catch {
+        return;
+      }
+      if (currentDraftId === id) setCurrentDraftId(null);
+      await refreshDrafts();
     },
-    [drafts, saveDrafts],
+    [currentDraftId, refreshDrafts],
   );
+
+  const importLegacyDrafts = useCallback(async () => {
+    if (!legacyDrafts || legacyDrafts.length === 0) return;
+    setMigrating(true);
+    try {
+      // Sequential to avoid overwhelming the API on a quota-tight account.
+      // The list is capped at 20 in legacy code so this is at most 20 RTTs.
+      for (const ld of legacyDrafts) {
+        const body = draftToBody({
+          sector: ld.sector,
+          nAssets: ld.nAssets,
+          weightingKey: ld.weightingKey,
+          meta: ld.meta,
+          triggers: ld.triggers,
+          extraAssets: ld.extraAssets,
+        });
+        const res = await fetch("/api/builder/drafts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (res.status === 401) {
+          setDraftsAuthRequired(true);
+          // Keep legacyDrafts in state so the user can retry after signing in.
+          return;
+        }
+      }
+      // Successful import — wipe the legacy blob and refresh the list.
+      try {
+        localStorage.removeItem(LEGACY_DRAFT_KEY);
+      } catch {
+        /* ignore */
+      }
+      setLegacyDrafts(null);
+      await refreshDrafts();
+    } finally {
+      setMigrating(false);
+    }
+  }, [legacyDrafts, refreshDrafts]);
+
+  const discardLegacyDrafts = useCallback(() => {
+    try {
+      localStorage.removeItem(LEGACY_DRAFT_KEY);
+    } catch {
+      /* ignore */
+    }
+    setLegacyDrafts(null);
+  }, []);
 
   // ---- Effective basket (proposal ∪ extras − removed) ----
   type Row = {
@@ -516,14 +784,51 @@ export default function BuilderPage() {
           </Mono>
         </div>
         <div className="flex gap-1.5">
-          <Btn small onClick={saveCurrentDraft}>
-            Save draft
+          <Btn small onClick={saveCurrentDraft} disabled={savingDraft}>
+            {savingDraft ? "Saving…" : currentDraftId ? "Save draft" : "Save as new"}
           </Btn>
           <Btn small onClick={() => setDraftsOpen((v) => !v)}>
-            Load template ({drafts.length})
+            {draftsLoading
+              ? "Load template (…)"
+              : `Load template (${drafts.length})`}
           </Btn>
         </div>
       </div>
+
+      {/* Legacy localStorage migration banner — visible while we still have
+          unimported drafts in browser storage. Auth-gated import: if the
+          user isn't signed in, the API will 401 and we toggle the auth-
+          required hint instead of silently dropping the data. */}
+      {legacyDrafts && legacyDrafts.length > 0 && (
+        <Card pad={12}>
+          <div className="flex justify-between items-center gap-3 flex-wrap">
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: tokens.text }}>
+                Detected {legacyDrafts.length} local draft
+                {legacyDrafts.length === 1 ? "" : "s"} from your browser
+              </div>
+              <Mono size={11} color={tokens.textDim}>
+                {draftsAuthRequired
+                  ? "sign in to import them into your account"
+                  : "import them into your account so they sync across devices"}
+              </Mono>
+            </div>
+            <div className="flex gap-1.5">
+              <Btn
+                small
+                primary
+                onClick={importLegacyDrafts}
+                disabled={migrating || draftsAuthRequired}
+              >
+                {migrating ? "Importing…" : "Import to account"}
+              </Btn>
+              <Btn small onClick={discardLegacyDrafts} disabled={migrating}>
+                Discard
+              </Btn>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Drafts panel */}
       {draftsOpen && (
@@ -532,10 +837,15 @@ export default function BuilderPage() {
             <div style={{ fontSize: 13, fontWeight: 600 }}>Saved drafts</div>
             <Btn small onClick={() => setDraftsOpen(false)}>✕ Close</Btn>
           </div>
-          {drafts.length === 0 ? (
+          {draftsAuthRequired ? (
+            <Mono size={11} color={tokens.amber}>
+              Sign in to save and load drafts from your account.
+            </Mono>
+          ) : drafts.length === 0 ? (
             <Mono size={11} color={tokens.textFaint}>
-              No drafts yet. Click "Save draft" above to capture the current
-              configuration to localStorage.
+              {draftsLoading
+                ? "Loading drafts…"
+                : 'No drafts yet. Click "Save draft" above to capture the current configuration to your account.'}
             </Mono>
           ) : (
             <div className="flex flex-col gap-1.5">
@@ -1071,7 +1381,9 @@ export default function BuilderPage() {
         <div className="flex items-center gap-2 flex-wrap">
           <Btn small>← Back</Btn>
           <div className="flex-1" />
-          <Btn small onClick={saveCurrentDraft}>Save draft</Btn>
+          <Btn small onClick={saveCurrentDraft} disabled={savingDraft}>
+            {savingDraft ? "Saving…" : currentDraftId ? "Save draft" : "Save as new"}
+          </Btn>
           <Btn
             small
             primary

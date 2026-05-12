@@ -87,27 +87,27 @@ function relativeTime(ms: number): string {
   return past ? `${y}y ago` : `in ${y}y`;
 }
 
-// Minimal HTML sanitizer: keeps only `<em>` tags (open + close), HTML-encodes
-// every other character. The API's highlight blob is the only HTML we trust
-// to render, and only its `<em>` markers are meaningful — anything else
-// (script, img, attributes) is hostile by construction.
+// Minimal HTML sanitizer for SoSoValue's `/news/search` highlight blob.
+// The API marks matched keywords with `<span style="color:#F00">…</span>`
+// (and occasionally `<em>`). We rewrite those highlight tags to a bare
+// `<em>` and strip everything else — drop the tag, keep the text inside —
+// so no foreign attributes (script, onerror, style overrides) can ride in.
 function safeEmHtml(input: string | null | undefined, fallback: string): string {
   const raw = input ?? "";
   if (!raw) return escapeHtml(fallback);
 
-  // Tokenize into <em> / </em> / text segments. Anything that looks like a
-  // tag but isn't <em> gets escaped as text.
   const out: string[] = [];
-  const re = /<\/?em\s*>|<[^>]*>|[^<]+/gi;
+  // Match: highlight open/close (<em>/<span...>), any other tag, or a run of text.
+  const re = /<\/?(?:em|span|b|strong|mark)\b[^>]*>|<\/?[a-z][^>]*>|[^<]+/gi;
   const matches = raw.match(re);
   if (!matches) return escapeHtml(raw);
+
+  const HIGHLIGHT = /^<\/?(?:em|span|b|strong|mark)\b/i;
   for (const tok of matches) {
-    const lower = tok.toLowerCase();
-    if (lower === "<em>" || lower === "</em>") {
-      out.push(lower);
+    if (HIGHLIGHT.test(tok)) {
+      out.push(tok.startsWith("</") ? "</em>" : "<em>");
     } else if (tok.startsWith("<")) {
-      // Foreign tag — escape it.
-      out.push(escapeHtml(tok));
+      // Foreign tag — drop it, but keep any inner text via the surrounding tokens.
     } else {
       out.push(escapeHtml(tok));
     }
@@ -189,11 +189,23 @@ export function NewsSearchBar() {
   }, [debounced, runSearch]);
 
   // Slice the buffered server page into the 10-per-UI-page view.
+  //
+  // Client-side sort fallback: SoSoValue's /news/search returns items in
+  // relevance order regardless of the `sort` query param (verified with
+  // sort=relevance vs sort=publish_time + several alternative param names).
+  // We still send `sort` to the API for forward-compat, but re-sort here so
+  // the "Publish time" dropdown produces a visible change.
   const pagedItems: NewsSearchItem[] = useMemo(() => {
     const list = data?.list ?? [];
+    const ordered =
+      sort === "publish_time"
+        ? [...list].sort(
+            (a, b) => toMillis(b.release_time) - toMillis(a.release_time),
+          )
+        : list;
     const start = (uiPage - 1) * PAGE_SIZE;
-    return list.slice(start, start + PAGE_SIZE);
-  }, [data, uiPage]);
+    return ordered.slice(start, start + PAGE_SIZE);
+  }, [data, uiPage, sort]);
 
   const totalLocal = data?.list.length ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalLocal / PAGE_SIZE));
@@ -212,6 +224,18 @@ export function NewsSearchBar() {
 
   return (
     <Card pad={14}>
+      {/* Style highlight `<em>` tags emitted by safeEmHtml. Scoped via the
+          data attribute so we don't restyle every <em> in the app. */}
+      <style>{`
+        [data-news-search-hl] em {
+          font-style: normal;
+          font-weight: 600;
+          color: ${tokens.emerald};
+          background: rgba(16, 185, 129, 0.12);
+          padding: 0 3px;
+          border-radius: 3px;
+        }
+      `}</style>
       <div className="flex items-center gap-2 mb-2.5">
         <Label>News search</Label>
         <Mono size={10}>SoSoValue · /news/search</Mono>
@@ -380,6 +404,7 @@ function ResultRow({ item }: { item: NewsSearchItem }) {
       }}
     >
       <div
+        data-news-search-hl
         style={{
           fontSize: 13.5,
           fontWeight: 500,

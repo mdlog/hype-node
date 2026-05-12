@@ -90,100 +90,6 @@ export type GetFeaturedNewsOpts = {
   category?: FeaturedCategory[];
 };
 
-// ---------- synthetic fallbacks ----------
-
-const HOUR = 3_600_000;
-
-function syntheticHotList(): HotNewsItem[] {
-  const now = Date.now();
-  return [
-    {
-      id: "hot-syn-1",
-      source_link: "https://sosovalue.com/news/synthetic-1",
-      create_time: now - 1 * HOUR,
-      title: "DePIN sector heats up — synthetic feed",
-      content:
-        "<p>DePIN protocols posted aggregate revenue growth of 18% week-over-week in the synthetic dataset.</p>",
-    },
-    {
-      id: "hot-syn-2",
-      source_link: "https://sosovalue.com/news/synthetic-2",
-      create_time: now - 3 * HOUR,
-      title: "Spot BTC ETF inflows extend streak — synthetic feed",
-      content:
-        "<p>Aggregate net inflow across the eleven US spot Bitcoin ETFs reached $312M in the synthetic snapshot.</p>",
-    },
-    {
-      id: "hot-syn-3",
-      source_link: "https://sosovalue.com/news/synthetic-3",
-      create_time: now - 6 * HOUR,
-      title: "RWA tokenization TVL crosses milestone — synthetic feed",
-      content:
-        "<p>Real-world-asset tokenization TVL now sits above the $14B mark in the synthetic feed.</p>",
-    },
-    {
-      id: "hot-syn-4",
-      source_link: "https://sosovalue.com/news/synthetic-4",
-      create_time: now - 12 * HOUR,
-      title: "L2 sequencer decentralization roadmap — synthetic feed",
-      content:
-        "<p>Major L2 publishes a phased sequencer decentralization plan in the synthetic feed.</p>",
-    },
-    {
-      id: "hot-syn-5",
-      source_link: "https://sosovalue.com/news/synthetic-5",
-      create_time: now - 24 * HOUR,
-      title: "AI-token narrative cools after 7d run — synthetic feed",
-      content:
-        "<p>AI-tagged tokens give back roughly 4% on the day after a strong week in the synthetic feed.</p>",
-    },
-  ];
-}
-
-function syntheticHot(): HotNewsResponse {
-  const list = syntheticHotList();
-  return { page: 1, page_size: list.length, total: list.length, list };
-}
-
-function syntheticFeaturedList(): FeaturedNewsItem[] {
-  const now = Date.now();
-  const make = (
-    n: number,
-    title: string,
-    category: FeaturedCategory,
-    author: string,
-    nick: string,
-    deltaH: number,
-  ): FeaturedNewsItem => ({
-    id: `feat-syn-${n}`,
-    source_link: `https://sosovalue.com/news/featured-synthetic-${n}`,
-    release_time: now - deltaH * HOUR,
-    title,
-    content: `<p>${title} — full synthetic body.</p>`,
-    author,
-    author_avatar_url: "",
-    nick_name: nick,
-    is_blue_verified: n % 2 === 0,
-    category,
-    feature_image: "",
-    matched_currencies: [],
-    tags: [],
-    media_info: [],
-  });
-  return [
-    make(1, "Coinbase prime brokerage update — synthetic feed", 1, "coinbase", "Coinbase", 2),
-    make(2, "Galaxy Research: Q2 macro thesis — synthetic feed", 2, "galaxydigital", "Galaxy", 5),
-    make(3, "BlackRock institutional flows note — synthetic feed", 3, "blackrock", "BlackRock", 9),
-    make(4, "KOL: Why DePIN matters in 2026 — synthetic feed", 4, "kol_demo", "KOL Demo", 14),
-    make(5, "Exchange listing announcement — synthetic feed", 7, "binance", "Binance", 22),
-  ];
-}
-
-function syntheticFeatured(): FeaturedNewsResponse {
-  const list = syntheticFeaturedList();
-  return { page: 1, page_size: list.length, total: list.length, list };
-}
-
 // ---------- public API ----------
 
 export async function getHotNews(opts: GetHotNewsOpts = {}): Promise<HotNewsResponse> {
@@ -195,7 +101,7 @@ export async function getHotNews(opts: GetHotNewsOpts = {}): Promise<HotNewsResp
   sp.set("language", opts.language ?? "en");
   if (opts.startTime) sp.set("start_time", String(opts.startTime));
   if (opts.endTime) sp.set("end_time", String(opts.endTime));
-  return request<HotNewsResponse>(`/news/hot?${sp}`, syntheticHot);
+  return request<HotNewsResponse>(`/news/hot?${sp}`, () => ({ page: 1, page_size: 0, total: 0, list: [] }));
 }
 
 export async function getFeaturedNews(
@@ -211,5 +117,5 @@ export async function getFeaturedNews(
     // Most SoSoValue array params are repeated query keys (`category=1&category=2`).
     for (const c of opts.category) sp.append("category", String(c));
   }
-  return request<FeaturedNewsResponse>(`/news/featured?${sp}`, syntheticFeatured);
+  return request<FeaturedNewsResponse>(`/news/featured?${sp}`, () => ({ page: 1, page_size: 0, total: 0, list: [] }));
 }

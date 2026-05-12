@@ -1,6 +1,13 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
+import { getIronSession } from "iron-session";
 import { tokens } from "@/lib/tokens";
 import { SignInButton } from "@/components/auth/SignInButton";
+import { sessionOptions, type SessionData } from "@/lib/auth/session";
+import { roleHomeHref } from "@/lib/auth/role";
+
+export const dynamic = "force-dynamic";
 
 const PALETTE = {
   bg: "#05070a",
@@ -22,7 +29,14 @@ const PALETTE = {
 
 const MONO_STACK = '"JetBrains Mono", monospace';
 
-export default function Landing() {
+export default async function Landing() {
+  const session = await getIronSession<SessionData>(cookies(), sessionOptions);
+  if (session.address) {
+    redirect(
+      session.preferredRole ? roleHomeHref(session.preferredRole) : "/onboarding/role",
+    );
+  }
+
   return (
     <div style={{ background: PALETTE.bg, color: PALETTE.text, minHeight: "100vh" }}>
       <TopNav />
@@ -918,7 +932,7 @@ function Architecture() {
         ["Framework", "Next.js 15 (RSC)"],
         ["UI", "React 18 · Tailwind"],
         ["Charts", "Lightweight Charts"],
-        ["Wallet", "RainbowKit · viem"],
+        ["Wallet", "Privy · viem"],
       ],
     },
     {

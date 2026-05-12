@@ -116,15 +116,45 @@ def _equity_curve(returns: list[float], start: float = 1.0) -> list[float]:
     return eq
 
 
-def _sharpe(returns: list[float]) -> float:
-    """Annualized Sharpe with rf=0. Crypto baseline; tune if needed."""
+def _sharpe(returns: list[float], rf_daily: float = 0.0) -> float:
+    """Annualized Sharpe of excess returns (returns − rf_daily). When rf is
+    zero this matches the legacy crypto-baseline behaviour."""
     if not returns:
         return 0.0
-    mean = sum(returns) / len(returns)
-    sd = _stdev(returns)
+    excess = [r - rf_daily for r in returns]
+    mean = sum(excess) / len(excess)
+    sd = _stdev(excess)
     if sd == 0:
         return 0.0
     return (mean / sd) * math.sqrt(TRADING_DAYS_PER_YEAR)
+
+
+def _apply_position_cap(
+    weights: dict[str, float], cap: float
+) -> dict[str, float]:
+    """Iteratively cap any weight at `cap` and redistribute the excess
+    proportionally over the uncapped assets. Bounded by the number of
+    assets — each pass either caps a new one or finishes."""
+    if cap <= 0 or cap >= 1 or not weights:
+        return weights
+    out = dict(weights)
+    pinned: set[str] = set()
+    for _ in range(len(out)):
+        excess = 0.0
+        free_total = 0.0
+        for s, w in out.items():
+            if w > cap + 1e-12:
+                excess += w - cap
+                out[s] = cap
+                pinned.add(s)
+            elif s not in pinned:
+                free_total += w
+        if excess <= 1e-12 or free_total <= 0:
+            break
+        for s, w in list(out.items()):
+            if s not in pinned:
+                out[s] = w + excess * (w / free_total)
+    return out
 
 
 def _win_rate(returns: list[float]) -> float:
@@ -138,12 +168,31 @@ async def run_real_backtest(
     constituents: list[dict[str, Any]],
     days: int = 90,
     benchmarks: bool = True,
+    fee_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    position_cap: float | None = None,
+    risk_free_rate: float = 0.0,
+    init_capital: float = 1.0,
+    rebalance_days: int = 7,
 ) -> dict[str, Any]:
     """Backtest a basket against historical klines.
 
     `constituents` is a list of `{currency_id, symbol, weight}` items
     (same shape as `terminal.get_ssi_constituents` returns). Weights are
     renormalized over the assets that actually have klines available.
+
+    Cost / risk knobs (all optional, default to no-op):
+      - `fee_bps` + `slippage_bps`: total round-trip cost charged each
+        rebalance, amortized over the rebalance period as a daily
+        friction subtracted from each portfolio return.
+      - `position_cap`: max weight per asset (e.g. 0.25). Excess is
+        redistributed proportionally over the uncapped assets.
+      - `risk_free_rate`: annual rf, used in the Sharpe excess-return
+        denominator (converted to a daily figure internally).
+      - `init_capital`: surfaces a `nav_final` value alongside the
+        ratio-based `equity_preview` for display.
+      - `rebalance_days`: cadence used to amortize fees and to derive
+        the `n_rebalances` count surfaced in the response.
     """
 
     if not constituents:
@@ -233,12 +282,26 @@ async def run_real_backtest(
     total_w = sum(raw_weights.values())
     weights = {s: (w / total_w if total_w > 0 else 1 / len(raw_weights)) for s, w in raw_weights.items()}
 
+    if position_cap is not None:
+        weights = _apply_position_cap(weights, position_cap)
+
     portfolio_returns = _portfolio_returns(asset_returns, weights)
+
+    # Daily friction: amortize one round-trip rebalance cost over the
+    # rebalance window. Caller-supplied basis points already represent the
+    # full cost the user wants charged each rebalance event.
+    rb = max(int(rebalance_days), 1)
+    daily_cost = (fee_bps + slippage_bps) / 10_000.0 / rb
+    if daily_cost > 0:
+        portfolio_returns = [r - daily_cost for r in portfolio_returns]
+
     equity = _equity_curve(portfolio_returns, 1.0)
     total_return = (equity[-1] / equity[0]) - 1.0 if equity else 0.0
-    sharpe = _sharpe(portfolio_returns)
+    daily_rf = risk_free_rate / TRADING_DAYS_PER_YEAR if risk_free_rate else 0.0
+    sharpe = _sharpe(portfolio_returns, rf_daily=daily_rf)
     max_dd = _max_drawdown(equity)
     win_rate = _win_rate(portfolio_returns)
+    n_rebalances = max(1, len(portfolio_returns) // rb) if portfolio_returns else 0
 
     out: dict[str, Any] = {
         "ok": True,
@@ -251,6 +314,14 @@ async def run_real_backtest(
         "sharpe": round(sharpe, 2),
         "max_drawdown": round(max_dd, 4),
         "win_rate": round(win_rate, 3),
+        "n_rebalances": n_rebalances,
+        "rebalance_days": rb,
+        "fee_bps": fee_bps,
+        "slippage_bps": slippage_bps,
+        "position_cap": position_cap,
+        "risk_free_rate": risk_free_rate,
+        "init_capital": init_capital,
+        "nav_final": round(init_capital * (1 + total_return), 4),
         # Cap equity series at 90 points to keep payload trim — UI can
         # reconstruct curve shape from this. Drop intermediate close
         # series to keep tool_result compact for Claude's context.

@@ -16,6 +16,7 @@ import {
   type SsiKline,
   type SsiSnapshot,
 } from "@/lib/api/sosovalue";
+import { MyPublishedClient } from "./MyPublishedClient";
 
 export const revalidate = 60;
 
@@ -128,6 +129,8 @@ export default async function PublishedPage() {
           <Btn small>Sort: 30d ROI ↓</Btn>
         </div>
       </div>
+
+      <MyPublishedClient />
 
       <div className="grid grid-cols-4 gap-3">
         <Card pad={14}>

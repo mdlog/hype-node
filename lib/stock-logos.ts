@@ -28,6 +28,9 @@ export const STOCK_DOMAINS: Record<string, string> = {
   XYZ: "block.xyz",
   GME: "gamestop.com",
   MTPLF: "metaplanet.jp",
+  // Metaplanet's primary listing on the Tokyo Stock Exchange (the SoSoValue
+  // /btc-treasuries response uses this code, MTPLF is the OTC ADR ticker).
+  "3350": "metaplanet.jp",
 
   // Mining
   RIOT: "riotplatforms.com",

@@ -14,6 +14,7 @@
 //   - Index     (/indices, /indices/{t}/constituents)   SSI reference baskets
 
 import { fakeSeries } from "@/lib/fake-data";
+import { cleanText, safeSlice } from "@/lib/text";
 
 const BASE = process.env.SOSOVALUE_API_BASE ?? "https://openapi.sosovalue.com/openapi/v1";
 const KEY = process.env.SOSOVALUE_API_KEY ?? "";
@@ -115,10 +116,30 @@ export type CurrencySnapshot = {
   price: number;
   change_pct_24h: number;
   turnover_24h: number;
+  /** turnover_24h / marketcap — liquidity proxy. */
+  turnover_rate?: number;
   marketcap: number;
+  /** Fully diluted valuation. Equals marketcap when total = max supply. */
+  fdv?: number;
   high_24h: number;
   low_24h: number;
   marketcap_rank: number;
+  // Supply fields are returned as strings on the wire (verified BTC snapshot
+  // 2026-05) — keep as `string | number` so downstream code coerces with
+  // Number(...) before arithmetic.
+  max_supply?: string | number;
+  total_supply?: string | number;
+  circulating_supply?: string | number;
+  /** All-time high price USD. */
+  ath?: number;
+  /** ATH timestamp ms. */
+  ath_date?: string | number;
+  /** Drawdown from ATH as decimal (0.36 = -36%). */
+  down_from_ath?: number;
+  cycle_low?: number;
+  cycle_low_date?: string | number;
+  /** Recovery from cycle low as decimal (0.35 = +35%). */
+  up_from_cycle_low?: number;
 };
 
 export type CurrencyKline = {
@@ -391,6 +412,23 @@ function fresh(entry: CacheEntry | undefined): boolean {
 }
 
 export async function request<T>(path: string, fallback: () => T): Promise<T> {
+  // Browser branch: env vars without NEXT_PUBLIC_ are stripped from the
+  // client bundle, so KEY is always "" here. Instead of falling straight
+  // through to synthetic, hit the server-side catch-all proxy at
+  // /api/sosovalue/<path> — the proxy reuses this same request() on the
+  // server (where KEY is real) so all rate-limit / cache / backoff state
+  // stays in one place. On any failure (proxy 502, network error, non-JSON
+  // body) we return the same synthetic fallback the caller already passed.
+  if (typeof window !== "undefined") {
+    try {
+      const res = await fetch(`/api/sosovalue${path}`, { cache: "no-store" });
+      if (!res.ok) return fallback();
+      return (await res.json()) as T;
+    } catch {
+      return fallback();
+    }
+  }
+
   if (!KEY) return fallback();
 
   const cached = state.cache.get(path) as CacheEntry<T> | undefined;
@@ -965,12 +1003,18 @@ export async function getNews(opts: { sector?: Sector; limit?: number } = {}): P
   const { sector = "DePIN", limit = 20 } = opts;
   const raw = await getNewsRaw({ language: "en", pageSize: Math.min(limit, 100) });
   return raw.list.slice(0, limit).map((n) => {
-    const titleOrContent = n.title?.trim() || (n.content ?? "").slice(0, 140);
+    // Use safeSlice + cleanText so a tweet ending in an emoji (UTF-16
+    // surrogate pair) cannot leave a lone surrogate in the title — that
+    // triggers a Next.js hydration mismatch because the SSR HTML drops
+    // the orphan while the JSON-serialized props preserve it.
+    const trimmedTitle = n.title ? cleanText(n.title.trim()) : "";
+    const titleOrContent =
+      trimmedTitle || cleanText(safeSlice(n.content ?? "", 140));
     const ts = Number(n.release_time);
     return {
       id: n.id,
       title: titleOrContent,
-      source: n.author ?? "—",
+      source: cleanText(n.author ?? "") || "—",
       sector: (n.tags ?? [])[0] ?? sector,
       sentiment: scoreFromTitle(titleOrContent),
       importance: classifyImportance(titleOrContent),

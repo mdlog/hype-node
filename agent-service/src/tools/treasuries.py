@@ -7,8 +7,9 @@ Endpoints:
     GET /btc-treasuries                                list (no params)
     GET /btc-treasuries/{ticker}/purchase-history      daily holdings ladder
 
-Synthetic fallback mirrors lib/api/sosovalue/treasuries.ts so the agent
-loop stays callable without an API key (returns deterministic data).
+Returns empty arrays when the SoSoValue API key is missing or upstream is
+unreachable — the chat agent surfaces "data unavailable" rather than
+seeded synthetic numbers that could be cited as live disclosures.
 """
 
 from __future__ import annotations
@@ -22,36 +23,15 @@ from .terminal import _get
 
 KEY = os.getenv("SOSOVALUE_API_KEY", "")
 
-# Hard-coded synthetic roster — matches the TS-side fallback so a no-key
-# environment shows the same five companies in widget + agent answers.
-_SYNTH_LIST: list[dict[str, Any]] = [
-    {"ticker": "MSTR", "name": "MicroStrategy", "list_location": "NASDAQ"},
-    {"ticker": "TSLA", "name": "Tesla", "list_location": "NASDAQ"},
-    {"ticker": "MARA", "name": "Marathon Digital", "list_location": "NASDAQ"},
-    {"ticker": "RIOT", "name": "Riot Platforms", "list_location": "NASDAQ"},
-    {"ticker": "CLSK", "name": "CleanSpark", "list_location": "NASDAQ"},
-]
-
-# 2025-2026 reference holdings used to seed synthetic histories. These
-# numbers are loosely calibrated to public disclosures so the synthetic
-# response reads plausibly when shown to the agent's reasoning loop.
-_SYNTH_BASE: dict[str, int] = {
-    "MSTR": 252_000,
-    "TSLA": 11_500,
-    "MARA": 28_500,
-    "RIOT": 14_900,
-    "CLSK": 9_800,
-}
-
 
 async def list_treasuries() -> list[dict[str, Any]]:
     """Companies tracked by SoSoValue's BTC treasury feed."""
     if not KEY:
-        return _SYNTH_LIST
+        return []
     data = await _get("/btc-treasuries")
-    if isinstance(data, list) and data:
+    if isinstance(data, list):
         return data
-    return _SYNTH_LIST
+    return []
 
 
 async def get_purchase_history(
@@ -64,45 +44,16 @@ async def get_purchase_history(
     """Per-ticker purchase ladder. Returns newest-first per the docs."""
     capped = max(1, min(limit, 100))
     if not KEY:
-        return _synth_history(ticker, capped)
+        return []
     qs = f"limit={capped}"
     if start_date:
         qs += f"&start_date={start_date}"
     if end_date:
         qs += f"&end_date={end_date}"
     data = await _get(f"/btc-treasuries/{ticker}/purchase-history?{qs}")
-    if isinstance(data, list) and data:
+    if isinstance(data, list):
         return data
-    return _synth_history(ticker, capped)
-
-
-def _synth_history(ticker: str, limit: int) -> list[dict[str, Any]]:
-    """Deterministic synthetic ladder. Newest-first, monotonic-decreasing
-    btc_holding so that latest − oldest is always a non-negative buy
-    signal (mirrors the TS fallback exactly)."""
-    base = _SYNTH_BASE.get(ticker.upper(), 5_000)
-    rows: list[dict[str, Any]] = []
-    count = max(2, min(limit, 100))
-    holding = base
-    today = datetime.now(timezone.utc).date()
-    for i in range(count):
-        d = today - timedelta(days=i * 11)
-        # Larger acquisitions for more recent rows so the latest row is
-        # naturally the headline buy. Shape matches the TS synth.
-        acq = round(150 + ((count - i) ** 1.4) * 18)
-        px = 95_000 - (i / count) * 23_000
-        rows.append(
-            {
-                "date": d.isoformat(),
-                "ticker": ticker.upper(),
-                "btc_holding": holding,
-                "btc_acq": acq,
-                "acq_cost": int(round(acq * px)),
-                "avg_btc_cost": int(round(px)),
-            }
-        )
-        holding = max(0, holding - acq)
-    return rows
+    return []
 
 
 # ---------------------------------------------------------------------------

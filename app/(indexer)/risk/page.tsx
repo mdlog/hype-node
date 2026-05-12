@@ -8,6 +8,7 @@ import {
 import { closesFromKlines, computeMetrics } from "@/lib/metrics";
 import { getRiskConfig } from "@/lib/api/agent";
 import { RiskRules } from "@/components/live/RiskRules";
+import { RiskAuditLog } from "@/components/live/RiskAuditLog";
 
 // Persistent config means we can't statically revalidate — the agent's
 // thresholds change on user save.
@@ -280,6 +281,8 @@ export default async function RiskPage() {
         </Card>
 
         <RiskRules initial={riskConfig} />
+
+        <RiskAuditLog />
       </div>
     </div>
   );

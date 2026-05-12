@@ -1,17 +1,16 @@
 // SoSoValue OpenAPI v1 — `GET /news/search`.
 //
 // Full-text news search with keyword highlighting. Wraps the generic
-// `request<T>` helper exported from `lib/api/sosovalue.ts` so backoff /
-// caching / synthetic-fallback behavior stays consistent with the rest of
-// the SoSoValue surface.
+// `request<T>` helper from `lib/api/sosovalue.ts` for backoff / caching.
 //
 // Response envelope (data field): { page, page_size, total, list[] }, with
 // each list item carrying a `highlight` block whose `title` / `content` are
 // HTML strings annotated with `<em>` tags around matched keyword spans.
 //
-// When the API key is absent or upstream is in backoff, `request` invokes
-// the fallback() — we return a deterministic 3-item synthetic page so the
-// UI stays interactive offline.
+// When the API key is absent or upstream is in backoff, the fallback returns
+// an EMPTY page (no synthetic items). The search UI renders a "no results /
+// upstream unavailable" state instead of seeding placeholder content that
+// could be mistaken for live data.
 import { request } from "@/lib/api/sosovalue";
 
 export type NewsSearchSort = "relevance" | "publish_time";
@@ -71,7 +70,7 @@ const SORT_VALUES = new Set<NewsSearchSort>(["relevance", "publish_time"]);
 /**
  * Search SoSoValue news with keyword highlighting.
  *
- * @throws never — synthetic fallback is returned on missing key / backoff.
+ * @throws never — returns an empty page on missing key / backoff.
  */
 export async function searchNews(opts: SearchNewsOpts): Promise<NewsSearchResponse> {
   const keyword = opts.keyword?.trim() ?? "";
@@ -90,75 +89,11 @@ export async function searchNews(opts: SearchNewsOpts): Promise<NewsSearchRespon
     sp.set("category", String(opts.category));
   }
 
-  return request<NewsSearchResponse>(`/news/search?${sp}`, () =>
-    syntheticSearch(keyword, page, pageSize),
-  );
+  return request<NewsSearchResponse>(`/news/search?${sp}`, () => ({
+    page,
+    page_size: pageSize,
+    total: 0,
+    list: [],
+  }));
 }
 
-// Deterministic 3-item synthetic page: same keyword always renders the same
-// titles. Each title contains the keyword wrapped in `<em>` so the
-// highlight pipeline in the UI is exercised offline too.
-function syntheticSearch(keyword: string, page: number, pageSize: number): NewsSearchResponse {
-  const safe = keyword || "crypto";
-  const now = Date.now();
-  const list: NewsSearchItem[] = [
-    {
-      id: `synth-${safe}-1`,
-      source_link: "https://sosovalue.com/news",
-      release_time: now - 12 * 60_000,
-      title: `Synthetic result: ${safe} sector update`,
-      content: `Offline placeholder describing recent ${safe} sector activity.`,
-      author: "sosovalue",
-      nick_name: "SoSoValue Research",
-      category: 1,
-      feature_image: null,
-      matched_currencies: null,
-      tags: [safe.toLowerCase(), "synthetic"],
-      media_info: { name: "SoSoValue", avatar: null, url: null },
-      type: "article",
-      highlight: {
-        title: `Synthetic result: <em>${safe}</em> sector update`,
-        content: `Offline placeholder describing recent <em>${safe}</em> sector activity.`,
-      },
-    },
-    {
-      id: `synth-${safe}-2`,
-      source_link: "https://sosovalue.com/news",
-      release_time: now - 47 * 60_000,
-      title: `Synthetic result: ${safe} on-chain flows recap`,
-      content: `Synthetic mock highlighting cumulative ${safe} on-chain flows.`,
-      author: "sosovalue",
-      nick_name: "SoSoValue Research",
-      category: 2,
-      feature_image: null,
-      matched_currencies: null,
-      tags: [safe.toLowerCase(), "flows"],
-      media_info: { name: "SoSoValue", avatar: null, url: null },
-      type: "article",
-      highlight: {
-        title: `Synthetic result: <em>${safe}</em> on-chain flows recap`,
-        content: `Synthetic mock highlighting cumulative <em>${safe}</em> on-chain flows.`,
-      },
-    },
-    {
-      id: `synth-${safe}-3`,
-      source_link: "https://sosovalue.com/news",
-      release_time: now - 3 * 60 * 60_000,
-      title: `Synthetic result: ${safe} weekly digest`,
-      content: `Weekly digest skeleton for the ${safe} narrative.`,
-      author: "sosovalue",
-      nick_name: "SoSoValue Research",
-      category: 1,
-      feature_image: null,
-      matched_currencies: null,
-      tags: [safe.toLowerCase(), "weekly"],
-      media_info: { name: "SoSoValue", avatar: null, url: null },
-      type: "article",
-      highlight: {
-        title: `Synthetic result: <em>${safe}</em> weekly digest`,
-        content: `Weekly digest skeleton for the <em>${safe}</em> narrative.`,
-      },
-    },
-  ];
-  return { page, page_size: pageSize, total: list.length, list };
-}

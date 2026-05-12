@@ -39,10 +39,14 @@ const INNER_CYCLE = 2.2;
 export function LogoSplash({
   label,
   fullScreen = false,
+  inline = false,
   size = 88,
 }: {
   label?: string;
   fullScreen?: boolean;
+  /** Inline mode collapses padding + min-height for use as a compact loader
+   *  inside larger flows (e.g. "agent thinking…" in the chat stream). */
+  inline?: boolean;
   size?: number;
 }) {
   // Radii are derived from `size` so callers can scale the whole splash by
@@ -57,13 +61,13 @@ export function LogoSplash({
       role="status"
       aria-label={label ?? "Loading"}
       style={{
-        display: "flex",
-        flexDirection: "column",
+        display: inline ? "inline-flex" : "flex",
+        flexDirection: inline ? "row" : "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 24,
-        minHeight: fullScreen ? "calc(100vh - 48px)" : 360,
-        padding: 32,
+        gap: inline ? 10 : 24,
+        minHeight: inline ? 0 : fullScreen ? "calc(100vh - 48px)" : 360,
+        padding: inline ? 0 : 32,
         position: "relative",
       }}
     >
@@ -74,7 +78,7 @@ export function LogoSplash({
           100% { transform: scale(1);    opacity: 1; }
         }
         /* Bar glow cycle — 4% bright window means ~1.4 bars are at peak at
-           any moment for OUTER_COUNT=36, giving a tight rotating "head"
+           any moment for OUTER_COUNT=36, giving a tight rotating bright spot
            rather than a smeared comet tail. */
         @keyframes hype-splash-bar-glow {
           0%   {

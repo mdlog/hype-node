@@ -56,15 +56,21 @@ export function IndexerTopBar() {
   const active = pathname?.split("/")[1] ?? "dashboard";
   return (
     <div
-      className="sticky top-0 z-10 flex items-center"
+      className="sticky top-0 z-10"
       style={{
         height: 48,
         borderBottom: `1px solid ${tokens.border}`,
-        padding: "0 16px",
-        gap: 16,
         background: tokens.bg,
       }}
     >
+      <div
+        className="mx-auto flex items-center h-full"
+        style={{
+          maxWidth: 1440,
+          padding: "0 16px",
+          gap: 16,
+        }}
+      >
       <div className="flex-1 flex items-center min-w-0">
         <Link href="/dashboard" className="flex items-center gap-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -133,6 +139,7 @@ export function IndexerTopBar() {
         <Mono size={10}>⌘K</Mono>
         <WalletBadge />
         <RoleSwitcher current="indexer" />
+      </div>
       </div>
     </div>
   );

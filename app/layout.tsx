@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 
+import { AppFooter } from "@/components/nav/AppFooter";
 import { Providers } from "./providers";
 import "./globals.css";
 
@@ -17,7 +18,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <Providers>{children}</Providers>
+        <Providers>
+          {children}
+          <AppFooter />
+        </Providers>
       </body>
     </html>
   );

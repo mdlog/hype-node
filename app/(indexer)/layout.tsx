@@ -20,7 +20,12 @@ export default function IndexerLayout({ children }: { children: React.ReactNode 
           zIndex: 0,
         }}
       />
-      <main className="relative">{children}</main>
+      <main
+        className="relative mx-auto"
+        style={{ maxWidth: 1440 }}
+      >
+        {children}
+      </main>
     </div>
   );
 }

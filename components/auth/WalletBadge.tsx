@@ -1,8 +1,8 @@
 "use client";
 
+import { useExportWallet, useLogout, useWallets } from "@privy-io/react-auth";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useDisconnect } from "wagmi";
 
 import { tokens } from "@/lib/tokens";
 import { notifySessionChanged } from "@/lib/auth/useSessionGuard";
@@ -12,7 +12,18 @@ import { notifySessionChanged } from "@/lib/auth/useSessionGuard";
 // defensive — if it ever shows, something is wrong with the session round-trip.
 export function WalletBadge() {
   const router = useRouter();
-  const { disconnect } = useDisconnect();
+  // Privy's logout handles both its own session AND wagmi disconnect in
+  // one call, so we don't need wagmi's `useDisconnect` separately.
+  const { logout } = useLogout();
+  // Embedded wallet export — only meaningful for users whose wallet was
+  // created by Privy (email / Google / Twitter login). External wallet
+  // users (MetaMask, Rabby) own their key already, so we hide the menu
+  // item for them.
+  const { exportWallet } = useExportWallet();
+  const { wallets } = useWallets();
+  const hasEmbeddedWallet = wallets.some(
+    (w) => w.walletClientType === "privy",
+  );
   const [address, setAddress] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -56,7 +67,7 @@ export function WalletBadge() {
 
   async function handleSignOut() {
     await fetch("/api/auth/logout", { method: "POST" });
-    disconnect();
+    await logout();
     setAddress(null);
     // Fan out so any open useSessionGuard instance (portfolio, builder)
     // drops their cached session address and routes to the disconnected
@@ -75,6 +86,18 @@ export function WalletBadge() {
       // Clipboard blocked (insecure context, etc.) — fail quietly.
     }
     setOpen(false);
+  }
+
+  async function handleExport() {
+    setOpen(false);
+    // Privy renders its own modal (PIN / passkey verification → reveal
+    // private key). All UX is on their side; we just trigger it.
+    try {
+      await exportWallet();
+    } catch {
+      // User dismissed the modal or verification failed — Privy already
+      // surfaced its own toast, so nothing to do here.
+    }
   }
 
   if (!address) {
@@ -163,6 +186,9 @@ export function WalletBadge() {
             {address}
           </div>
           <MenuItem onClick={handleCopy}>Copy address</MenuItem>
+          {hasEmbeddedWallet ? (
+            <MenuItem onClick={handleExport}>Export wallet</MenuItem>
+          ) : null}
           <MenuItem onClick={handleSignOut} danger>
             Sign out
           </MenuItem>

@@ -141,8 +141,16 @@ async def strategy_node(state: HypeState) -> HypeState:
 
 async def backtest_node(state: HypeState) -> HypeState:
     state["current_node"] = "backtest"
+    # Legacy `bt.run()` returned synthetic equity curves that misled the
+    # downstream risk gate. Now it returns `{ok: False, ...}` with neutral
+    # zero metrics. Real backtests run via run_real_backtest(constituents)
+    # in the chat agent path; the autonomous loop here records the skip
+    # rather than fabricating numbers. Risk_node already uses .get() with
+    # safe defaults, so a zero drawdown won't trip rules.
     res = await bt.run(strategy_id="hdp8", days=90, n_assets=len(state.get("basket", {}) or {1: 1}))
     state["backtest"] = res
+    if res.get("ok") is False:
+        return _log(state, "WAIT", "backtest · skipped (real backtest path not wired in autonomous loop)")
     return _log(
         state,
         "OBS",

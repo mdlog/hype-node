@@ -20,15 +20,17 @@ export function PublisherTopBar() {
   const active = pathname?.split("/")[2] ?? "radar";
   return (
     <div
-      className="sticky top-0 z-10 flex items-center"
+      className="sticky top-0 z-10"
       style={{
         height: 52,
         borderBottom: `1px solid ${tokens.border}`,
-        padding: "0 20px",
-        gap: 20,
         background: tokens.bg,
       }}
     >
+      <div
+        className="mx-auto flex items-center h-full"
+        style={{ maxWidth: 1440, padding: "0 20px", gap: 20 }}
+      >
       <Link href="/publisher/radar" className="flex items-center gap-2.5">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
@@ -130,6 +132,7 @@ export function PublisherTopBar() {
             earnings page surfaces the honest empty state. */}
         <WalletBadge />
         <RoleSwitcher current="publisher" />
+      </div>
       </div>
     </div>
   );

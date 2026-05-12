@@ -93,7 +93,11 @@ export function ProjectLogo({
           width: size,
           height: size,
           borderRadius: size / 2,
-          background: "#0008",
+          // White background — most CoinGecko logos ship with a transparent
+          // background and dark/colored glyphs that disappear against the
+          // dashboard's near-black surface (#0008 fallback). White matches
+          // the StockLogo treatment and keeps every logo readable.
+          background: "#fff",
           border: "1px solid rgba(255,255,255,0.06)",
           display: "flex",
           alignItems: "center",

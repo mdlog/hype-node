@@ -109,6 +109,13 @@ export function EtfSnapshotPanel({ tickers }: { tickers: string[] }) {
   const loadOne = useCallback(async (ticker: string) => {
     try {
       const snap = await getEtfSnapshot(ticker);
+      if (!snap) {
+        setStates((prev) => ({
+          ...prev,
+          [ticker]: { kind: "error", error: "upstream unreachable" },
+        }));
+        return;
+      }
       setStates((prev) => ({
         ...prev,
         [ticker]: { kind: "ready", snap, live: looksLive(snap) },

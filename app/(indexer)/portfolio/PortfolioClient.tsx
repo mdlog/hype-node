@@ -5,12 +5,15 @@ import { useCallback, useEffect, useState } from "react";
 import { Card, Label, Mono, Tag, Btn, Metric, LineChart, LogoSplash } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { useSessionGuard } from "@/lib/auth/useSessionGuard";
+import { formatSyncLabel, useAutoRefetch } from "@/lib/hooks/useAutoRefetch";
 import { WalletMismatchBanner } from "@/components/auth/WalletMismatchBanner";
 import type {
   UserPortfolio,
   PublishedIndex,
   SpotBalance,
 } from "@/lib/api/portfolio";
+import type { SnapshotPosition } from "@/lib/api/portfolio-snapshot";
+import type { PfSnapshotRow } from "@/lib/supabase/types";
 
 // Reference benchmark = the previous "all ssiDePIN" view, kept for the
 // chart / sharpe / sector composition sections that we can't compute from
@@ -64,6 +67,29 @@ type FetchState =
   | { kind: "ok"; data: UserPortfolio }
   | { kind: "error"; message: string };
 
+type ViewMode = "current" | "history";
+
+type HistoryPeriod = "7d" | "30d" | "90d" | "all";
+
+type HistoryFetchState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ok"; rows: PfSnapshotRow[] }
+  | { kind: "error"; message: string };
+
+type SnapshotState =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "saved"; at: string }
+  | { kind: "error"; message: string };
+
+const HISTORY_PERIOD_DAYS: Record<HistoryPeriod, number | null> = {
+  "7d": 7,
+  "30d": 30,
+  "90d": 90,
+  all: null,
+};
+
 
 // ---------- helpers ----------
 
@@ -103,6 +129,56 @@ function fmtAmount(s: string): string {
   return n.toFixed(6);
 }
 
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)}`;
+}
+
+function fmtUsd(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(n) >= 1_000) return `$${(n / 1_000).toFixed(2)}K`;
+  return `$${n.toFixed(2)}`;
+}
+
+/** Normalize a series to base 100 against its first defined value. */
+function normalizeBase100(series: (number | null)[]): number[] {
+  let base: number | null = null;
+  for (const v of series) {
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+      base = v;
+      break;
+    }
+  }
+  if (base === null) return [];
+  return series.map((v) =>
+    typeof v === "number" && Number.isFinite(v) && base !== null
+      ? (v / base) * 100
+      : 100,
+  );
+}
+
+function isSnapshotPosition(value: unknown): value is SnapshotPosition {
+  if (!value || typeof value !== "object") return false;
+  const k = (value as { kind?: unknown }).kind;
+  return k === "spot" || k === "index";
+}
+
+function parsePositions(raw: unknown): SnapshotPosition[] {
+  // The DB column is JSONB so it round-trips as `unknown`. Validate the
+  // tag at the boundary instead of casting blindly so a malformed legacy
+  // row doesn't crash the renderer.
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isSnapshotPosition);
+}
+
 
 // ---------- Main component ----------
 
@@ -118,6 +194,32 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
     guard.status === "loading" ? "connecting" : "connected";
   const [state, setState] = useState<FetchState>({ kind: "idle" });
   const [period, setPeriod] = useState<(typeof PERIOD_LABELS)[number]>("1M");
+  const [view, setView] = useState<ViewMode>("current");
+  const [snapshotState, setSnapshotState] = useState<SnapshotState>({
+    kind: "idle",
+  });
+  const [historyPeriod, setHistoryPeriod] = useState<HistoryPeriod>("30d");
+
+  // Background poll snapshots so a "Take snapshot" from another device shows
+  // up here without a hard refresh. Snapshots are infrequent (user-triggered
+  // mostly), so a 60s interval is plenty — saves battery on mobile vs the
+  // 15s default. Hook is gated on auth: when disconnected we pass `null` so
+  // no requests fire at all.
+  const snapshotsHook = useAutoRefetch<PfSnapshotRow[]>(
+    isConnected && address ? "/api/portfolio/snapshots?limit=90" : null,
+    { intervalMs: 60_000 },
+  );
+
+  // Adapt the hook's (data | loading | error) tuple to the existing
+  // discriminated `HistoryFetchState` so the downstream HistorySection /
+  // HistoryDashboard rendering doesn't need to change.
+  const history: HistoryFetchState = !isConnected || !address
+    ? { kind: "idle" }
+    : snapshotsHook.error
+      ? { kind: "error", message: snapshotsHook.error }
+      : snapshotsHook.data
+        ? { kind: "ok", rows: snapshotsHook.data }
+        : { kind: "loading" };
 
   const refresh = useCallback(async () => {
     if (!address) return;
@@ -146,6 +248,41 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
     }
   }, [address]);
 
+  // Manual reload trigger surfaced to children. Delegates to the hook so a
+  // user click and the background interval share the same dedup / abort
+  // path — no risk of two overlapping requests landing out of order.
+  const loadHistory = useCallback(async () => {
+    await snapshotsHook.refetch();
+  }, [snapshotsHook]);
+
+  const takeSnapshot = useCallback(async () => {
+    if (!isConnected || !address) return;
+    setSnapshotState({ kind: "saving" });
+    try {
+      const res = await fetch(`/api/portfolio/snapshots`, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as {
+        id?: string;
+        taken_at?: string;
+        error?: string;
+      };
+      if (!res.ok || !body.id || !body.taken_at) {
+        setSnapshotState({
+          kind: "error",
+          message: body.error ?? `HTTP ${res.status}`,
+        });
+        return;
+      }
+      setSnapshotState({ kind: "saved", at: body.taken_at });
+      // The auto-refetch hook polls every 60s in the background, but we
+      // refetch eagerly so the new snapshot appears in the History tab
+      // immediately — no need to gate on `view === "history"` because the
+      // hook polls regardless of which tab is showing.
+      void snapshotsHook.refetch();
+    } catch (err) {
+      setSnapshotState({ kind: "error", message: (err as Error).message });
+    }
+  }, [isConnected, address, snapshotsHook]);
+
   useEffect(() => {
     if (isConnected && address) {
       void refresh();
@@ -154,6 +291,11 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
     }
   }, [isConnected, address, refresh]);
 
+  // History no longer needs a lazy-load effect — the hook polls
+  // automatically once we're connected, so swapping to the History tab
+  // either renders cached rows (instant) or shows the hook's loading
+  // state until the in-flight initial fetch resolves.
+
   const walletConnecting = wagmiStatus === "connecting";
 
   return (
@@ -161,11 +303,29 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
       {/* Mismatch banner — only renders when wagmi addr ≠ session addr */}
       <WalletMismatchBanner guard={guard} />
 
-      {/* SECTION 1: Your Portfolio (real or empty-state) */}
+      {/* View switcher + snapshot button — only meaningful when signed in */}
+      {isConnected && address && !walletConnecting && (
+        <ViewToolbar
+          view={view}
+          onViewChange={setView}
+          snapshotState={snapshotState}
+          onTakeSnapshot={takeSnapshot}
+        />
+      )}
+
+      {/* SECTION 1: Your Portfolio (current or history) */}
       {walletConnecting ? (
         <LogoSplash label="connecting wallet" size={56} />
       ) : !isConnected || !address ? (
         <DisconnectedBanner />
+      ) : view === "history" ? (
+        <HistorySection
+          history={history}
+          period={historyPeriod}
+          onPeriodChange={setHistoryPeriod}
+          onReload={loadHistory}
+          syncLabel={formatSyncLabel(snapshotsHook.lastFetchedAt, snapshotsHook.loading)}
+        />
       ) : state.kind === "loading" || state.kind === "idle" ? (
         <LogoSplash label="loading your portfolio" size={56} />
       ) : state.kind === "error" ? (
@@ -184,6 +344,71 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
         onPeriodChange={setPeriod}
       />
     </>
+  );
+}
+
+// ---------- View toolbar (mode switcher + snapshot button) ----------
+
+function ViewToolbar({
+  view,
+  onViewChange,
+  snapshotState,
+  onTakeSnapshot,
+}: {
+  view: ViewMode;
+  onViewChange: (v: ViewMode) => void;
+  snapshotState: SnapshotState;
+  onTakeSnapshot: () => void;
+}) {
+  const saving = snapshotState.kind === "saving";
+  const savedMsg =
+    snapshotState.kind === "saved"
+      ? `Snapshot saved at ${fmtClock(snapshotState.at)}`
+      : snapshotState.kind === "error"
+        ? `Snapshot failed: ${snapshotState.message}`
+        : null;
+  const savedColor =
+    snapshotState.kind === "error" ? tokens.amber : tokens.emerald;
+
+  return (
+    <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex gap-1">
+        {(["current", "history"] as const).map((v) => {
+          const on = v === view;
+          return (
+            <button
+              key={v}
+              type="button"
+              onClick={() => onViewChange(v)}
+              style={{
+                padding: "6px 14px",
+                borderRadius: 4,
+                background: on ? tokens.bgElev2 : "transparent",
+                border: `1px solid ${on ? tokens.borderStrong : tokens.border}`,
+                fontFamily: "JetBrains Mono, monospace",
+                fontSize: 11,
+                color: on ? tokens.text : tokens.textDim,
+                cursor: "pointer",
+                textTransform: "uppercase",
+                letterSpacing: "0.04em",
+              }}
+            >
+              {v === "current" ? "Current" : "History"}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {savedMsg && (
+          <Mono size={11} color={savedColor}>
+            {savedMsg}
+          </Mono>
+        )}
+        <Btn small onClick={onTakeSnapshot} disabled={saving}>
+          {saving ? "… saving" : "📸 Take snapshot"}
+        </Btn>
+      </div>
+    </div>
   );
 }
 
@@ -829,5 +1054,433 @@ function CompositionDonut({
         ASSETS
       </text>
     </svg>
+  );
+}
+
+
+// ---------- History view ----------
+
+function HistorySection({
+  history,
+  period,
+  onPeriodChange,
+  onReload,
+  syncLabel,
+}: {
+  history: HistoryFetchState;
+  period: HistoryPeriod;
+  onPeriodChange: (p: HistoryPeriod) => void;
+  onReload: () => void;
+  syncLabel: string;
+}) {
+  if (history.kind === "idle" || history.kind === "loading") {
+    return <LogoSplash label="loading snapshot history" size={56} />;
+  }
+  if (history.kind === "error") {
+    return <ErrorBanner message={history.message} onRetry={onReload} />;
+  }
+  if (history.rows.length === 0) {
+    return <EmptyHistoryBanner />;
+  }
+  return (
+    <HistoryDashboard
+      rows={history.rows}
+      period={period}
+      onPeriodChange={onPeriodChange}
+      onReload={onReload}
+      syncLabel={syncLabel}
+    />
+  );
+}
+
+function EmptyHistoryBanner() {
+  return (
+    <Card pad={20}>
+      <div className="flex items-center gap-4 flex-wrap" style={{ minHeight: 80 }}>
+        <div
+          style={{
+            width: 56,
+            height: 56,
+            borderRadius: "50%",
+            border: `1px dashed ${tokens.border}`,
+            display: "grid",
+            placeItems: "center",
+            fontSize: 24,
+            color: tokens.textFaint,
+            flexShrink: 0,
+          }}
+        >
+          📸
+        </div>
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 600,
+              color: tokens.text,
+              letterSpacing: "-0.01em",
+              marginBottom: 4,
+            }}
+          >
+            No snapshots yet
+          </div>
+          <Mono size={11} color={tokens.textDim}>
+            Click &quot;📸 Take snapshot&quot; above to record a point-in-time
+            view of your indices, balances, and benchmark prices. Snapshots
+            unlock the AUM history chart and benchmark comparisons.
+          </Mono>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function HistoryDashboard({
+  rows,
+  period,
+  onPeriodChange,
+  onReload,
+  syncLabel,
+}: {
+  rows: PfSnapshotRow[];
+  period: HistoryPeriod;
+  onPeriodChange: (p: HistoryPeriod) => void;
+  onReload: () => void;
+  syncLabel: string;
+}) {
+  // API returns rows ordered taken_at desc; chart wants ascending so the
+  // x-axis reads left→right as oldest→newest.
+  const chrono = [...rows].sort(
+    (a, b) => new Date(a.taken_at).getTime() - new Date(b.taken_at).getTime(),
+  );
+  const days = HISTORY_PERIOD_DAYS[period];
+  const cutoff =
+    days !== null ? Date.now() - days * 24 * 60 * 60 * 1000 : Number.NEGATIVE_INFINITY;
+  const filtered = chrono.filter((r) => new Date(r.taken_at).getTime() >= cutoff);
+
+  // Build aligned series. We need values aligned by index across AUM /
+  // BTC / ETH / MAG7 so the LineChart's x-axis stays consistent. Skip
+  // rows where AUM is null (no priced positions) — they break the line.
+  const aumRows = filtered.filter(
+    (r) => typeof r.total_aum_usd === "number" && Number.isFinite(r.total_aum_usd),
+  );
+  const aumSeries = aumRows.map((r) => r.total_aum_usd as number);
+  const btcSeries = aumRows.map((r) => r.benchmark_btc_price);
+  const ethSeries = aumRows.map((r) => r.benchmark_eth_price);
+  const mag7Series = aumRows.map((r) => r.benchmark_ssimag7_nav);
+
+  const aumNorm = normalizeBase100(aumSeries);
+  const btcNorm = normalizeBase100(btcSeries);
+  const ethNorm = normalizeBase100(ethSeries);
+  const mag7Norm = normalizeBase100(mag7Series);
+
+  // Most-recent snapshot for headline metric. Use the original (desc)
+  // ordering so latest = rows[0].
+  const latest = rows[0] ?? null;
+  const previous = rows[1] ?? null;
+  const change =
+    latest && previous && latest.total_aum_usd && previous.total_aum_usd
+      ? (latest.total_aum_usd - previous.total_aum_usd) / previous.total_aum_usd
+      : null;
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="flex items-center gap-2">
+            <div
+              style={{
+                fontSize: 22,
+                fontWeight: 600,
+                letterSpacing: "-0.02em",
+                color: tokens.text,
+              }}
+            >
+              Portfolio History
+            </div>
+            <Tag small color={tokens.cyan} dot>
+              {rows.length} snapshots
+            </Tag>
+          </div>
+          <Mono size={11}>
+            {latest
+              ? `latest ${fmtDateTime(latest.taken_at)} · AUM ${fmtUsd(latest.total_aum_usd)}`
+              : "no data"}
+            {" · "}
+            <span style={{ color: tokens.textFaint }}>{syncLabel}</span>
+          </Mono>
+        </div>
+        <div className="flex items-center gap-2">
+          <PeriodPicker period={period} onChange={onPeriodChange} />
+          <Btn small onClick={onReload}>↻ Reload</Btn>
+        </div>
+      </div>
+
+      {/* KPI strip */}
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+        <Card pad={14}>
+          <Label>LATEST AUM</Label>
+          <Metric
+            v={fmtUsd(latest?.total_aum_usd ?? null)}
+            size={26}
+            color={tokens.emerald}
+            style={{ marginTop: 4 }}
+          />
+          <Mono size={10}>{latest ? fmtDateTime(latest.taken_at) : "—"}</Mono>
+        </Card>
+        <Card pad={14}>
+          <Label>VS PREVIOUS</Label>
+          <Metric
+            v={change !== null ? pct(change) : "—"}
+            size={26}
+            color={
+              change === null
+                ? tokens.text
+                : change >= 0
+                  ? tokens.emerald
+                  : tokens.red
+            }
+            style={{ marginTop: 4 }}
+          />
+          <Mono size={10}>
+            {previous ? `prev ${fmtDateTime(previous.taken_at)}` : "no previous snapshot"}
+          </Mono>
+        </Card>
+        <Card pad={14}>
+          <Label>SNAPSHOTS IN WINDOW</Label>
+          <Metric
+            v={String(filtered.length)}
+            size={26}
+            color={tokens.amber}
+            style={{ marginTop: 4 }}
+          />
+          <Mono size={10}>period {period.toUpperCase()}</Mono>
+        </Card>
+      </div>
+
+      {/* Chart card */}
+      <Card pad={16}>
+        <div className="flex justify-between items-end mb-2 flex-wrap gap-2">
+          <div>
+            <Label>AUM vs benchmarks (normalized base=100)</Label>
+            <Mono size={10}>
+              your wallet (emerald) · BTC (cyan) · ETH (amber) · ssiMAG7 (violet)
+            </Mono>
+          </div>
+        </div>
+        {aumNorm.length < 2 ? (
+          <div style={{ padding: "20px 0" }}>
+            <Mono size={11} color={tokens.textFaint}>
+              Need at least 2 priced snapshots in this window to render a chart.
+              Take more snapshots or widen the period selector.
+            </Mono>
+          </div>
+        ) : (
+          <LineChart
+            w={780}
+            h={260}
+            series={[
+              { data: aumNorm, color: tokens.emerald, thick: true, fill: true },
+              ...(btcNorm.length === aumNorm.length
+                ? [{ data: btcNorm, color: tokens.cyan, dashed: true }]
+                : []),
+              ...(ethNorm.length === aumNorm.length
+                ? [{ data: ethNorm, color: tokens.amber, dashed: true }]
+                : []),
+              ...(mag7Norm.length === aumNorm.length
+                ? [{ data: mag7Norm, color: "#a78bfa", dashed: true }]
+                : []),
+            ]}
+          />
+        )}
+      </Card>
+
+      {/* Snapshot table */}
+      <SnapshotsTable rows={[...filtered].reverse()} />
+    </div>
+  );
+}
+
+function PeriodPicker({
+  period,
+  onChange,
+}: {
+  period: HistoryPeriod;
+  onChange: (p: HistoryPeriod) => void;
+}) {
+  const options: HistoryPeriod[] = ["7d", "30d", "90d", "all"];
+  return (
+    <div className="flex gap-1">
+      {options.map((p) => {
+        const on = p === period;
+        return (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onChange(p)}
+            style={{
+              padding: "4px 10px",
+              borderRadius: 4,
+              background: on ? tokens.bgElev2 : "transparent",
+              border: `1px solid ${on ? tokens.borderStrong : "transparent"}`,
+              fontFamily: "JetBrains Mono, monospace",
+              fontSize: 10,
+              color: on ? tokens.text : tokens.textDim,
+              cursor: "pointer",
+              textTransform: "uppercase",
+            }}
+          >
+            {p}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SnapshotsTable({ rows }: { rows: PfSnapshotRow[] }) {
+  // Rows arrive newest-first for the table (more useful for humans
+  // scanning recent activity). The "change vs previous" cell compares to
+  // the chronologically prior snapshot — i.e. the next row down in the
+  // newest-first list.
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <Card pad={0}>
+      <div
+        className="flex items-center justify-between"
+        style={{
+          padding: "12px 16px",
+          borderBottom: `1px solid ${tokens.border}`,
+          background: tokens.bgElev2,
+        }}
+      >
+        <div>
+          <Label>Snapshot Log</Label>
+          <Mono size={10}>{rows.length} rows · click to expand positions</Mono>
+        </div>
+      </div>
+      <div
+        className="grid"
+        style={{
+          gridTemplateColumns: "1.4fr 1fr 1fr 0.8fr 0.6fr",
+          padding: "8px 16px",
+          gap: 12,
+          borderBottom: `1px solid ${tokens.borderFaint}`,
+          background: tokens.bgElev,
+        }}
+      >
+        <Label>TAKEN AT</Label>
+        <Label>AUM (USD)</Label>
+        <Label>CHANGE</Label>
+        <Label>TRIGGER</Label>
+        <Label>POSITIONS</Label>
+      </div>
+      {rows.map((r, i) => {
+        const prev = rows[i + 1] ?? null;
+        const ch =
+          r.total_aum_usd && prev?.total_aum_usd
+            ? (r.total_aum_usd - prev.total_aum_usd) / prev.total_aum_usd
+            : null;
+        const positions = parsePositions(r.positions);
+        const open = openId === r.id;
+        return (
+          <div key={r.id}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => setOpenId(open ? null : r.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setOpenId(open ? null : r.id);
+                }
+              }}
+              className="grid items-center"
+              style={{
+                gridTemplateColumns: "1.4fr 1fr 1fr 0.8fr 0.6fr",
+                padding: "10px 16px",
+                gap: 12,
+                borderBottom: `1px solid ${tokens.borderFaint}`,
+                cursor: "pointer",
+                background: open ? tokens.bgElev : "transparent",
+              }}
+            >
+              <Mono size={11} color={tokens.text}>
+                {fmtDateTime(r.taken_at)}
+              </Mono>
+              <Mono size={11} color={tokens.text}>
+                {fmtUsd(r.total_aum_usd)}
+              </Mono>
+              <Mono
+                size={11}
+                color={
+                  ch === null ? tokens.textFaint : ch >= 0 ? tokens.emerald : tokens.red
+                }
+              >
+                {ch !== null ? pct(ch) : "—"}
+              </Mono>
+              <Mono size={10} color={tokens.textDim}>
+                {r.trigger}
+              </Mono>
+              <Mono size={10} color={tokens.cyan}>
+                {positions.length}
+              </Mono>
+            </div>
+            {open && <SnapshotPositionsDetail positions={positions} />}
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
+function SnapshotPositionsDetail({ positions }: { positions: SnapshotPosition[] }) {
+  if (positions.length === 0) {
+    return (
+      <div style={{ padding: "12px 16px", borderBottom: `1px solid ${tokens.borderFaint}` }}>
+        <Mono size={11} color={tokens.textFaint}>
+          No positions captured in this snapshot.
+        </Mono>
+      </div>
+    );
+  }
+  return (
+    <div
+      style={{
+        padding: "12px 16px",
+        borderBottom: `1px solid ${tokens.borderFaint}`,
+        background: tokens.bg,
+      }}
+    >
+      <div className="flex flex-col gap-1">
+        {positions.map((p, i) => (
+          <div
+            key={i}
+            className="grid items-center"
+            style={{
+              gridTemplateColumns: "60px 1fr 1.6fr 1fr",
+              gap: 8,
+              padding: "4px 0",
+            }}
+          >
+            <Tag small color={p.kind === "spot" ? tokens.cyan : tokens.emerald}>
+              {p.kind}
+            </Tag>
+            <Mono size={11} color={tokens.text}>
+              {p.kind === "spot" ? p.asset : p.symbol}
+            </Mono>
+            <Mono size={10} color={tokens.textDim}>
+              {p.kind === "spot"
+                ? `total ${fmtAmount(p.total)} · free ${fmtAmount(p.free)}`
+                : `${p.tokens.length} tokens · base ${p.base}`}
+            </Mono>
+            <Mono size={10} color={tokens.textFaint}>
+              {p.usd_value !== null ? fmtUsd(p.usd_value) : "unpriced"}
+            </Mono>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

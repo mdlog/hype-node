@@ -11,3 +11,4 @@ export { Toggle } from "./Toggle";
 export { HypeGauge } from "./HypeGauge";
 export { ProjectLogo } from "./ProjectLogo";
 export { LogoSplash } from "./LogoSplash";
+export { SectionLabel } from "./SectionLabel";

@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Card, Mono, Tag } from "@/components/ui";
+import { StockLogo } from "@/components/ui/StockLogo";
 import { tokens } from "@/lib/tokens";
 import {
   listTreasuries,
@@ -206,6 +207,7 @@ function TreasuryRow({
       >
         <div className="flex items-center gap-2">
           {recent ? <PulseDot color={tokens.amber} /> : null}
+          <StockLogo ticker={row.ticker} name={row.name} size={20} />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: tokens.text }}>
             {row.name}
           </span>

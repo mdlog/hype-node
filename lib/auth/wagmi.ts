@@ -1,57 +1,47 @@
-import { getDefaultConfig } from "@rainbow-me/rainbowkit";
+// Wagmi config — wired through Privy's wagmi adapter so embedded wallets
+// (created on email / Google / Twitter login) and externally-injected
+// wallets (MetaMask, Rabby, WalletConnect) both surface through the same
+// wagmi hooks (`useAccount`, `useSignMessage`, `useWriteContract`, …).
+//
+// Migration note: previously this file used RainbowKit's `getDefaultConfig`
+// which bundled wallet UI + WalletConnect + transports in one call. Privy
+// provides the connect UI itself, so we use plain wagmi `createConfig`
+// (re-exported by `@privy-io/wagmi` so the connector list matches the
+// adapter) and explicit `http()` transports per chain.
+
+import { createConfig } from "@privy-io/wagmi";
+import { http } from "wagmi";
 import { mainnet, sepolia } from "wagmi/chains";
+
 import { valueChainMainnet, valueChainTestnet } from "@/lib/chains";
 
 export { valueChainMainnet, valueChainTestnet };
 
-const PLACEHOLDER_PROJECT_ID = "YOUR_WALLETCONNECT_PROJECT_ID";
-const projectId =
-  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? PLACEHOLDER_PROJECT_ID;
-
-// Globalthis memoization. Without this, Next.js dev HMR + React Strict Mode
-// + the route-group layout's <Providers> mounting twice causes
-// `getDefaultConfig` to fire on every re-import → registers a new
-// WalletConnect Core instance every time → "Init() called N times" warning
-// where N grows unboundedly across edits. Persisting on globalThis keeps the
-// SAME instance across HMR boundaries so re-imports reuse it.
-//
-// We also stash the projectId we built with so an env change after first
-// load forces a fresh config (instead of silently sticking with the stale
-// placeholder).
+// Globalthis memoization. Without this, Next.js dev HMR + React Strict
+// Mode + the route-group layout's <Providers> mounting twice causes
+// `createConfig` to fire on every re-import → registers a new wagmi
+// connector core every time. Persisting on globalThis keeps the SAME
+// instance across HMR boundaries so re-imports reuse it.
 type StashedConfig = {
-  projectId: string;
-  config: ReturnType<typeof getDefaultConfig>;
+  config: ReturnType<typeof buildConfig>;
 };
 const G = globalThis as unknown as { __hypeWagmi?: StashedConfig };
 
-function buildConfig(): ReturnType<typeof getDefaultConfig> {
-  if (
-    typeof window !== "undefined" &&
-    projectId === PLACEHOLDER_PROJECT_ID &&
-    !(globalThis as { __hypeWagmiWarned?: boolean }).__hypeWagmiWarned
-  ) {
-    // One-shot warning per page load. WalletConnect / Reown will return 403
-    // on every connector init with this placeholder id — surface it here so
-    // the developer knows the cause without having to grep the console.
-    (globalThis as { __hypeWagmiWarned?: boolean }).__hypeWagmiWarned = true;
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[wagmi] NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is still the placeholder " +
-        "value. WalletConnect / mobile pairing will not work; browser-injected " +
-        "wallets (MetaMask, Rabby) will still connect normally. " +
-        "Get a free project id at https://cloud.reown.com to silence the 403s.",
-    );
-  }
-  return getDefaultConfig({
-    appName: "HypeNode",
-    projectId,
+function buildConfig() {
+  return createConfig({
     chains: [mainnet, sepolia, valueChainMainnet, valueChainTestnet],
+    transports: {
+      [mainnet.id]: http(),
+      [sepolia.id]: http(),
+      [valueChainMainnet.id]: http(),
+      [valueChainTestnet.id]: http(),
+    },
     ssr: true,
   });
 }
 
-if (!G.__hypeWagmi || G.__hypeWagmi.projectId !== projectId) {
-  G.__hypeWagmi = { projectId, config: buildConfig() };
+if (!G.__hypeWagmi) {
+  G.__hypeWagmi = { config: buildConfig() };
 }
 
 // SSI publish lands on Sepolia by default (see contracts/SSIRegistry.sol +

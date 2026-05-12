@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { Card, Label, Metric, Mono, Tag, Btn, Spark, LineChart } from "@/components/ui";
+
+import { Card, Mono, Tag, Btn, Spark, LineChart, SectionLabel } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import {
   getSectorScores,
@@ -11,7 +12,6 @@ import {
   type SsiSnapshot,
   type IndexConstituent,
 } from "@/lib/api/sosovalue";
-import { DataSourceBanner } from "@/components/live/DataSourceBanner";
 import { MacroCalendar } from "@/components/dashboard/MacroCalendar";
 import { SmartMoneyWidget } from "@/components/dashboard/SmartMoneyWidget";
 import { StablecoinFlowWidget } from "@/components/dashboard/StablecoinFlowWidget";
@@ -19,8 +19,6 @@ import { SsiCompositeLogo } from "@/components/dashboard/SsiCompositeLogo";
 
 export const revalidate = 60;
 
-// Default focused ticker. Can be overridden via ?featured=ssiAI etc — the
-// chip strip below the KPI row swaps the URL on click.
 const DEFAULT_FEATURED = "ssiDePIN";
 
 const SSI_DISPLAY: Record<string, { name: string; symbol: string; tag: string }> = {
@@ -39,6 +37,24 @@ const SSI_DISPLAY: Record<string, { name: string; symbol: string; tag: string }>
   ssiNFT: { name: "NFT Index", symbol: "NFT", tag: "NFT" },
 };
 
+// Per-tag tint for the SSI table tag column. Falls back to cyan for tags
+// not in this map (matches the redesign palette).
+const TAG_COLOR: Record<string, string> = {
+  RWA: tokens.rose,
+  Meme: tokens.amber,
+  Macro: tokens.violet,
+  AI: tokens.violet,
+  DeFi: tokens.cyan,
+  DePIN: tokens.emerald,
+  L1: tokens.emerald,
+  L2: tokens.cyan,
+  NFT: tokens.amber,
+  PayFi: tokens.cyan,
+  CeFi: tokens.cyan,
+  Gaming: tokens.amber,
+  SocialFi: tokens.emerald,
+};
+
 function pct(n: number): string {
   return `${n >= 0 ? "+" : ""}${(n * 100).toFixed(2)}%`;
 }
@@ -49,13 +65,6 @@ function fmtPrice(n: number): string {
   if (n < 1) return `$${n.toFixed(4)}`;
   if (n < 100) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(2)}`;
-}
-
-function sectorColor(score: number): string {
-  if (score >= 75) return tokens.emerald;
-  if (score >= 60) return tokens.amber;
-  if (score >= 40) return tokens.textDim;
-  return tokens.red;
 }
 
 function fmtRelative(iso: string): string {
@@ -69,9 +78,6 @@ function fmtRelative(iso: string): string {
   return `${Math.round(h / 24)}d`;
 }
 
-// Period filter for the NAV chart. We always fetch the full 90-day window
-// from /klines (3-month cap is the upstream max anyway), then slice it
-// client-side per-period — that way switching periods costs zero requests.
 const PERIOD_DAYS: Record<string, number> = { "1D": 1, "1W": 7, "1M": 30, "3M": 90 };
 const PERIOD_LABELS = ["1D", "1W", "1M", "3M"] as const;
 
@@ -82,11 +88,6 @@ export default async function DashboardPage({
 }) {
   const periodKey = (searchParams?.period ?? "3M").toUpperCase();
   const periodDays = PERIOD_DAYS[periodKey] ?? 90;
-  // First fetch what's free / shared — sector spotlight + SSI registry +
-  // news. Then fan out across ALL 13 SSI tickers for snapshots so we can
-  // show every sector's 24h % side-by-side. The rate-limited transport
-  // serializes / dedups, and on the High Frequency tier 13 sequential
-  // calls cost ~9s cold and ~0s once cached.
   const [sectors, ssiTickers, news] = await Promise.all([
     getSectorScores(),
     listSsiTickers(),
@@ -97,10 +98,6 @@ export default async function DashboardPage({
     ssiTickers.map(async (t) => ({ ticker: t, snap: await getSsiSnapshot(t) })),
   );
 
-  // Pick which SSI ticker the chart + headline KPIs focus on. Priority:
-  //   1. ?featured= URL param if it's a known ticker
-  //   2. Top performer by 24h change
-  //   3. DEFAULT_FEATURED fallback
   const requested = searchParams?.featured;
   const known = new Set(ssiTickers);
   const sortedByChange = [...allSnaps].sort(
@@ -108,12 +105,8 @@ export default async function DashboardPage({
   );
   const topSsi = sortedByChange[0]?.ticker;
   const FEATURED =
-    requested && known.has(requested)
-      ? requested
-      : topSsi ?? DEFAULT_FEATURED;
+    requested && known.has(requested) ? requested : topSsi ?? DEFAULT_FEATURED;
 
-  // Per-featured calls. Constituents and klines aren't pre-fetched in the
-  // big snapshot fan-out because we only need them for the focused index.
   const [featuredKlines, featuredCons] = await Promise.all([
     getSsiKlines(FEATURED, { limit: 90 }),
     getSsiConstituents(FEATURED),
@@ -122,15 +115,9 @@ export default async function DashboardPage({
     allSnaps.find((s) => s.ticker === FEATURED)?.snap ??
     (await getSsiSnapshot(FEATURED));
 
-  const sectorsLive = sectors.length > 8;
-  const ssiLive = ssiTickers.length >= 13;
   const featuredLive = featuredSnap.price !== 1.182 || featuredKlines.length !== 90;
   const newsLive = news.length > 0;
 
-  const sectorsRanked = [...sectors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  const topSector = sectorsRanked[0];
-
-  // Aggregate stats across ALL 13 SSI — not just DePIN. Real numbers.
   const validChanges = allSnaps
     .map((s) => s.snap.change_pct_24h)
     .filter((n) => Number.isFinite(n));
@@ -140,12 +127,15 @@ export default async function DashboardPage({
       : 0;
   const positiveCount = validChanges.filter((n) => n > 0).length;
 
-  // Slice klines to the selected window. -periodDays takes the last N rows;
-  // -1 (1D) gives a degenerate 1-point series we still render but mostly
-  // useful as a visual confirmation of "you picked 1D".
   const slicedKlines = featuredKlines.slice(-periodDays);
   const navData = slicedKlines.map((k) => k.close);
   const benchSnap = slicedKlines.map((k) => (k.high + k.low) / 2);
+  // First-vs-last delta over the selected period — matches the headline
+  // "▲ +20.64% · 3M" pattern in the redesign instead of always showing 24h.
+  const periodDelta =
+    navData.length >= 2 && navData[0] !== 0
+      ? navData[navData.length - 1] / navData[0] - 1
+      : featuredSnap.change_pct_24h;
 
   const featured = SSI_DISPLAY[FEATURED] ?? { name: FEATURED, symbol: FEATURED, tag: "—" };
   const top = sortedByChange[0];
@@ -158,37 +148,41 @@ export default async function DashboardPage({
       k: `${featured.symbol} · NAV`,
       v: fmtPrice(featuredSnap.price),
       d: pct(featuredSnap.change_pct_24h),
-      c: featuredSnap.change_pct_24h >= 0 ? tokens.emerald : tokens.red,
+      arrow: featuredSnap.change_pct_24h >= 0 ? "▲" : "▼",
+      c: featuredSnap.change_pct_24h >= 0 ? tokens.emerald : tokens.rose,
       data: navData.slice(-30),
+      accent: true,
     },
     {
-      k: "TOP SSI (24H)",
+      k: "Top SSI (24h)",
       v: topDisplay?.symbol ?? top?.ticker ?? "—",
       d: pct(top?.snap.change_pct_24h ?? 0),
-      c: (top?.snap.change_pct_24h ?? 0) >= 0 ? tokens.emerald : tokens.red,
+      arrow: (top?.snap.change_pct_24h ?? 0) >= 0 ? "▲" : "▼",
+      c: (top?.snap.change_pct_24h ?? 0) >= 0 ? tokens.emerald : tokens.rose,
       data: null as number[] | null,
+      accent: false,
     },
     {
-      k: "WORST SSI (24H)",
+      k: "Worst SSI (24h)",
       v: worstDisplay?.symbol ?? worst?.ticker ?? "—",
       d: pct(worst?.snap.change_pct_24h ?? 0),
-      c: (worst?.snap.change_pct_24h ?? 0) >= 0 ? tokens.emerald : tokens.red,
+      arrow: (worst?.snap.change_pct_24h ?? 0) >= 0 ? "▲" : "▼",
+      c: (worst?.snap.change_pct_24h ?? 0) >= 0 ? tokens.emerald : tokens.rose,
       data: null as number[] | null,
+      accent: false,
     },
     {
-      k: "AVG · POSITIVE",
-      v: `${pct(avg24h)} · ${positiveCount}/${allSnaps.length}`,
-      d: `top sector ${topSector?.sector ?? "—"} Δ${topSector?.delta ?? 0}`,
-      c: avg24h >= 0 ? tokens.emerald : tokens.red,
+      k: "Avg · positive",
+      v: pct(avg24h),
+      d: `${positiveCount} of ${allSnaps.length} indices ▲`,
+      arrow: "",
+      c: avg24h >= 0 ? tokens.emerald : tokens.rose,
       data: null as number[] | null,
+      accent: false,
     },
   ];
 
   const visibleTickers = ssiTickers.slice(0, 8);
-  // Fetch top constituents for each visible SSI in parallel — we need the
-  // top-3 token symbols to render the composite logo (stacked-avatar style).
-  // Each call is cached server-side (15min TTL by default), so warm renders
-  // skip the network entirely.
   const constituentsByTicker = await Promise.all(
     visibleTickers.map(async (t) => {
       try {
@@ -208,140 +202,176 @@ export default async function DashboardPage({
   }
   const indices = visibleTickers.map((t) => {
     const display = SSI_DISPLAY[t] ?? { name: t, symbol: t.slice(3, 7).toUpperCase(), tag: "—" };
-    return { ticker: t, ...display, symbols: symbolsByTicker[t] ?? [] };
+    const change = allSnaps.find((s) => s.ticker === t)?.snap.change_pct_24h ?? 0;
+    return { ticker: t, ...display, symbols: symbolsByTicker[t] ?? [], change };
   });
 
+  // UTC clock at last revalidation — surfaces page freshness in the
+  // section label without needing a client effect.
+  const clock = `${new Date().toISOString().slice(11, 16)} UTC`;
+
   return (
-    <div className="px-6 py-5 flex flex-col gap-4">
-      <div className="flex justify-between items-end">
+    <div style={{ padding: "24px 28px 60px" }}>
+      {/* ---------- header ---------- */}
+      <header
+        className="flex items-end justify-between"
+        style={{ marginBottom: 22 }}
+      >
         <div>
-          <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>
+          <h1
+            style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em", color: tokens.text }}
+          >
             Command Center
-          </div>
-          <Mono size={11}>
-            {ssiTickers.length} SoSoValue indices · {sectors.length} sectors · featured{" "}
+          </h1>
+          <Mono size={12} color={tokens.textDim} style={{ marginTop: 4, display: "block" }}>
+            {ssiTickers.length} SoSoValue indices · {sectors.length} sectors · featured:{" "}
             <span style={{ color: tokens.emerald }}>{featured.name}</span>
           </Mono>
         </div>
         <div className="flex gap-2">
-          <Btn small>Pause agent</Btn>
+          <Btn small>⏸ Pause agent</Btn>
           <Btn small primary icon={<span style={{ fontSize: 14 }}>+</span>}>
             New index
           </Btn>
         </div>
-      </div>
+      </header>
 
-      <DataSourceBanner
-        sources={[
-          {
-            label: "Sector spotlight",
-            state: sectorsLive ? "live" : "mock",
-            detail: sectorsLive
-              ? `${sectors.length} sectors · GET /currencies/sector-spotlight`
-              : "synthetic — quota exhausted",
-          },
-          {
-            label: "SSI registry",
-            state: ssiLive ? "live" : "mock",
-            detail: ssiLive ? `${ssiTickers.length} indices · GET /indices` : "fallback",
-          },
-          {
-            label: `${featured.symbol} snapshot`,
-            state: featuredLive ? "live" : "mock",
-            detail: featuredLive
-              ? `GET /indices/${FEATURED}/market-snapshot + /klines`
-              : "synthetic shape",
-          },
-          {
-            label: "News feed",
-            state: newsLive ? "live" : "mock",
-            detail: newsLive ? `${news.length} articles · GET /news` : "synthetic",
-          },
-        ]}
-      />
-
-      <div className="grid grid-cols-4 gap-3">
+      {/* ---------- snapshot KPI row ---------- */}
+      <SectionLabel meta={`SoSoValue · ${clock}`}>Snapshot</SectionLabel>
+      <div
+        className="grid"
+        style={{ gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 22 }}
+      >
         {kpis.map((c, i) => (
-          <Card key={i} pad={14}>
-            <div className="flex justify-between items-start">
-              <div>
-                <Label>{c.k}</Label>
-                <Metric v={c.v} size={28} style={{ marginTop: 8 }} />
+          <Card
+            key={i}
+            pad={14}
+            style={
+              c.accent
+                ? {
+                    borderColor: `${tokens.emerald}48`,
+                    background: `linear-gradient(180deg, ${tokens.emerald}0a, ${tokens.bgElev})`,
+                  }
+                : undefined
+            }
+          >
+            <div className="flex justify-between items-start" style={{ position: "relative" }}>
+              <div style={{ minWidth: 0 }}>
+                <Mono
+                  size={9.5}
+                  color={tokens.textFaint}
+                  style={{ letterSpacing: "0.14em", textTransform: "uppercase" }}
+                >
+                  {c.k}
+                </Mono>
+                <div
+                  className="font-mono tabular"
+                  style={{
+                    fontSize: 26,
+                    fontWeight: 700,
+                    letterSpacing: "-0.02em",
+                    marginTop: 6,
+                    color: tokens.text,
+                  }}
+                >
+                  {c.v}
+                </div>
                 <Mono size={11} color={c.c} style={{ marginTop: 4, display: "block" }}>
+                  {c.arrow ? `${c.arrow} ` : ""}
                   {c.d}
                 </Mono>
               </div>
-              {c.data && c.data.length > 0 && <Spark data={c.data} w={70} h={36} color={c.c} />}
+              {c.data && c.data.length > 0 ? (
+                <div style={{ position: "absolute", right: 0, top: 0 }}>
+                  <Spark data={c.data} w={80} h={30} color={c.c} />
+                </div>
+              ) : null}
             </div>
           </Card>
         ))}
       </div>
 
-      {/* SSI selector — every index, real 24h % from /market-snapshot.
-          Click to refocus the chart + featured KPI. */}
-      <Card pad={12}>
-        <div className="flex justify-between items-center mb-2">
-          <Mono size={9} color={tokens.textFaint}>
-            SECTORS · click to feature on chart
-          </Mono>
-          <Mono size={10} color={tokens.textFaint}>
-            13 SSI · sorted by 24h
-          </Mono>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {sortedByChange.map(({ ticker, snap }) => {
-            const d = SSI_DISPLAY[ticker] ?? { symbol: ticker.slice(3, 7).toUpperCase() };
-            const change = snap.change_pct_24h ?? 0;
-            const isFeatured = ticker === FEATURED;
-            const c =
-              change >= 0.02
-                ? tokens.emerald
-                : change >= -0.02
-                  ? tokens.textDim
-                  : tokens.red;
-            return (
-              <Link
-                key={ticker}
-                href={`/dashboard?featured=${ticker}`}
+      {/* ---------- sector rail ---------- */}
+      <SectionLabel meta="click a chip to feature">Sectors</SectionLabel>
+      <div
+        className="grid"
+        style={{
+          gridTemplateColumns: `repeat(${Math.max(sortedByChange.length, 1)}, minmax(0, 1fr))`,
+          gap: 6,
+          marginBottom: 22,
+        }}
+      >
+        {sortedByChange.map(({ ticker, snap }) => {
+          const d = SSI_DISPLAY[ticker] ?? { symbol: ticker.slice(3, 7).toUpperCase() };
+          const change = snap.change_pct_24h ?? 0;
+          const isFeatured = ticker === FEATURED;
+          const c = change > 0 ? tokens.emerald : change < 0 ? tokens.rose : tokens.textDim;
+          return (
+            <Link
+              key={ticker}
+              href={`/dashboard?featured=${ticker}${periodKey !== "3M" ? `&period=${periodKey}` : ""}`}
+              style={{
+                background: isFeatured ? `${tokens.emerald}14` : tokens.bgElev2,
+                border: `1px solid ${isFeatured ? tokens.emerald : tokens.border}`,
+                borderRadius: 6,
+                padding: "8px 10px",
+                textDecoration: "none",
+                display: "block",
+                minWidth: 0,
+              }}
+            >
+              <div
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "5px 9px",
-                  borderRadius: 6,
-                  background: isFeatured ? `${c}18` : tokens.bgElev2,
-                  border: `1px solid ${isFeatured ? c : tokens.border}`,
-                  textDecoration: "none",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: tokens.text,
+                  letterSpacing: "-0.005em",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
                 }}
               >
-                <Mono size={10} color={isFeatured ? tokens.text : tokens.textDim}>
-                  {d.symbol}
-                </Mono>
-                <Mono size={10} color={c}>
-                  {change >= 0 ? "+" : ""}
-                  {(change * 100).toFixed(2)}%
-                </Mono>
-              </Link>
-            );
-          })}
-        </div>
-      </Card>
-
-      <div className="grid gap-3" style={{ gridTemplateColumns: "1.5fr 1fr" }}>
-        <Card pad={16}>
-          <div className="flex justify-between mb-3">
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>
-                {featured.name} · NAV ({periodKey})
+                {d.symbol}
               </div>
-              <Mono size={10}>
-                SoSoValue · GET /indices/{FEATURED}/klines{featuredLive ? "" : " · synthetic"}
+              <Mono size={10.5} color={c} style={{ marginTop: 2, display: "block" }}>
+                {change >= 0 ? "+" : ""}
+                {(change * 100).toFixed(2)}%
+              </Mono>
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* ---------- chart + news ---------- */}
+      <div
+        className="grid gap-4"
+        style={{ gridTemplateColumns: "2fr 1fr", marginBottom: 22 }}
+      >
+        <Card pad={0}>
+          <div
+            className="flex justify-between items-center"
+            style={{ padding: "14px 16px", borderBottom: `1px solid ${tokens.border}` }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: tokens.text }}>
+                {featured.name} · NAV
+              </div>
+              <Mono size={10.5} color={tokens.textFaint} style={{ marginTop: 2, display: "block" }}>
+                SoSoValue · GET /indices/{FEATURED}/closes{featuredLive ? "" : " · synthetic"}
               </Mono>
             </div>
-            <div className="flex gap-1">
+            <div
+              className="flex"
+              style={{
+                gap: 2,
+                padding: 3,
+                background: tokens.bgElev2,
+                border: `1px solid ${tokens.border}`,
+                borderRadius: 6,
+              }}
+            >
               {PERIOD_LABELS.map((t) => {
                 const on = t === periodKey;
-                // Preserve the current ?featured= when switching period.
                 const params = new URLSearchParams();
                 params.set("period", t);
                 if (FEATURED && FEATURED !== DEFAULT_FEATURED) params.set("featured", FEATURED);
@@ -353,12 +383,12 @@ export default async function DashboardPage({
                     style={{
                       padding: "4px 10px",
                       borderRadius: 4,
-                      background: on ? tokens.bgElev2 : "transparent",
-                      border: `1px solid ${on ? tokens.borderStrong : "transparent"}`,
+                      background: on ? tokens.bg : "transparent",
                       fontFamily: "JetBrains Mono, monospace",
-                      fontSize: 10,
+                      fontSize: 10.5,
                       color: on ? tokens.text : tokens.textDim,
                       textDecoration: "none",
+                      fontWeight: on ? 600 : 400,
                     }}
                   >
                     {t}
@@ -367,55 +397,288 @@ export default async function DashboardPage({
               })}
             </div>
           </div>
-          {navData.length > 0 ? (
-            <LineChart
-              w={780}
-              h={240}
-              series={[
-                { data: navData, color: tokens.emerald, thick: true, fill: true },
-                { data: benchSnap, color: tokens.textDim, dashed: true },
-              ]}
-            />
-          ) : (
-            // SoSoValue's /indices/{ticker}/klines returns an empty array on
-            // the live API (verified 2026-05-01) — likely a server-side data
-            // gap, not a client bug. Show an honest placeholder instead of an
-            // empty axis-only chart so the page reads as "no data" not "broken".
-            <div
-              className="flex items-center justify-center text-center"
-              style={{
-                height: 240,
-                background: tokens.bgElev2,
-                border: `1px dashed ${tokens.border}`,
-                borderRadius: 8,
-                color: tokens.textFaint,
-              }}
-            >
-              <div className="flex flex-col items-center gap-2">
-                <Mono size={11}>No klines from SoSoValue for {FEATURED}</Mono>
-                <Mono size={9} color={tokens.textFaint}>
-                  upstream returned 0 candles · current snapshot price{" "}
-                  {fmtPrice(featuredSnap.price)} · {featuredCons.length} constituents
-                </Mono>
+
+          <div
+            className="flex justify-between items-end"
+            style={{ padding: "14px 16px 6px" }}
+          >
+            <div>
+              <div
+                className="font-mono tabular"
+                style={{
+                  fontSize: 28,
+                  fontWeight: 700,
+                  letterSpacing: "-0.02em",
+                  color: tokens.text,
+                }}
+              >
+                {fmtPrice(featuredSnap.price)}
               </div>
-            </div>
-          )}
-          <div className="flex gap-4 mt-2">
-            <div className="flex items-center gap-1.5">
-              <div style={{ width: 12, height: 2, background: tokens.emerald }} />
-              <Mono size={10} color={tokens.text}>
-                {featured.symbol} close
+              <Mono
+                size={12}
+                color={periodDelta >= 0 ? tokens.emerald : tokens.rose}
+                style={{ marginTop: 2, display: "block" }}
+              >
+                {periodDelta >= 0 ? "▲" : "▼"} {pct(periodDelta)} · {periodKey}
               </Mono>
             </div>
-            <div className="flex items-center gap-1.5">
-              <div style={{ width: 12, height: 2, background: tokens.textDim }} />
-              <Mono size={10}>{featured.symbol} mid (high+low)/2</Mono>
-            </div>
-            <div className="flex-1" />
             <Mono size={10} color={tokens.textFaint}>
               {featuredCons.length} constituents
             </Mono>
           </div>
+
+          <div style={{ padding: "0 16px 16px" }}>
+            {navData.length > 0 ? (
+              <LineChart
+                w={780}
+                h={240}
+                series={[
+                  { data: navData, color: tokens.emerald, thick: true, fill: true },
+                  { data: benchSnap, color: tokens.textDim, dashed: true },
+                ]}
+              />
+            ) : (
+              <div
+                className="flex items-center justify-center text-center"
+                style={{
+                  height: 240,
+                  background: tokens.bgElev2,
+                  border: `1px dashed ${tokens.border}`,
+                  borderRadius: 8,
+                  color: tokens.textFaint,
+                }}
+              >
+                <div className="flex flex-col items-center gap-2">
+                  <Mono size={11}>No klines from SoSoValue for {FEATURED}</Mono>
+                  <Mono size={9} color={tokens.textFaint}>
+                    upstream returned 0 candles · current snapshot price {fmtPrice(featuredSnap.price)}
+                  </Mono>
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+
+        {/* ---- News stream ---- */}
+        <Card pad={0}>
+          <div
+            className="flex justify-between items-center"
+            style={{ padding: "14px 16px", borderBottom: `1px solid ${tokens.border}` }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600, color: tokens.text }}>News stream</div>
+            <Tag small color={newsLive ? tokens.emerald : tokens.textFaint} dot>
+              {newsLive ? "live" : "no data"}
+            </Tag>
+          </div>
+          {news.length === 0 ? (
+            <div
+              className="flex items-center justify-center text-center"
+              style={{ height: 280, padding: 16, color: tokens.textFaint }}
+            >
+              <div className="flex flex-col items-center gap-2" style={{ maxWidth: 240 }}>
+                <Mono size={11}>No news right now</Mono>
+                <Mono size={9} color={tokens.textFaint}>
+                  upstream returned 0 articles · feed populates from SoSoValue when available
+                </Mono>
+              </div>
+            </div>
+          ) : (
+            <div style={{ maxHeight: 360, overflowY: "auto" }}>
+              {news.map((n, i) => {
+                const tint =
+                  n.importance === "high"
+                    ? { bg: `${tokens.amber}20`, fg: tokens.amber }
+                    : n.importance === "med"
+                      ? { bg: `${tokens.cyan}20`, fg: tokens.cyan }
+                      : { bg: `${tokens.violet}20`, fg: tokens.violet };
+                return (
+                  <div
+                    key={i}
+                    className="grid items-start"
+                    style={{
+                      gridTemplateColumns: "36px 86px 1fr",
+                      gap: 10,
+                      padding: "12px 16px",
+                      borderBottom:
+                        i === news.length - 1 ? "none" : `1px solid ${tokens.border}`,
+                    }}
+                  >
+                    <Mono size={10.5} color={tokens.textFaint} style={{ paddingTop: 2 }}>
+                      {fmtRelative(n.ts)}
+                    </Mono>
+                    <span
+                      className="font-mono"
+                      style={{
+                        fontSize: 9,
+                        letterSpacing: "0.1em",
+                        padding: "3px 6px",
+                        borderRadius: 3,
+                        textAlign: "center",
+                        height: "fit-content",
+                        background: tint.bg,
+                        color: tint.fg,
+                        textTransform: "uppercase",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {(n.sector || "—").slice(0, 9)}
+                    </span>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, lineHeight: 1.5, color: tokens.text }}>
+                        {n.title}
+                      </div>
+                      <Mono
+                        size={10.5}
+                        color={tokens.textFaint}
+                        style={{ marginTop: 3, display: "block" }}
+                      >
+                        {n.source} · score {n.sentiment >= 0 ? "+" : ""}
+                        {n.sentiment}
+                      </Mono>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* ---------- SSI table + Sector sentiment ---------- */}
+      <div
+        className="grid gap-4"
+        style={{ gridTemplateColumns: "2fr 1fr", marginBottom: 22 }}
+      >
+        <Card pad={0}>
+          <div
+            className="flex justify-between items-center"
+            style={{ padding: "14px 16px", borderBottom: `1px solid ${tokens.border}` }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600, color: tokens.text }}>SSI indices</div>
+            <Mono size={10.5} color={tokens.textFaint}>
+              SoSoValue · GET /indices · {ssiTickers.length} entries
+            </Mono>
+          </div>
+          <div
+            className="grid"
+            style={{
+              gridTemplateColumns: "2fr 0.7fr 1fr 0.8fr 0.6fr",
+              padding: "10px 14px",
+              gap: 8,
+              borderBottom: `1px solid ${tokens.border}`,
+            }}
+          >
+            {["Name", "Ticker", "Tag", "24h", ""].map((k, idx) => (
+              <Mono
+                key={k + idx}
+                size={9.5}
+                color={tokens.textFaint}
+                style={{
+                  letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  textAlign: idx === 3 ? "right" : "left",
+                }}
+              >
+                {k}
+              </Mono>
+            ))}
+          </div>
+          {indices.map((r, idx) => {
+            const tagColor = TAG_COLOR[r.tag] ?? tokens.cyan;
+            const isFeatured = r.ticker === FEATURED;
+            const change = r.change;
+            return (
+              <Link
+                key={r.ticker}
+                href={`/dashboard?featured=${r.ticker}${periodKey !== "3M" ? `&period=${periodKey}` : ""}`}
+                className="grid items-center"
+                style={{
+                  gridTemplateColumns: "2fr 0.7fr 1fr 0.8fr 0.6fr",
+                  padding: "12px 14px",
+                  gap: 8,
+                  borderBottom:
+                    idx === indices.length - 1 ? "none" : `1px solid ${tokens.border}`,
+                  textDecoration: "none",
+                  background: isFeatured ? `${tokens.emerald}06` : "transparent",
+                }}
+              >
+                <div className="flex items-center gap-2.5" style={{ minWidth: 0 }}>
+                  {r.symbols.length > 0 ? (
+                    <SsiCompositeLogo symbols={r.symbols} size={28} />
+                  ) : (
+                    <div
+                      className="flex items-center justify-center font-mono"
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 6,
+                        background: tokens.bgElev2,
+                        border: `1px solid ${tokens.border}`,
+                        fontSize: 9.5,
+                        color: tokens.textDim,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {r.symbol.slice(0, 4)}
+                    </div>
+                  )}
+                  <div style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        color: tokens.text,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {r.name}
+                    </div>
+                    <Mono size={10} color={tokens.textDim}>
+                      {r.ticker}
+                    </Mono>
+                  </div>
+                </div>
+                <Mono size={11} color={tokens.text}>
+                  {r.symbol}
+                </Mono>
+                <span
+                  className="font-mono"
+                  style={{
+                    fontSize: 9.5,
+                    letterSpacing: "0.1em",
+                    padding: "3px 7px",
+                    borderRadius: 3,
+                    textTransform: "uppercase",
+                    background: `${tagColor}1a`,
+                    color: tagColor,
+                    border: `1px solid ${tagColor}40`,
+                    width: "fit-content",
+                  }}
+                >
+                  {r.tag}
+                </span>
+                <Mono
+                  size={11.5}
+                  color={change > 0 ? tokens.emerald : change < 0 ? tokens.rose : tokens.textDim}
+                  style={{ textAlign: "right" }}
+                >
+                  {change >= 0 ? "+" : ""}
+                  {(change * 100).toFixed(2)}%
+                </Mono>
+                <Mono
+                  size={10}
+                  color={isFeatured ? tokens.emerald : tokens.textFaint}
+                  style={{ textAlign: "right" }}
+                >
+                  {isFeatured ? "● featured" : "→"}
+                </Mono>
+              </Link>
+            );
+          })}
         </Card>
 
         <Card pad={0}>
@@ -423,181 +686,65 @@ export default async function DashboardPage({
             className="flex justify-between items-center"
             style={{ padding: "14px 16px", borderBottom: `1px solid ${tokens.border}` }}
           >
-            <div style={{ fontSize: 14, fontWeight: 600 }}>News stream</div>
-            <Tag small color={newsLive ? tokens.emerald : tokens.textFaint} dot>
-              {newsLive ? "live · /news" : "no data"}
+            <div style={{ fontSize: 13, fontWeight: 600, color: tokens.text }}>
+              Sector sentiment
+            </div>
+            <Tag small color={tokens.emerald} dot>
+              live
             </Tag>
-          </div>
-          {news.length === 0 ? (
-            // Honest empty state. The synthetic news fallback in
-            // lib/api/sosovalue.ts is now an empty list, so this branch
-            // fires whenever SoSoValue is unavailable / rate-limited /
-            // returns no articles — instead of fake titles like the old
-            // "Filecoin storage demand jumps 38% QoQ" placeholder.
-            <div
-              className="flex items-center justify-center text-center"
-              style={{
-                height: 240,
-                padding: 16,
-                color: tokens.textFaint,
-              }}
-            >
-              <div className="flex flex-col items-center gap-2" style={{ maxWidth: 240 }}>
-                <Mono size={11}>No news from /news right now</Mono>
-                <Mono size={9} color={tokens.textFaint}>
-                  upstream returned 0 articles · headlines populate from the
-                  live SoSoValue feed when available
-                </Mono>
-              </div>
-            </div>
-          ) : (
-            <div style={{ padding: "6px 0", overflowY: "auto", maxHeight: 290 }}>
-              {news.map((n, i) => (
-                <div
-                  key={i}
-                  className="flex gap-2.5 items-start"
-                  style={{ padding: "8px 16px", borderBottom: `1px solid ${tokens.borderFaint}` }}
-                >
-                  <Mono size={10} color={tokens.textFaint} style={{ minWidth: 30, paddingTop: 2 }}>
-                    {fmtRelative(n.ts)}
-                  </Mono>
-                  <Tag
-                    small
-                    color={
-                      n.importance === "high"
-                        ? tokens.red
-                        : n.importance === "med"
-                          ? tokens.amber
-                          : tokens.textDim
-                    }
-                    style={{ minWidth: 40, justifyContent: "center" }}
-                  >
-                    {n.sector || "—"}
-                  </Tag>
-                  <div className="flex-1">
-                    <div
-                      style={{ fontSize: 12, color: tokens.text, fontWeight: 500, lineHeight: 1.4 }}
-                    >
-                      {n.title}
-                    </div>
-                    <Mono size={10}>
-                      {n.source} · score {n.sentiment >= 0 ? "+" : ""}
-                      {n.sentiment}
-                    </Mono>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <div className="grid gap-3" style={{ gridTemplateColumns: "1.5fr 1fr" }}>
-        <Card pad={0}>
-          <div
-            className="flex justify-between items-center"
-            style={{ padding: "12px 16px", borderBottom: `1px solid ${tokens.border}` }}
-          >
-            <div style={{ fontSize: 14, fontWeight: 600 }}>SSI indices</div>
-            <Mono size={10}>SoSoValue · GET /indices</Mono>
           </div>
           <div
             className="grid"
             style={{
-              gridTemplateColumns: "2fr 1fr 1fr 0.6fr",
-              padding: "8px 16px",
+              gridTemplateColumns: "repeat(4, 1fr)",
               gap: 8,
-              borderBottom: `1px solid ${tokens.borderFaint}`,
+              padding: "14px 16px",
             }}
           >
-            {["NAME", "TICKER", "TAG", ""].map((k) => (
-              <Label key={k}>{k}</Label>
-            ))}
-          </div>
-          {indices.map((r) => (
-            <div
-              key={r.ticker}
-              className="grid items-center"
-              style={{
-                gridTemplateColumns: "2fr 1fr 1fr 0.6fr",
-                padding: "11px 16px",
-                gap: 8,
-                borderBottom: `1px solid ${tokens.borderFaint}`,
-              }}
-            >
-              <div className="flex items-center gap-2.5">
-                {r.symbols.length > 0 ? (
-                  <SsiCompositeLogo symbols={r.symbols} size={28} />
-                ) : (
-                  <div
-                    className="flex items-center justify-center font-mono"
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: 6,
-                      background: tokens.bgElev2,
-                      border: `1px solid ${tokens.border}`,
-                      fontSize: 9.5,
-                      color: tokens.textDim,
-                      fontWeight: 600,
-                    }}
-                  >
-                    {r.symbol.slice(0, 4)}
-                  </div>
-                )}
-                <div>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: tokens.text }}>{r.name}</div>
-                  <Mono size={9.5}>{r.ticker}</Mono>
-                </div>
-              </div>
-              <Mono size={11} color={tokens.text}>
-                {r.symbol}
-              </Mono>
-              <Tag small color={tokens.cyan}>
-                {r.tag}
-              </Tag>
-              <Mono size={11} color={r.ticker === FEATURED ? tokens.emerald : tokens.textFaint}>
-                {r.ticker === FEATURED ? "● featured" : "→"}
-              </Mono>
-            </div>
-          ))}
-        </Card>
-
-        <Card pad={16}>
-          <div className="flex justify-between mb-3">
-            <div style={{ fontSize: 14, fontWeight: 600 }}>Sector sentiment</div>
-            <Mono size={10} color={sectorsLive ? tokens.emerald : tokens.amber}>
-              {sectorsLive ? "live" : "fallback"}
-            </Mono>
-          </div>
-          <div className="grid grid-cols-4 gap-1.5">
             {sectors.slice(0, 8).map((s, i) => {
-              const c = sectorColor(s.score);
+              const c =
+                s.delta > 0 ? tokens.emerald : s.delta < 0 ? tokens.rose : tokens.textDim;
+              const pctBar = Math.min(100, Math.max(5, Math.abs(s.delta) * 10));
               return (
                 <div
                   key={i}
                   style={{
-                    padding: "10px 10px",
-                    background: `${c}10`,
-                    border: `1px solid ${c}30`,
-                    borderRadius: 6,
+                    background: tokens.bgElev2,
+                    border: `1px solid ${tokens.border}`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
                   }}
                 >
-                  <Mono size={9.5} color={tokens.textDim}>
+                  <Mono
+                    size={9}
+                    color={tokens.textFaint}
+                    style={{ letterSpacing: "0.12em", textTransform: "uppercase" }}
+                  >
                     {s.sector}
                   </Mono>
                   <div
-                    className="tabular"
+                    className="font-mono"
                     style={{
-                      fontSize: 20,
-                      fontWeight: 600,
+                      fontSize: 22,
+                      fontWeight: 700,
+                      marginTop: 4,
                       color: c,
                       letterSpacing: "-0.02em",
-                      marginTop: 2,
                     }}
                   >
                     {s.delta >= 0 ? "+" : ""}
                     {s.delta}
+                  </div>
+                  <div
+                    style={{
+                      height: 3,
+                      background: tokens.border,
+                      borderRadius: 2,
+                      marginTop: 8,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div style={{ height: "100%", width: `${pctBar}%`, background: c }} />
                   </div>
                 </div>
               );
@@ -606,7 +753,12 @@ export default async function DashboardPage({
         </Card>
       </div>
 
-      <MacroCalendar />
+      {/* ---------- macro calendar ---------- */}
+      <div style={{ marginBottom: 22 }}>
+        <MacroCalendar />
+      </div>
+
+      {/* ---------- Smart Money + Stablecoin ---------- */}
       <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 1fr" }}>
         <SmartMoneyWidget />
         <StablecoinFlowWidget />

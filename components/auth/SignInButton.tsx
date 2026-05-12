@@ -1,10 +1,19 @@
 "use client";
 
-import { ConnectButton } from "@rainbow-me/rainbowkit";
+// Sign-in entry point. Privy owns the connect modal (email / Google /
+// Twitter / wallet); once the user is authenticated and a wallet address
+// is available via wagmi, we run the existing SIWE → /api/auth/verify
+// flow to set the iron-session cookie. The on-chain code elsewhere
+// (PublishActions, builder write calls) keeps using wagmi hooks
+// unchanged because Privy bridges the embedded / external wallet into
+// the wagmi connector list.
+
+import { usePrivy, useWallets } from "@privy-io/react-auth";
+import { useSetActiveWallet } from "@privy-io/wagmi";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SiweMessage } from "siwe";
-import { useAccount, useDisconnect, useSignMessage } from "wagmi";
+import { useAccount, useSignMessage } from "wagmi";
 
 type Props = {
   // CSS class applied to the outer button when not connected. Lets us reuse
@@ -26,19 +35,46 @@ export function SignInButton({
   label = "Get access →",
 }: Props) {
   const router = useRouter();
-  const { address, chainId, isConnected } = useAccount();
+  const { ready, authenticated, login, logout } = usePrivy();
+  const { wallets } = useWallets();
+  const { setActiveWallet } = useSetActiveWallet();
+  const { address, chainId, isConnected, connector } = useAccount();
   const { signMessageAsync } = useSignMessage();
-  const { disconnect } = useDisconnect();
+
+  // Once Privy is authenticated, prefer the embedded wallet as the wagmi
+  // active connector. Without this, if the user has MetaMask installed AND
+  // logs in via Gmail / email / X, wagmi will keep MetaMask as the active
+  // connector — so `useSignMessage` would dispatch the SIWE prompt to
+  // MetaMask instead of the freshly-created embedded wallet, and the app
+  // would end up signed-in as the MetaMask address.
+  //
+  // We only force the switch when the user has an embedded wallet that
+  // isn't already the active connector. Pure-wallet logins (MetaMask /
+  // Rabby) skip this because `createOnLogin: "users-without-wallets"`
+  // never gives them an embedded wallet.
+  useEffect(() => {
+    if (!ready || !authenticated) return;
+    const embedded = wallets.find((w) => w.walletClientType === "privy");
+    if (!embedded) return;
+    // Already active? Nothing to do. wagmi's connector id for Privy
+    // embedded wallets is "io.privy.wallet" — match on that OR on the
+    // address matching the embedded wallet to be resilient to renames.
+    const activeIsEmbedded =
+      connector?.id === "io.privy.wallet" ||
+      address?.toLowerCase() === embedded.address.toLowerCase();
+    if (activeIsEmbedded) return;
+    void setActiveWallet(embedded);
+  }, [ready, authenticated, wallets, connector?.id, address, setActiveWallet]);
 
   const [status, setStatus] = useState<Status>("idle");
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Per-address attempt guard. Auto-triggering signIn() on the connect
-  // event is the obvious UX win, but a naive `useEffect([isConnected,
-  // address])` re-fires on every status change too — which means after a
-  // failed verify (status → "error"), the effect re-runs, fetches a new
-  // nonce (overwriting the session.nonce), and races the next signMessage
+  // Per-address attempt guard. Auto-triggering signIn() on connect is the
+  // obvious UX win, but a naive `useEffect([isConnected, address])`
+  // re-fires on every status change too — which means after a failed
+  // verify (status → "error"), the effect re-runs, fetches a new nonce
+  // (overwriting the session.nonce), and races the next signMessage
   // → 401 forever. The fix is to remember which address we've already
   // tried for in this tab, and only auto-trigger ONCE per connection.
   // Cleared when the wallet disconnects.
@@ -131,94 +167,107 @@ export function SignInButton({
     }
   }, [isConnected, status]);
 
-  // Auto-trigger SIWE the moment the wallet finishes connecting — so the
-  // user only has to click "Get access" once. The handledAddressRef +
-  // status guards together prevent the retry-loop bug: we only fire when
-  // status is exactly "idle" AND we haven't already tried this address.
-  // After a failure (status → "error"), the user explicitly retries via
-  // the Retry button; the auto-trigger does NOT fire on error states.
+  // Auto-trigger SIWE the moment Privy reports authenticated AND wagmi
+  // surfaces an address — so the user only has to click "Get access"
+  // once, regardless of whether they used email / Google / Twitter or
+  // an external wallet. The handledAddressRef + status guards together
+  // prevent the retry-loop bug: we only fire when status is exactly
+  // "idle" AND we haven't already tried this address. After a failure
+  // (status → "error"), the user explicitly retries via the Retry
+  // button; the auto-trigger does NOT fire on error states.
+  //
+  // Important: when the user has an embedded wallet (email / social
+  // login), we wait until wagmi's active connector is actually the
+  // embedded wallet before triggering SIWE. Otherwise the prior
+  // effect's setActiveWallet() races with this one — the SIWE prompt
+  // would be dispatched to MetaMask while wagmi is still mid-swap, and
+  // the app would end up logged-in as the MetaMask address.
   useEffect(() => {
+    if (!ready || !authenticated) return;
     if (!isConnected || !address) return;
     if (status !== "idle") return;
     if (handledAddressRef.current === address) return;
+    const embedded = wallets.find((w) => w.walletClientType === "privy");
+    if (embedded && address.toLowerCase() !== embedded.address.toLowerCase()) {
+      // Embedded wallet exists but isn't active yet — let the
+      // setActiveWallet effect above swap it in first; this effect will
+      // re-run when `address` updates to the embedded one.
+      return;
+    }
     handledAddressRef.current = address;
     signIn();
-  }, [isConnected, address, status, signIn]);
+  }, [ready, authenticated, isConnected, address, wallets, status, signIn]);
 
   const signOut = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     setSessionAddress(null);
     setStatus("idle");
-    disconnect();
+    // Privy's logout drops both its own session AND disconnects the
+    // wagmi-bridged wallet, so we don't need a separate `disconnect()`.
+    await logout();
     router.refresh();
-  }, [disconnect, router]);
+  }, [logout, router]);
 
+  if (!ready) {
+    return (
+      <button type="button" className={className} disabled>
+        Loading…
+      </button>
+    );
+  }
+
+  if (!authenticated || !isConnected) {
+    return (
+      <button type="button" className={className} onClick={() => login()}>
+        {label}
+      </button>
+    );
+  }
+
+  if (status === "loading") {
+    return (
+      <button type="button" className={className} disabled>
+        Signing in…
+      </button>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={signIn}
+        title={error ?? undefined}
+      >
+        Retry sign-in →
+      </button>
+    );
+  }
+
+  if (status === "signed-in" && sessionAddress) {
+    return (
+      <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+        <a className="hype-btn" href={redirectTo}>
+          {short(sessionAddress)}
+        </a>
+        <button type="button" className="hype-btn ghost" onClick={signOut}>
+          Sign out
+        </button>
+      </div>
+    );
+  }
+
+  // Connected but not yet signed in. With auto-trigger this state is
+  // brief (just the moment between Privy authenticate and the first
+  // setStatus("loading")), but we render a manual button as fallback
+  // — for example if the auto-trigger handler errored before even
+  // setting status, or if the user dismissed the wallet's signature
+  // prompt and we want them to be able to retry without disconnecting.
   return (
-    <ConnectButton.Custom>
-      {({ account, chain, openConnectModal, mounted }) => {
-        const ready = mounted;
-        const connected = ready && account && chain;
-
-        if (!connected) {
-          return (
-            <button
-              type="button"
-              className={className}
-              onClick={openConnectModal}
-              disabled={!ready}
-            >
-              {label}
-            </button>
-          );
-        }
-
-        if (status === "loading") {
-          return (
-            <button type="button" className={className} disabled>
-              Signing in…
-            </button>
-          );
-        }
-
-        if (status === "error") {
-          return (
-            <button
-              type="button"
-              className={className}
-              onClick={signIn}
-              title={error ?? undefined}
-            >
-              Retry sign-in →
-            </button>
-          );
-        }
-
-        if (status === "signed-in" && sessionAddress) {
-          return (
-            <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-              <a className="hype-btn" href={redirectTo}>
-                {short(sessionAddress)}
-              </a>
-              <button type="button" className="hype-btn ghost" onClick={signOut}>
-                Sign out
-              </button>
-            </div>
-          );
-        }
-
-        // Connected but not yet signed in. With auto-trigger this state is
-        // brief (just the moment between wallet-connect and the first
-        // setStatus("loading")), but we render a manual button as fallback
-        // — for example if the auto-trigger handler errored before even
-        // setting status, or if the user dismissed the wallet's signature
-        // prompt and we want them to be able to retry without disconnecting.
-        return (
-          <button type="button" className={className} onClick={signIn}>
-            Sign message →
-          </button>
-        );
-      }}
-    </ConnectButton.Custom>
+    <button type="button" className={className} onClick={signIn}>
+      Sign message →
+    </button>
   );
 }
 

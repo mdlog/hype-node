@@ -18,15 +18,27 @@ export const tokens = {
   amberDim: "#92590A",
   red: "#EF4444",
   cyan: "#22D3EE",
+  rose: "#F43F5E",
+  violet: "#A78BFA",
 } as const;
 
-export type AccentColor = "emerald" | "amber" | "red" | "cyan" | "textDim" | "textFaint";
+export type AccentColor =
+  | "emerald"
+  | "amber"
+  | "red"
+  | "cyan"
+  | "rose"
+  | "violet"
+  | "textDim"
+  | "textFaint";
 
 export const accentHex: Record<AccentColor, string> = {
   emerald: tokens.emerald,
   amber: tokens.amber,
   red: tokens.red,
   cyan: tokens.cyan,
+  rose: tokens.rose,
+  violet: tokens.violet,
   textDim: tokens.textDim,
   textFaint: tokens.textFaint,
 };

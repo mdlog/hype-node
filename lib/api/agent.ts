@@ -107,6 +107,23 @@ export async function getAgentState(): Promise<AgentState> {
   }
 }
 
+export type ToolStatus = "ok" | "degraded" | "missing_config" | "unknown";
+
+export type ToolHealth = {
+  tools: Record<string, { status: ToolStatus; reason: string | null }>;
+  summary: { ok: number; degraded: number; missing_config: number; total: number };
+};
+
+export async function getToolsHealth(): Promise<ToolHealth | null> {
+  try {
+    const res = await fetch(`${AGENT_URL}/tools/health`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as ToolHealth;
+  } catch {
+    return null;
+  }
+}
+
 export async function getReasoningLog(): Promise<ReasoningEntry[]> {
   try {
     const res = await fetch(`${AGENT_URL}/reasoning`, { cache: "no-store" });
@@ -251,6 +268,21 @@ export async function proposeBasket(
 
 /* ---------- Real backtest (klines replay) ---------- */
 
+export type BacktestCostParams = {
+  /** Round-trip fee in basis points charged each rebalance event. */
+  fee_bps?: number;
+  /** Slippage in basis points charged each rebalance event. */
+  slippage_bps?: number;
+  /** Per-asset weight cap, decimal in (0,1). 0 disables the cap. */
+  position_cap?: number;
+  /** Annual risk-free rate as a decimal (e.g. 0.042 for 4.20%). */
+  risk_free_rate?: number;
+  /** Base currency NAV start — surfaces nav_final on the result. */
+  init_capital?: number;
+  /** Rebalance cadence in days (used to amortize cost). Default 7. */
+  rebalance_days?: number;
+};
+
 export type BacktestResult = {
   ok: boolean;
   days?: number;
@@ -267,18 +299,29 @@ export type BacktestResult = {
   vs_btc?: number;
   eth_return?: number;
   vs_eth?: number;
+  // Echoed cost knobs + derived NAV — present whenever the caller passed
+  // the corresponding cost params.
+  fee_bps?: number;
+  slippage_bps?: number;
+  position_cap?: number | null;
+  risk_free_rate?: number;
+  init_capital?: number;
+  rebalance_days?: number;
+  n_rebalances?: number;
+  nav_final?: number;
   error?: string;
 };
 
 export async function runBacktest(
   constituents: Array<{ currency_id: string; symbol?: string; weight: number }>,
   days: number = 90,
+  costs: BacktestCostParams = {},
 ): Promise<BacktestResult | null> {
   try {
     const res = await fetch(`${AGENT_URL}/run-backtest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ constituents, days }),
+      body: JSON.stringify({ constituents, days, ...costs }),
       cache: "no-store",
     });
     if (!res.ok) {
@@ -426,12 +469,18 @@ export async function getHistoryStats(): Promise<HistoryStats | null> {
   }
 }
 
-export async function chat(turns: ChatTurn[]): Promise<ChatTurn> {
+export async function chat(
+  turns: ChatTurn[],
+  walletAddress?: string | null,
+): Promise<ChatTurn> {
   try {
     const res = await fetch(`${AGENT_URL}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ turns }),
+      body: JSON.stringify({
+        turns,
+        wallet_address: walletAddress ?? null,
+      }),
     });
     return await safeJson<ChatTurn>(res, {
       role: "agent",

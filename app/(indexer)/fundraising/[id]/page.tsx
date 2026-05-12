@@ -61,17 +61,64 @@ export default async function FundraisingDetailPage({
   params: { id: string };
   searchParams: { name?: string };
 }) {
-  const projectId = Number(params.id);
-  // The list page passes ?name=... so the synthetic fallback can preserve the
-  // real project name when the detail endpoint rate-limits / 4xxs. Without
-  // this, fallback would invent a name from the synthetic universe and the
-  // user would see e.g. "Pyth Network" after clicking "Bitcoin".
+  // ID is the SoSoValue currency_id (string — exceeds JS Number range).
+  // The list page passes ?name=... so we still have the user's chosen project
+  // label for the empty-state title when upstream is unreachable.
+  const projectId = params.id;
   const knownName = searchParams.name?.trim() || undefined;
   const detail = await getProjectFundraising(projectId, knownName);
+
+  if (!detail) {
+    return (
+      <div className="px-6 py-5 flex flex-col gap-4">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <Mono size={10} color={tokens.textFaint}>
+              <Link href="/fundraising" style={{ color: tokens.textFaint }}>
+                ← all projects
+              </Link>
+            </Mono>
+            <div
+              style={{
+                fontSize: 24,
+                fontWeight: 600,
+                letterSpacing: "-0.02em",
+                color: tokens.text,
+                marginTop: 4,
+              }}
+            >
+              {knownName ?? `Project #${projectId}`}
+            </div>
+          </div>
+          <Tag small color={tokens.amber} dot>
+            data unavailable
+          </Tag>
+        </div>
+        <Card pad={20}>
+          <Mono size={11} color={tokens.textFaint}>
+            SoSoValue has no disclosed fundraising history for this currency,
+            or upstream is unreachable / rate-limited. The project may exist
+            on RootData (try the chat agent: &quot;show RootData detail for{" "}
+            {knownName ?? projectId}&quot;).
+          </Mono>
+        </Card>
+      </div>
+    );
+  }
+
   // Always honour the URL-provided name when the detail payload's name looks
   // generic or doesn't match — defends against partial upstream responses.
   if (knownName) detail.project_name = knownName;
   const rounds = detail.fundraising_rounds ?? [];
+  // SoSoValue's per-currency fundraising endpoint is sparse for many projects
+  // (only major coins have full team / investor / portfolio coverage). When
+  // every section is empty we surface a single banner pointing to RootData
+  // via chat instead of leaving the user with three separate "no data" cards.
+  const hasAnyData =
+    rounds.length > 0 ||
+    (detail.investors ?? []).length > 0 ||
+    (detail.team ?? []).length > 0 ||
+    (detail.portfolio ?? []).length > 0;
   const investors = detail.investors ?? [];
   const portfolio = detail.portfolio ?? [];
   const stats = detail.investment_stats ?? {
@@ -132,12 +179,39 @@ export default async function FundraisingDetailPage({
         </Tag>
       </div>
 
+      {!hasAnyData && (
+        <Card pad={14}>
+          <div className="flex items-start gap-3">
+            <Tag small color={tokens.amber} dot>
+              limited data
+            </Tag>
+            <div style={{ flex: 1 }}>
+              <Mono size={11} color={tokens.text}>
+                SoSoValue OpenAPI has no fundraising rounds, investors, team, or
+                portfolio disclosed for this currency.
+              </Mono>
+              <Mono size={10} color={tokens.textFaint} style={{ marginTop: 6, display: "block" }}>
+                Major coins (BTC/ETH) often appear here without VC history because
+                they had no priced funding round. For startup / pre-launch projects,
+                ask the chat agent:{" "}
+                <span style={{ color: tokens.cyan }}>
+                  &quot;show RootData detail for {detail.project_name}&quot;
+                </span>
+              </Mono>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* Funding Rounds — vertical timeline */}
       <Card pad={16}>
         <Label>Funding Rounds</Label>
         {rounds.length === 0 ? (
           <Mono size={11} color={tokens.textFaint} style={{ marginTop: 10 }}>
-            No fundraising rounds disclosed.
+            No fundraising rounds disclosed in SoSoValue. Try the chat agent:{" "}
+            <span style={{ color: tokens.cyan }}>
+              &quot;show RootData detail for {detail.project_name}&quot;
+            </span>
           </Mono>
         ) : (
           <div className="flex flex-col" style={{ marginTop: 12, gap: 0 }}>
@@ -226,7 +300,11 @@ export default async function FundraisingDetailPage({
         <Label>Top Investors</Label>
         {investors.length === 0 ? (
           <Mono size={11} color={tokens.textFaint} style={{ marginTop: 10 }}>
-            No investor data available.
+            No investor data in SoSoValue. RootData often has fuller investor
+            lists — ask the chat agent:{" "}
+            <span style={{ color: tokens.cyan }}>
+              &quot;who funded {detail.project_name}?&quot;
+            </span>
           </Mono>
         ) : (
           <div
@@ -310,14 +388,14 @@ export default async function FundraisingDetailPage({
             style={{
               fontSize: 22,
               fontWeight: 600,
-              color: tokens.text,
+              color: (stats.total_rounds ?? rounds.length) > 0 ? tokens.text : tokens.textFaint,
               marginTop: 4,
               letterSpacing: "-0.02em",
             }}
           >
-            {stats.total_rounds ?? rounds.length}
+            {(stats.total_rounds ?? rounds.length) || "—"}
           </div>
-          {typeof stats.rounds_in_past_year === "number" && (
+          {typeof stats.rounds_in_past_year === "number" && stats.rounds_in_past_year > 0 && (
             <Mono size={10} color={tokens.textFaint}>
               {stats.rounds_in_past_year} in past year
             </Mono>
@@ -329,12 +407,12 @@ export default async function FundraisingDetailPage({
             style={{
               fontSize: 22,
               fontWeight: 600,
-              color: tokens.amber,
+              color: (stats.lead_investments ?? 0) > 0 ? tokens.amber : tokens.textFaint,
               marginTop: 4,
               letterSpacing: "-0.02em",
             }}
           >
-            {stats.lead_investments ?? 0}
+            {(stats.lead_investments ?? 0) || "—"}
           </div>
           <Mono size={10} color={tokens.textFaint}>
             unique lead investors
@@ -346,12 +424,12 @@ export default async function FundraisingDetailPage({
             style={{
               fontSize: 22,
               fontWeight: 600,
-              color: tokens.cyan,
+              color: (stats.portfolio_count ?? portfolio.length) > 0 ? tokens.cyan : tokens.textFaint,
               marginTop: 4,
               letterSpacing: "-0.02em",
             }}
           >
-            {stats.portfolio_count ?? portfolio.length}
+            {(stats.portfolio_count ?? portfolio.length) || "—"}
           </div>
           <Mono size={10} color={tokens.textFaint}>
             related projects
@@ -379,7 +457,11 @@ export default async function FundraisingDetailPage({
         {portfolio.length === 0 ? (
           <div style={{ padding: "16px" }}>
             <Mono size={11} color={tokens.textFaint}>
-              No portfolio companies tracked.
+              No portfolio companies tracked in SoSoValue. Ask the chat agent:{" "}
+              <span style={{ color: tokens.cyan }}>
+                &quot;{detail.project_name} portfolio companies&quot;
+              </span>{" "}
+              to query RootData.
             </Mono>
           </div>
         ) : (
@@ -395,7 +477,7 @@ export default async function FundraisingDetailPage({
               }}
             >
               <div className="flex items-center gap-2.5" style={{ fontSize: 12, color: tokens.text }}>
-                <ProjectLogo name={p.name} size={22} />
+                <ProjectLogo name={p.name} size={22} logoUrl={p.logo_url ?? null} />
                 <span>{p.name}</span>
               </div>
               <div>

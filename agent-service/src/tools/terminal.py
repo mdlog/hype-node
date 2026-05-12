@@ -302,13 +302,13 @@ async def _get(path: str) -> Any:
 
 
 async def list_etfs(symbol: str, country_code: str = "US") -> list[dict[str, Any]]:
+    """ETF universe for the given symbol/region. Returns an empty list when
+    upstream is unreachable so callers don't render hardcoded IBIT/FBTC
+    entries as if they were live."""
     data = await _get(f"/etfs?symbol={symbol}&country_code={country_code}")
-    if data is not None:
+    if isinstance(data, list):
         return data
-    return [
-        {"ticker": "IBIT", "name": "iShares Bitcoin Trust", "exchange": "NASDAQ"},
-        {"ticker": "FBTC", "name": "Fidelity Wise Origin Bitcoin Fund", "exchange": "CBOE"},
-    ]
+    return []
 
 
 async def get_etf_history(
@@ -317,29 +317,18 @@ async def get_etf_history(
     end_date: str | None = None,
     limit: int = 30,
 ) -> list[dict[str, Any]]:
+    """Daily ETF flow history. Returns an empty list when upstream is
+    unreachable — previously seeded synthetic IBIT-shaped numbers that
+    looked indistinguishable from real $10M/day inflow signals."""
     qs = f"limit={limit}"
     if start_date:
         qs += f"&start_date={start_date}"
     if end_date:
         qs += f"&end_date={end_date}"
     data = await _get(f"/etfs/{ticker}/history?{qs}")
-    if data is not None:
+    if isinstance(data, list):
         return data
-    today = datetime.now(timezone.utc).date()
-    return [
-        {
-            "date": (today.replace(day=max(1, today.day - i))).isoformat(),
-            "ticker": ticker,
-            "net_inflow": int((10 + i) * 1_000_000),
-            "cum_inflow": 400_000_000 + i * 12_000_000,
-            "net_assets": 5_000_000_000,
-            "currency_share": 0.005,
-            "prem_dsc": -0.0001,
-            "value_traded": 4_441_000_000,
-            "volume": 322_302,
-        }
-        for i in range(min(limit, 5))
-    ]
+    return []
 
 
 async def get_news_raw(
@@ -348,35 +337,17 @@ async def get_news_raw(
     page: int = 1,
     page_size: int = 20,
 ) -> dict[str, Any]:
+    """Raw /news payload. Returns an empty list shape when upstream is
+    unreachable — previously seeded a 2-headline Filecoin/Helium fallback
+    that get_sentiment / get_news already short-circuit around via
+    `_backoff_explainer`."""
     qs = f"language={language}&page={page}&page_size={page_size}"
     if category:
         qs += f"&category={category}"
     data = await _get(f"/news?{qs}")
-    if data is not None:
+    if isinstance(data, dict):
         return data
-    return {
-        "page": 1,
-        "page_size": page_size,
-        "total": 2,
-        "list": [
-            {
-                "id": "n1",
-                "title": "Filecoin storage demand jumps 38% QoQ, enterprise contracts expand",
-                "release_time": int(datetime.now(timezone.utc).timestamp() * 1000),
-                "author": "Messari",
-                "matched_currencies": [{"id": "fil", "name": "FIL", "full_name": "Filecoin"}],
-                "tags": ["DePIN", "storage"],
-            },
-            {
-                "id": "n2",
-                "title": "Helium network passes 1M devices, mobile subscriber growth accelerates",
-                "release_time": int(datetime.now(timezone.utc).timestamp() * 1000),
-                "author": "The Block",
-                "matched_currencies": [{"id": "hnt", "name": "HNT", "full_name": "Helium"}],
-                "tags": ["DePIN"],
-            },
-        ],
-    }
+    return {"page": page, "page_size": page_size, "total": 0, "list": []}
 
 
 async def get_sector_spotlight() -> dict[str, Any]:
@@ -412,13 +383,15 @@ async def list_ssi_tickers() -> Any:
 
 
 async def get_ssi_constituents(ticker: str) -> list[dict[str, Any]]:
+    """Real SSI index constituents (currency_id, symbol, weight). Returns
+    an empty list when upstream is unreachable. basket.py filters
+    non-numeric currency_ids defensively, but the cleaner contract is
+    "no data" rather than placeholder ['1', '2'] entries that look like
+    real SoSoValue ids until you inspect them."""
     data = await _get(f"/indices/{ticker}/constituents")
-    if data is not None:
+    if isinstance(data, list):
         return data
-    return [
-        {"currency_id": "1", "symbol": "btc", "weight": 0.31},
-        {"currency_id": "2", "symbol": "eth", "weight": 0.22},
-    ]
+    return []
 
 
 async def get_currency_snapshot(currency_id: str) -> dict[str, Any] | None:
@@ -650,3 +623,145 @@ SECTOR_TO_SSI: dict[str, str] = {
 
 def sector_to_ssi(sector: str) -> str | None:
     return SECTOR_TO_SSI.get(sector) or SECTOR_TO_SSI.get(sector.replace(" ", ""))
+
+
+# ---------------------------------------------------------------------------
+# Fundraising — backed by /currencies + /currencies/{id}/fundraising.
+#
+# SoSoValue's `/fundraising/projects` family of endpoints returns 404 as of
+# 2026-05; the per-currency `/currencies/{currency_id}/fundraising` endpoint
+# is the only public OpenAPI route that still exposes funding data, so we
+# probe top-N currencies and flatten/sort their disclosed rounds.
+#
+# Coverage limitation: this misses pre-launch / private startups (Sportix,
+# Reap, etc) that sosovalue.com surfaces via its internal API — those projects
+# aren't listed currencies, so they don't appear in /currencies. The chat
+# agent should be aware of this when answering "what fundraised this week".
+# ---------------------------------------------------------------------------
+
+
+async def list_currencies() -> list[dict[str, Any]]:
+    """Return the full SoSoValue currency catalog (id + name + symbol)."""
+    data = await _get("/currencies")
+    return data if isinstance(data, list) else []
+
+
+async def get_currency_fundraising(currency_id: str) -> dict[str, Any] | None:
+    """Per-currency fundraising payload (rounds, investors, team, stats)."""
+    if not currency_id:
+        return None
+    return await _get(f"/currencies/{currency_id}/fundraising")
+
+
+def _amount_millions_to_usd(v: Any) -> float:
+    """Wire `amount` is millions USD. Coerce safely; non-numeric → 0."""
+    if v is None or v == "":
+        return 0.0
+    try:
+        n = float(v) if not isinstance(v, (int, float)) else float(v)
+    except (ValueError, TypeError):
+        return 0.0
+    return n * 1_000_000
+
+
+def _ts_to_iso_date(ts: Any) -> str:
+    if ts is None or ts == "":
+        return ""
+    try:
+        n = int(ts) if not isinstance(ts, int) else ts
+    except (ValueError, TypeError):
+        return ""
+    if n < 1_000_000_000_000:
+        return ""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(n / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+async def list_funding_rounds(
+    limit: int = 20,
+    probe_count: int = 60,
+) -> dict[str, Any]:
+    """Cross-currency funding round timeline.
+
+    Probes the top `probe_count` currencies, flattens every disclosed round
+    across them, then returns the top `limit` sorted by date descending.
+
+    Returns:
+        {
+          "rounds":     [ {project_name, project_symbol, currency_id,
+                          round, amount_usd, amount_display, valuation_usd,
+                          date, investors[]}, ... ],
+          "total_raised_usd": float,
+          "projects_count":   int,
+          "rounds_count":     int,
+          "coverage_note":    str,  # surface the API limitation to the model
+        }
+    """
+    currencies = await list_currencies()
+    head = currencies[: max(1, int(probe_count))]
+
+    # Parallel probe with the existing rate limiter — _get() handles serializing
+    # via MIN_GAP_SEC token bucket.
+    tasks = [
+        get_currency_fundraising(c.get("currency_id", "")) for c in head
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    flat: list[dict[str, Any]] = []
+    for c, payload in zip(head, results):
+        if isinstance(payload, Exception) or not isinstance(payload, dict):
+            continue
+        rounds = payload.get("fundraising_rounds") or []
+        if not isinstance(rounds, list):
+            continue
+        for r in rounds:
+            if not isinstance(r, dict):
+                continue
+            ts_raw = r.get("timestamp")
+            try:
+                ts = int(ts_raw) if ts_raw not in (None, "") else 0
+            except (ValueError, TypeError):
+                ts = 0
+            investors_raw = r.get("investors") or []
+            investors = [
+                {
+                    "name": (inv.get("name") or "").strip(),
+                    "is_lead": bool(inv.get("is_lead_investor")),
+                    "type": inv.get("type"),
+                }
+                for inv in investors_raw
+                if isinstance(inv, dict) and inv.get("name")
+            ]
+            flat.append({
+                "project_name": c.get("name"),
+                "project_symbol": (c.get("symbol") or "").upper() or None,
+                "currency_id": c.get("currency_id"),
+                "round": (r.get("round") or "").strip() or "Disclosed",
+                "amount_usd": _amount_millions_to_usd(r.get("amount")),
+                "amount_display": r.get("amount_display"),
+                "valuation_usd": _amount_millions_to_usd(r.get("valuation")),
+                "date": _ts_to_iso_date(ts),
+                "_ts": ts,
+                "investors": investors,
+            })
+
+    flat.sort(key=lambda e: e["_ts"], reverse=True)
+    for e in flat:
+        e.pop("_ts", None)
+
+    truncated = flat[: max(1, int(limit))]
+    total_raised = sum(e["amount_usd"] for e in flat)
+    projects = {e["project_name"] for e in flat if e.get("project_name")}
+
+    return {
+        "rounds": truncated,
+        "total_raised_usd": total_raised,
+        "projects_count": len(projects),
+        "rounds_count": len(flat),
+        "coverage_note": (
+            f"Probed top {len(head)} currencies on SoSoValue. Only listed "
+            "currencies are exposed via /currencies; pre-launch / private "
+            "startups visible on sosovalue.com/assets/fundraising (sourced "
+            "from RootData) are NOT reachable via OpenAPI."
+        ),
+    }

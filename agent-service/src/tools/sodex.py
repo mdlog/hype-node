@@ -206,8 +206,11 @@ async def _load_spot_tickers() -> dict[str, dict[str, Any]]:
 def _resolve_pair_name(coin: str) -> list[str]:
     """Candidate SoDEX pair names for an arbitrary coin label.
 
-    The agent passes things like 'BTC', 'filecoin', 'render', 'vMEME.ssi'.
-    We try common conventions in order and let the caller pick the first hit.
+    The agent passes things like 'BTC', 'filecoin', 'render', 'vMEME.ssi',
+    'SOSO'. SoDEX uses two prefix conventions:
+      - `v` — virtual / synthetic testnet asset (vBTC, vETH, vSOL, …)
+      - `W` — wrapped real-asset bridge (WSOSO, WBTC where applicable)
+    We try both. The caller picks the first hit against the live symbol map.
     """
     c = coin.strip()
     if "_" in c:
@@ -221,6 +224,8 @@ def _resolve_pair_name(coin: str) -> list[str]:
         f"v{upper}_vUSDC",
         f"v{c}_vUSDC",
         f"{upper}_vUSDC",
+        f"W{upper}_vUSDC",  # wrapped-asset prefix (e.g. WSOSO_vUSDC)
+        f"w{upper}_vUSDC",
     ]
 
 
@@ -230,27 +235,74 @@ async def resolve_spot_symbol(coin: str) -> dict[str, Any] | None:
     for cand in _resolve_pair_name(coin):
         if cand in syms:
             return syms[cand]
-    # Fallback: match by baseCoin (case-insensitive)
-    target = coin.lower().lstrip("v").rstrip(".ssi")
+    # Fallback: match by baseCoin (case-insensitive). Strip both v/w prefixes
+    # on each side so "soso" matches "WSOSO" (wrapped) or "vSOSO" (virtual)
+    # without us needing to enumerate every wrapping convention.
+    def _strip_prefix(s: str) -> str:
+        s = s.lower()
+        if s.startswith("v"):
+            s = s[1:]
+        elif s.startswith("w"):
+            s = s[1:]
+        return s.replace(".", "")
+
+    target = _strip_prefix(coin).rstrip("ssi") if coin.lower().endswith("ssi") else _strip_prefix(coin)
     for s in syms.values():
-        bc = s["baseCoin"].lower().lstrip("v")
-        if bc == target or bc.replace(".", "") == target.replace(".", ""):
+        bc = s["baseCoin"]
+        if not bc:
+            continue
+        if _strip_prefix(bc) == target:
             return s
     return None
 
 
 async def get_account_id() -> int:
+    """Account id of the server signer (SODEX_PRIVATE_KEY). Used by the
+    autonomous LangGraph rebalance loop. Browser-signed flows should use
+    get_account_id_for(address) instead."""
     if _ACCOUNT_ID["id"] is not None:
         return _ACCOUNT_ID["id"]  # type: ignore[return-value]
     if not SODEX_PRIVATE_KEY:
         raise RuntimeError("SODEX_PRIVATE_KEY not set")
     pk = SODEX_PRIVATE_KEY if SODEX_PRIVATE_KEY.startswith("0x") else f"0x{SODEX_PRIVATE_KEY}"
     addr = Account.from_key(pk).address
+    aid = await get_account_id_for(addr)
+    _ACCOUNT_ID["id"] = aid
+    return aid
+
+
+# Per-address account_id cache (different from the server-signer cache above)
+_ACCOUNT_ID_BY_ADDR: dict[str, int] = {}
+
+
+async def get_account_id_for(address: str) -> int:
+    """Resolve SoDEX account_id for an arbitrary EVM address. Cached per addr.
+
+    Raises RuntimeError with a chat-friendly message when SoDEX hasn't seen
+    this address yet (no account_id assigned) — e.g. fresh wallet that needs
+    to fund its first deposit before it can place orders.
+    """
+    addr = address.strip()
+    cached = _ACCOUNT_ID_BY_ADDR.get(addr.lower())
+    if cached is not None:
+        return cached
     async with httpx.AsyncClient(timeout=10) as client:
         res = await client.get(f"{SPOT_BASE}/accounts/{addr}/state")
-    res.raise_for_status()
-    aid = int(res.json()["data"]["aid"])
-    _ACCOUNT_ID["id"] = aid
+    if res.status_code >= 400:
+        raise RuntimeError(
+            f"SoDEX has no account for {addr} yet. Fund the wallet at "
+            f"https://testnet.sodex.com (testnet faucet) before trading."
+        )
+    body = res.json()
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict) or "aid" not in data:
+        raise RuntimeError(
+            f"SoDEX account state empty for {addr}. The wallet hasn't "
+            "deposited / registered yet — visit testnet.sodex.com to "
+            "create the account, then retry."
+        )
+    aid = int(data["aid"])
+    _ACCOUNT_ID_BY_ADDR[addr.lower()] = aid
     return aid
 
 
@@ -294,6 +346,7 @@ async def execute_trade(
     symbol_out: str,
     amount_in: float,
     slippage_bps: int = 25,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     """Buy `symbol_out` with `symbol_in` (USDC-side) on SoDEX spot.
 
@@ -302,8 +355,14 @@ async def execute_trade(
     via the EIP-712 signed batchNewOrder action. Skips with a structured
     reason when the asset isn't listed or the resulting size is below minNotional.
 
-    By default places a defensive limit 50 % below market (no fill expected) —
-    set SODEX_AUTONOMOUS_TRADE=true to use market price instead.
+    Pricing modes:
+      - "market"     — limit price = last × (1 − slippage_bps/10000). Real fill.
+      - "defensive"  — limit price = last × 0.5. Order rests, won't fill.
+      - None (default)— follow `SODEX_AUTONOMOUS_TRADE` env (true=market, else=defensive).
+
+    Chat-agent callers should pass mode="market" explicitly when the user
+    confirms they want a live testnet fill, or "defensive" for a dry-run.
+    The autonomous rebalance loop in graph.py keeps the env-driven default.
     """
     started = time.time()
     skip_base = {
@@ -332,9 +391,21 @@ async def execute_trade(
     if last_px <= 0:
         return {**skip_base, "reason": f"no last price for {sym['name']}"}
 
-    # Pricing: defensive 50 % below market by default, market price if autonomous.
-    if SODEX_AUTONOMOUS_TRADE:
-        target_px = last_px * (1 - slippage_bps / 10_000)
+    # Pricing: explicit mode wins, else fall back to env-driven default.
+    if mode == "market":
+        use_market = True
+    elif mode == "defensive":
+        use_market = False
+    else:
+        use_market = SODEX_AUTONOMOUS_TRADE
+    # Side is hardcoded BUY below ("side": 1). For a BUY limit to fill against
+    # the existing ask book within slippage, the limit must sit ABOVE the last
+    # trade. The previous formula `last × (1 − slip)` placed the limit BELOW
+    # the ask (sell-side semantics) — orders went on the book as resting bids
+    # and never filled, which is why "buy $20 of ETH" returned Submitted but
+    # the asset never showed up in balances.
+    if use_market:
+        target_px = last_px * (1 + slippage_bps / 10_000)
     else:
         target_px = last_px * 0.5
 
@@ -415,7 +486,8 @@ async def execute_trade(
         "gas_val": round(notional * fee_pct, 4),  # estimated taker fee
         "latency_ms": int((time.time() - started) * 1000),
         "external_url": _explorer_url(sym["name"]),
-        "status": "resting" if not SODEX_AUTONOMOUS_TRADE else "submitted",
+        "status": "submitted" if use_market else "resting",
+        "mode": "market" if use_market else "defensive",
     }
 
 
@@ -460,8 +532,300 @@ async def list_open_spot_orders(user_address: str | None = None) -> list[dict[st
 
 
 async def get_balances(user_address: str, account_id: int | None = None) -> dict[str, Any]:
+    """Combined SoDEX account snapshot — spot balances + perps balances + positions.
+
+    The website's "Balances" view aggregates all three; the previous version
+    of this helper only hit /spot/.../balances and missed funds parked in the
+    perps margin account. We now fan out to:
+      - GET /spot/accounts/{addr}/balances
+      - GET /perps/accounts/{addr}/balances
+      - GET /perps/accounts/{addr}/positions
+    in parallel and return them under namespaced keys. Errors on any one
+    endpoint are surfaced inline (`{error: ...}`) so the others still render.
+    """
     params = f"?accountID={account_id}" if account_id is not None else ""
+
+    async def _safe_get(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
+        try:
+            res = await client.get(url)
+            res.raise_for_status()
+            payload = res.json()
+            return payload.get("data") or payload
+        except httpx.HTTPStatusError as e:
+            return {"error": f"HTTP {e.response.status_code}", "url": url}
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}", "url": url}
+
     async with httpx.AsyncClient(timeout=15) as client:
-        res = await client.get(f"{SPOT_BASE}/accounts/{user_address}/balances{params}")
-    res.raise_for_status()
-    return res.json()
+        import asyncio as _asyncio
+        spot, perps, positions = await _asyncio.gather(
+            _safe_get(client, f"{SPOT_BASE}/accounts/{user_address}/balances{params}"),
+            _safe_get(client, f"{PERPS_BASE}/accounts/{user_address}/balances{params}"),
+            _safe_get(client, f"{PERPS_BASE}/accounts/{user_address}/positions{params}"),
+        )
+
+    return {
+        "spot": spot.get("balances") if isinstance(spot, dict) else spot,
+        "perps": perps.get("balances") if isinstance(perps, dict) else perps,
+        "positions": positions.get("positions") if isinstance(positions, dict) else positions,
+        "spot_meta": (
+            {k: spot[k] for k in ("blockTime", "blockHeight") if isinstance(spot, dict) and k in spot}
+            if isinstance(spot, dict)
+            else None
+        ),
+        "perps_meta": (
+            {k: perps[k] for k in ("blockTime", "blockHeight") if isinstance(perps, dict) and k in perps}
+            if isinstance(perps, dict)
+            else None
+        ),
+    }
+
+
+# ── Browser-signed flow ──────────────────────────────────────────────────────
+# The chat agent calls prepare_trade() to size + price a buy and return an
+# unsigned EIP-712 typed-data envelope. The browser signs via wagmi
+# `signTypedDataAsync`, then POSTs the signature back to /sodex/submit which
+# calls submit_signed_envelope() to forward the signed payload to SoDEX.
+# This keeps the user's private key in their wallet — server never sees it.
+
+
+def _typed_data_for_wagmi(
+    domain_name: str,
+    payload_hash: bytes,
+    nonce: int,
+) -> dict[str, Any]:
+    """Same EIP-712 doc as build_typed_data() but with bytes/numbers serialized
+    to hex/strings so it survives a JSON round-trip to the browser. wagmi's
+    signTypedDataAsync expects everything JSON-safe."""
+    return {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            "ExchangeAction": [
+                {"name": "payloadHash", "type": "bytes32"},
+                {"name": "nonce", "type": "uint64"},
+            ],
+        },
+        "domain": {
+            "name": domain_name,
+            "version": "1",
+            "chainId": CHAIN_ID,
+            "verifyingContract": VERIFYING_CONTRACT,
+        },
+        "primaryType": "ExchangeAction",
+        "message": {
+            "payloadHash": "0x" + payload_hash.hex(),
+            "nonce": str(nonce),  # uint64 — string is safest in wagmi
+        },
+    }
+
+
+async def prepare_trade(
+    side: str,
+    asset_symbol: str,
+    amount: float,
+    signer_address: str,
+    slippage_bps: int = 25,
+    mode: str = "market",
+) -> dict[str, Any]:
+    """Build an unsigned SoDEX spot order envelope for browser-side signing.
+
+    Parameters
+    ----------
+    side
+        "buy" or "sell". Buys spend USDC to receive `asset_symbol`; sells
+        liquidate `asset_symbol` for USDC.
+    asset_symbol
+        The non-USDC side of the pair, e.g. "ETH", "AVAX", "SOSO".
+    amount
+        For BUY: USDC notional to spend. For SELL: quantity of `asset_symbol`
+        to sell. Semantics flip because that's what the user naturally specifies.
+    signer_address
+        The SIWE-connected navbar wallet. Server never holds this wallet's key.
+    slippage_bps
+        Tolerance from last price for market mode. 25 = 0.25%.
+    mode
+        "market" — limit price tight enough to fill (above last for buy,
+        below last for sell, by `slippage_bps`).
+        "defensive" — limit far from market so order rests without filling
+        (50% below market for buy bid; 100% above market for sell ask).
+    """
+    started = time.time()
+    side_lower = (side or "").strip().lower()
+    skip_base = {
+        "ok": False,
+        "skipped": True,
+        "ready_to_sign": False,
+        "side": side_lower,
+        "asset_symbol": asset_symbol,
+        "amount": amount,
+        "slippage_bps": slippage_bps,
+    }
+
+    if side_lower not in ("buy", "sell"):
+        return {**skip_base, "reason": f"side must be 'buy' or 'sell', got {side!r}"}
+    is_buy = side_lower == "buy"
+    side_int = 1 if is_buy else 2
+
+    if not signer_address:
+        return {**skip_base, "reason": "signer_address required (connected wallet)"}
+
+    sym = await resolve_spot_symbol(asset_symbol)
+    if sym is None:
+        return {**skip_base, "reason": f"no SoDEX spot pair for {asset_symbol}"}
+    if sym.get("status") != "TRADING":
+        return {**skip_base, "reason": f"pair {sym['name']} status={sym.get('status')}"}
+
+    tickers = await _load_spot_tickers()
+    last_str = (tickers.get(sym["name"]) or {}).get("lastPx") or "0"
+    last_px = float(last_str)
+    if last_px <= 0:
+        return {**skip_base, "reason": f"no last price for {sym['name']}"}
+
+    use_market = mode == "market" or (mode is None and SODEX_AUTONOMOUS_TRADE)
+    if use_market:
+        # Marketable limit: above last for buy (cross asks), below last for sell
+        # (cross bids). slippage_bps caps how far we tolerate.
+        target_px = (
+            last_px * (1 + slippage_bps / 10_000)
+            if is_buy
+            else last_px * (1 - slippage_bps / 10_000)
+        )
+    else:
+        # Defensive: park far enough that the order rests without filling.
+        # Buy → bid far below market; sell → ask far above market.
+        target_px = last_px * (0.5 if is_buy else 2.0)
+
+    tick_str = str(sym["tickSize"])
+    step_str = str(sym["stepSize"])
+    target_px = _quantize(target_px, float(tick_str))
+    if target_px <= 0:
+        return {**skip_base, "reason": "computed price below tick"}
+
+    if is_buy:
+        # `amount` is USDC notional → derive asset quantity.
+        quantity = _quantize(amount / target_px, float(step_str))
+    else:
+        # `amount` is asset quantity directly.
+        quantity = _quantize(amount, float(step_str))
+    if quantity <= 0:
+        return {**skip_base, "reason": "computed quantity below step size"}
+    notional = target_px * quantity
+    min_notional = float(sym.get("minNotional") or "0")
+    if notional < min_notional:
+        return {
+            **skip_base,
+            "reason": f"notional {notional:.2f} < min {min_notional} on {sym['name']}",
+        }
+
+    cl_ord_id = f"agent-{asset_symbol[:12]}-{int(time.time() * 1000)}"
+    price_s = _decimal_str(target_px, tick_str)
+    qty_s = _decimal_str(quantity, step_str)
+
+    account_id = await get_account_id_for(signer_address)
+    order_item: dict[str, Any] = {
+        "symbolID": int(sym["id"]),
+        "clOrdID": cl_ord_id,
+        "side": side_int,
+        "type": 1,            # Limit
+        "timeInForce": 1,     # GTC
+        "price": price_s,
+        "quantity": qty_s,
+    }
+    action = {
+        "type": "batchNewOrder",
+        "params": {"accountID": account_id, "orders": [order_item]},
+    }
+    nonce = int(time.time() * 1000)
+    payload_hash = _payload_hash(action)
+    typed_data = _typed_data_for_wagmi("spot", payload_hash, nonce)
+    wire_body = _canonical_json(action["params"])
+
+    fee_pct = float(sym.get("takerFee") or "0.001")
+    summary_in = "USDC" if is_buy else asset_symbol.upper()
+    summary_out = asset_symbol.upper() if is_buy else "USDC"
+    return {
+        "ok": True,
+        "skipped": False,
+        "ready_to_sign": True,
+        "summary": {
+            "pair": sym["name"],
+            "symbol_in": summary_in,    # what the user sends
+            "symbol_out": summary_out,   # what the user receives
+            "side": "BUY" if is_buy else "SELL",
+            "type": "Limit (market-emulated)" if use_market else "Limit (defensive)",
+            "mode": "market" if use_market else "defensive",
+            "amount_in": amount,
+            "limit_price": price_s,
+            "last_price": str(last_px),
+            "quantity": qty_s,
+            "notional": round(notional, 4),
+            "estimated_fee": round(notional * fee_pct, 4),
+            "external_url": _explorer_url(sym["name"]),
+            "signer_address": signer_address,
+        },
+        "typed_data": typed_data,
+        "submit_payload": {
+            "domain_name": "spot",
+            "base_url": SPOT_BASE,
+            "path": "/trade/orders/batch",
+            "method": "POST",
+            "wire_body": wire_body,
+            "nonce": nonce,
+            "signer_address": signer_address,
+        },
+        "latency_ms": int((time.time() - started) * 1000),
+    }
+
+
+def _normalize_signature(sig_hex: str) -> str:
+    """Turn a wagmi-signed hex (0x..130 hex) into SoDEX's `0x01 || raw` format.
+
+    wagmi returns 65-byte ECDSA with v ∈ {27, 28}. SoDEX expects v ∈ {0, 1}.
+    """
+    s = sig_hex.lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    raw = bytes.fromhex(s)
+    if len(raw) != 65:
+        raise RuntimeError(f"signature must be 65 bytes, got {len(raw)}")
+    v = raw[-1]
+    if v >= 27:
+        v -= 27
+    return "0x01" + raw[:-1].hex() + bytes([v]).hex()
+
+
+async def submit_signed_envelope(
+    submit_payload: dict[str, Any],
+    signature_hex: str,
+) -> dict[str, Any]:
+    """Forward a browser-signed action to SoDEX. Server doesn't sign — it only
+    re-shapes the wagmi signature into SoDEX's wire format and adds the auth
+    headers."""
+    sig = _normalize_signature(signature_hex)
+    headers = {
+        "X-API-Sign": sig,
+        "X-API-Nonce": str(submit_payload["nonce"]),
+        "X-API-Chain": str(CHAIN_ID),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if SODEX_API_KEY_NAME:
+        headers["X-API-Key"] = SODEX_API_KEY_NAME
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.request(
+            submit_payload.get("method", "POST"),
+            submit_payload["base_url"] + submit_payload["path"],
+            content=submit_payload["wire_body"],
+            headers=headers,
+        )
+    if res.status_code >= 400:
+        raise RuntimeError(f"SoDEX {res.status_code}: {res.text}")
+    body = res.json()
+    if isinstance(body, dict) and body.get("code", 0) != 0:
+        raise RuntimeError(f"SoDEX action error: {body}")
+    return body
