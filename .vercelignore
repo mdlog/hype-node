@@ -1,0 +1,9 @@
+.next
+.vercel
+node_modules
+out
+cache
+.env
+.env.*
+*.log
+tsconfig.tsbuildinfo
