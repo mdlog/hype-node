@@ -485,21 +485,43 @@ export async function request<T>(path: string, fallback: () => T): Promise<T> {
     state.lastRequestAt = slot;
   }
 
+  // Retry once on transient transport errors (timeout, network reset,
+  // DNS hiccup). Why retry: Vercel cold-start adds 1-2s of Node boot on
+  // top of the upstream call, which often pushes the first attempt past
+  // the fetch timeout — without a retry the caller sees an empty page
+  // even though the second attempt would have succeeded. Response-level
+  // errors (4xx/5xx with body) are handled by the backoff state machine
+  // below and intentionally NOT retried — those need backoff, not retry.
+  const FETCH_TIMEOUT_MS = Number(process.env.SOSOVALUE_FETCH_TIMEOUT_MS ?? 8_000);
+  const RETRY_DELAY_MS = 400;
+
+  async function fetchOnce(): Promise<Response> {
+    return fetch(`${BASE}${path}`, {
+      headers: { "x-soso-api-key": KEY, accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  }
+
   const promise = (async (): Promise<T> => {
     if (waitMs > 0) {
       await new Promise<void>((r) => setTimeout(r, waitMs));
     }
     try {
-      // Hard timeout so a slow / hanging upstream never blocks page render.
-      // The catch path treats a timeout as a transient error → 5min backoff,
-      // so subsequent requests serve cached/synthetic instantly.
-      const res = await fetch(`${BASE}${path}`, {
-        headers: { "x-soso-api-key": KEY, accept: "application/json" },
-        cache: "no-store",
-        signal: AbortSignal.timeout(
-          Number(process.env.SOSOVALUE_FETCH_TIMEOUT_MS ?? 5_000),
-        ),
-      });
+      let res: Response;
+      try {
+        res = await fetchOnce();
+      } catch (transportErr) {
+        // AbortError / TypeError / network — give the upstream one more
+        // shot before surrendering. Subsequent failures fall through to
+        // the outer catch below and return cache/fallback.
+        await new Promise<void>((r) => setTimeout(r, RETRY_DELAY_MS));
+        res = await fetchOnce();
+        const m = (transportErr as Error).message;
+        if (m && !/aborted|timeout/i.test(m)) {
+          warnOnce(`retry:${path}`, `[sosovalue] retried ${path} after transport error: ${m}`);
+        }
+      }
       const text = await res.text();
       let body: unknown;
       try {
