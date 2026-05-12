@@ -16,7 +16,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const STORE_DIR = path.join(process.cwd(), ".billing");
+// Vercel serverless functions only allow writes to `/tmp`. `process.cwd()`
+// resolves to `/var/task` which is read-only — mkdir there throws ENOENT and
+// crashes /api/chat. On Vercel we fall back to `/tmp/.billing`; note it is
+// ephemeral (wiped between cold starts) so usage tracking resets periodically.
+// Override with BILLING_DIR for self-hosted Node deployments.
+const STORE_DIR =
+  process.env.BILLING_DIR ??
+  (process.env.VERCEL ? "/tmp/.billing" : path.join(process.cwd(), ".billing"));
 const STORE_FILE = path.join(STORE_DIR, "usage.json");
 
 // Free-tier caps — small intentionally so users hit the wall and exercise
