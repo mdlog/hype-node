@@ -116,8 +116,9 @@ agent-service/                  Python FastAPI + LangGraph + MCP
                                 with emergency_exit branch (USSI hedge)
     mcp_server.py               Standalone MCP server (stdio)
     state.py                    Pydantic models
-    tools/                      terminal · ssi · sodex · risk · real_backtest ·
-                                basket · macro · treasuries · rootdata
+    tools/                      terminal · ssi · sodex · risk · backtest ·
+                                real_backtest · basket · macro · treasuries ·
+                                rootdata
     store.py                    SQLite-backed persistence
 docs/
   product-roadmap.md            Current 3-wave roadmap (MVP → Publisher → Production)
@@ -330,6 +331,25 @@ an EIP-712 action). Use a wallet (viem `signTypedData`, ethers v6, or
 [`lib/api/sodex/typedData.ts → buildSignedEnvelope`](lib/api/sodex/typedData.ts)
 returns the typed-data envelope to feed into your wallet.
 
+### Spot vs perps
+
+The agent supports both products via three chat tools, all browser-signed:
+
+| Tool | Product | Symbol form | Sizing |
+|------|---------|-------------|--------|
+| `sodex_execute_trade` | spot | `vSOL_vUSDC` (testnet `v` prefix) | USDC notional |
+| `sodex_sell_trade` | spot | same | asset quantity |
+| `sodex_perps_trade` | perps | `SOL-USD` (plain ticker) | contract size + leverage |
+
+On testnet, spot pairs frequently flip to `cancel-only` mode when no market
+maker is around; perps tends to carry the live liquidity. The chat agent
+should pick `sodex_perps_trade` whenever the user mentions leverage, long/short,
+or "futures", or as a fallback when spot returns "symbol is in cancel only mode".
+
+EIP-712 domain `name` is `"spot"` vs `"futures"` (not `"perps"`). The shared
+`/api/sodex/submit` endpoint forwards both products transparently because the
+prepared envelope carries `base_url` + `path` inline.
+
 ## SSI Registry (on-chain)
 
 Default deployment target is **Sepolia** (`SSI_CHAIN_ID=11155111`).
@@ -363,8 +383,6 @@ Public launch target: 15 June 2026.
 
 Outstanding items at the README layer (not in the per-wave roadmap):
 
-- `/api/sodex/execute` and `/api/billing/topup` need SIWE auth gates before
-  any public exposure
 - Several typed wrappers substitute synthetic payloads when SoSoValue returns
   empty data — masks real outages; needs honest empty states
 - Chat agent is non-streaming — full response returned after tool loop

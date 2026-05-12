@@ -522,26 +522,46 @@ async def sodex_submit(req: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
-    # SoDEX batch responses double-wrap: outer envelope (code: 0/error) and a
-    # per-item code inside `data`. The outer can be 0 while individual orders
-    # are rejected — e.g. price violates min/max, side restricted, asset paused
-    # for one direction. The previous handler only checked outer code so the
-    # UI rendered "ORDER SUBMITTED" green even though the order never went on
-    # the book. Surface the inner failure as a hard error.
-    items = result.get("data") or []
-    first = items[0] if isinstance(items, list) and items else {}
+    # SoDEX responses double-wrap: outer envelope (code: 0/error) and a per-item
+    # code inside `data`. The outer can be 0 while the order is rejected — e.g.
+    # price violates min/max, side restricted, asset paused for one direction.
+    # The previous handler only checked outer code so the UI rendered "ORDER
+    # SUBMITTED" green even though the order never went on the book. Surface
+    # the inner failure as a hard error.
+    #
+    # Shape varies by action:
+    #   spot  /trade/orders/batch (batchNewOrder)  → data is a list (one per order)
+    #   perps /trade/orders       (newOrder)       → data is a single object
+    #   any   /accounts/transfers (transferAsset)  → data is a single object (no orderID)
+    action_kind = payload.get("action_kind") or (
+        "transfer" if str(payload.get("path", "")).endswith("/accounts/transfers")
+        else "order"
+    )
+    data = result.get("data")
+    if isinstance(data, list):
+        first = data[0] if data else {}
+    elif isinstance(data, dict):
+        first = data
+    else:
+        first = {}
     if not isinstance(first, dict):
         return {"ok": False, "error": "unexpected SoDEX response shape", "raw": result}
 
     inner_code = first.get("code", 0)
     order_id = first.get("orderID")
-    if inner_code not in (0, "0", None) or order_id in (None, 0, "0"):
+    # Inner code must be OK regardless of action. For orders we additionally
+    # require an orderID (server returns 0 when an order was technically
+    # accepted but immediately rejected — e.g. cancel-only mode). Transfers
+    # don't return an orderID, so don't apply that check.
+    inner_ok = inner_code in (0, "0", None)
+    needs_order_id = action_kind == "order"
+    if not inner_ok or (needs_order_id and order_id in (None, 0, "0")):
         return {
             "ok": False,
             "error": (
                 first.get("error")
                 or first.get("message")
-                or f"SoDEX rejected order (inner code={inner_code}): {first}"
+                or f"SoDEX rejected {action_kind} (inner code={inner_code}): {first}"
             ),
             "raw": result,
         }
@@ -613,6 +633,8 @@ async def tools_health() -> dict[str, Any]:
         ),
         "sodex_execute_trade": sodex_pk_status,
         "sodex_sell_trade": sodex_pk_status,
+        "sodex_perps_trade": sodex_pk_status,
+        "sodex_transfer": sodex_pk_status,
         "sodex_get_balances": sodex_pk_status,
         "sodex_list_orders": sodex_pk_status,
         "sodex_cancel_order": sodex_pk_status,

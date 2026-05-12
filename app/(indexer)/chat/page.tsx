@@ -1558,49 +1558,86 @@ function MsgBubble({ turn, model }: { turn: Turn; model: string }) {
 }
 
 type TradeApprovalProps = {
+  product: "spot" | "perps" | "transfer";
   summary: {
-    pair: string;
-    symbol_in: string;
-    symbol_out: string;
-    side: string;
-    type: string;
-    mode: string;
-    amount_in: number;
-    limit_price: string;
-    last_price: string;
-    quantity: string;
-    notional: number;
-    estimated_fee: number;
-    external_url: string;
+    // common
     signer_address: string;
+    // trade-only
+    pair?: string;
+    side?: string;
+    type?: string;
+    mode?: string;
+    limit_price?: string;
+    quantity?: string;
+    external_url?: string;
+    // spot-only
+    symbol_in?: string;
+    symbol_out?: string;
+    amount_in?: number;
+    last_price?: string;
+    notional?: number;
+    estimated_fee?: number;
+    // perps-only
+    mark_price?: string;
+    leverage?: number;
+    reduce_only?: boolean;
+    // transfer-only
+    action?: string;
+    from_account?: string;
+    to_account?: string;
+    coin?: string;
+    amount?: string;
+    from_account_id?: number;
+    to_account_id?: number;
+    experimental_note?: string;
   };
   typed_data: Record<string, unknown>;
   submit_payload: Record<string, unknown>;
 };
 
 function extractTradeApproval(t: ToolCallTrace): TradeApprovalProps | null {
-  if (t.name !== "sodex_execute_trade" && t.name !== "sodex_sell_trade") return null;
+  if (
+    t.name !== "sodex_execute_trade" &&
+    t.name !== "sodex_sell_trade" &&
+    t.name !== "sodex_perps_trade" &&
+    t.name !== "sodex_transfer"
+  ) {
+    return null;
+  }
   const r = t.output_raw as Record<string, unknown> | null | undefined;
   if (!r || typeof r !== "object") return null;
   if (!r.ready_to_sign || !r.typed_data || !r.submit_payload || !r.summary) {
     return null;
   }
+  const product: TradeApprovalProps["product"] =
+    t.name === "sodex_perps_trade"
+      ? "perps"
+      : t.name === "sodex_transfer"
+        ? "transfer"
+        : "spot";
   return {
+    product,
     summary: r.summary as TradeApprovalProps["summary"],
     typed_data: r.typed_data as Record<string, unknown>,
     submit_payload: r.submit_payload as Record<string, unknown>,
   };
 }
 
-function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprovalProps) {
+function TradeApprovalCard({ product, summary, typed_data, submit_payload }: TradeApprovalProps) {
   const { signTypedDataAsync } = useSignTypedData();
   const { switchChainAsync } = useSwitchChain();
-  const { chainId: activeChainId } = useAccount();
+  const { chainId: activeChainId, isConnected } = useAccount();
   const [status, setStatus] = useState<
     "idle" | "switching" | "signing" | "submitting" | "done" | "error"
   >("idle");
   const [orderId, setOrderId] = useState<string | number | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  // Pre-submit failures (wallet not connected, user rejected sign, chain switch
+  // refused) happen BEFORE SoDEX sees anything — nonce is intact, user can just
+  // click Approve again. Post-submit failures (HTTP error to /sodex/submit, or
+  // SoDEX rejecting the envelope) consumed the nonce → user must re-prompt for
+  // a fresh envelope. Lumping them together (the old behaviour) was misleading.
+  const [failStage, setFailStage] = useState<"presubmit" | "submit" | null>(null);
 
   // Domain chainId from the prepared typed-data — sign must happen on the same
   // chain or wagmi/viem aborts with "chainId must match the active chainId".
@@ -1611,7 +1648,21 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
   async function approve() {
     if (status === "switching" || status === "signing" || status === "submitting") return;
     setErrMsg(null);
+    setFailStage(null);
+    let stage: "presubmit" | "submit" = "presubmit";
     try {
+      // Pre-flight: wagmi connector must be live for signTypedDataAsync. A
+      // page refresh after SIWE login, or a wallet auto-locking, drops the
+      // wagmi connector while the SIWE cookie is still valid — leaving the
+      // user with a confusing "Connector not connected" error mid-sign.
+      if (!isConnected) {
+        setErrMsg(
+          "Wallet disconnected. Reconnect via the top-right wallet button, then click Approve & sign.",
+        );
+        setFailStage("presubmit");
+        setStatus("error");
+        return;
+      }
       // Switch wallet to the chain the typed-data is bound to (ValueChain
       // testnet 138565 for SoDEX). User may be on Sepolia for the SSI
       // registry — wagmi/MetaMask will prompt add-chain if missing.
@@ -1639,6 +1690,9 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any)) as string;
 
+      // Crossing into submit territory — any failure from here on burns the
+      // nonce on SoDEX's side.
+      stage = "submit";
       setStatus("submitting");
       const res = await fetch("/api/sodex/submit", {
         method: "POST",
@@ -1648,6 +1702,7 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
       const data = (await res.json()) as { ok?: boolean; order_id?: string | number; error?: string };
       if (!res.ok || data.ok === false) {
         setErrMsg(data.error ?? `submit failed (HTTP ${res.status})`);
+        setFailStage("submit");
         setStatus("error");
         return;
       }
@@ -1656,6 +1711,7 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
     } catch (e) {
       const msg = (e as Error)?.message ?? "sign failed";
       setErrMsg(msg.length > 200 ? msg.slice(0, 200) + "…" : msg);
+      setFailStage(stage);
       setStatus("error");
     }
   }
@@ -1694,7 +1750,9 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
           }}
         >
           {status === "done"
-            ? "ORDER SUBMITTED"
+            ? product === "transfer"
+              ? "TRANSFER SUBMITTED"
+              : "ORDER SUBMITTED"
             : status === "error"
             ? "APPROVAL FAILED"
             : "AWAITING WALLET APPROVAL"}
@@ -1702,11 +1760,61 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
       </div>
 
       {(() => {
-        // Quantity is always in the BASE asset (non-USDC side of the pair),
-        // notional always in USDC. For BUY: symbol_in=USDC, symbol_out=base.
-        // For SELL: symbol_in=base, symbol_out=USDC. Pick whichever isn't USDC.
+        if (product === "transfer") {
+          return (
+            <>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "4px 16px",
+                  fontSize: 12.5,
+                }}
+              >
+                <Row label="Action" value="Transfer" />
+                <Row
+                  label="Direction"
+                  value={`${summary.from_account ?? "?"} → ${summary.to_account ?? "?"}`}
+                />
+                <Row label="Coin" value={summary.coin ?? "—"} />
+                <Row label="Amount" value={summary.amount ?? "—"} />
+                {summary.from_account_id !== undefined && (
+                  <Row label="From aid" value={String(summary.from_account_id)} />
+                )}
+                {summary.to_account_id !== undefined && (
+                  <Row label="To aid" value={String(summary.to_account_id)} />
+                )}
+                <Row label="Signer" value={shortAddr(summary.signer_address)} />
+              </div>
+              {summary.experimental_note && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: "8px 10px",
+                    background: `${PAL.amber}1A`,
+                    border: `1px solid ${PAL.amber}66`,
+                    borderRadius: 6,
+                    fontFamily: MONO,
+                    fontSize: 11,
+                    color: PAL.amber,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  ⚠ {summary.experimental_note}
+                </div>
+              )}
+            </>
+          );
+        }
+        // Spot quantity is in the base asset (whichever side isn't USDC).
+        // Perps quantity is always in the base asset of the contract (e.g. SOL).
+        const pair = summary.pair ?? "";
         const baseSym =
-          summary.symbol_in === "USDC" ? summary.symbol_out : summary.symbol_in;
+          product === "perps"
+            ? pair.replace(/-USD$/, "")
+            : summary.symbol_in === "USDC"
+              ? summary.symbol_out
+              : summary.symbol_in;
         return (
           <div
             style={{
@@ -1716,19 +1824,36 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
               fontSize: 12.5,
             }}
           >
-            <Row label="Pair" value={summary.pair} />
-            <Row label="Side" value={`${summary.side} (${summary.mode})`} />
-            <Row label="Quantity" value={`${summary.quantity} ${baseSym}`} />
-            <Row label="Limit price" value={`$${summary.limit_price}`} />
-            <Row label="Notional" value={`$${summary.notional.toFixed(2)} USDC`} />
-            <Row label="Last price" value={`$${summary.last_price}`} />
-            <Row label="Est. fee" value={`$${summary.estimated_fee.toFixed(4)}`} />
+            <Row label="Pair" value={`${pair}${product === "perps" ? " (perps)" : ""}`} />
+            <Row
+              label="Side"
+              value={`${summary.side ?? ""} (${summary.mode ?? ""})${
+                product === "perps" && summary.reduce_only ? " · reduce-only" : ""
+              }`}
+            />
+            <Row label="Quantity" value={`${summary.quantity ?? ""} ${baseSym ?? ""}`.trim()} />
+            <Row label="Limit price" value={`$${summary.limit_price ?? "—"}`} />
+            {product === "perps" ? (
+              <>
+                <Row label="Mark price" value={`$${summary.mark_price ?? "—"}`} />
+                <Row label="Leverage" value={`${summary.leverage ?? 1}x`} />
+                {summary.estimated_fee !== undefined && (
+                  <Row label="Est. fee" value={`$${summary.estimated_fee.toFixed(4)}`} />
+                )}
+              </>
+            ) : (
+              <>
+                <Row label="Notional" value={`$${(summary.notional ?? 0).toFixed(2)} USDC`} />
+                <Row label="Last price" value={`$${summary.last_price ?? "—"}`} />
+                <Row label="Est. fee" value={`$${(summary.estimated_fee ?? 0).toFixed(4)}`} />
+              </>
+            )}
             <Row label="Signer" value={shortAddr(summary.signer_address)} />
           </div>
         );
       })()}
 
-      {status === "done" && orderId !== null && (
+      {status === "done" && (orderId !== null || product === "transfer") && (
         <div
           style={{
             marginTop: 10,
@@ -1741,10 +1866,19 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
             color: PAL.emerald,
           }}
         >
-          ✓ Order #{orderId} submitted ·{" "}
-          <a href={summary.external_url} target="_blank" rel="noopener noreferrer" style={{ color: PAL.emerald, textDecoration: "underline" }}>
-            view on SoDEX testnet ↗
-          </a>
+          {product === "transfer" ? (
+            <>
+              ✓ Transfer submitted — funds should appear on the {summary.to_account}{" "}
+              side within 1–2 blocks (~5s).
+            </>
+          ) : (
+            <>
+              ✓ Order #{orderId} submitted ·{" "}
+              <a href={summary.external_url} target="_blank" rel="noopener noreferrer" style={{ color: PAL.emerald, textDecoration: "underline" }}>
+                view on SoDEX testnet ↗
+              </a>
+            </>
+          )}
         </div>
       )}
 
@@ -1763,21 +1897,46 @@ function TradeApprovalCard({ summary, typed_data, submit_payload }: TradeApprova
           }}
         >
           {errMsg}
-          {/* SoDEX consumes the nonce server-side on the first submit (whether
-              the inner order accepts or rejects). Retrying with the same
-              envelope ALWAYS fails with "nonce already used". The fix is to
-              re-prompt the agent for a fresh signed envelope. */}
-          <div style={{ marginTop: 8, color: PAL.dim, fontFamily: "inherit", fontSize: 11.5 }}>
-            This order envelope is single-use — SoDEX consumed the nonce.{" "}
-            <strong style={{ color: PAL.text }}>
-              Re-send your prompt to the agent (e.g. type the same instruction
-              again) to get a fresh envelope.
-            </strong>
-          </div>
+          {failStage === "submit" ? (
+            // SoDEX consumes the nonce server-side on the first submit (whether
+            // the inner order accepts or rejects). Retrying with the same
+            // envelope ALWAYS fails with "nonce already used". Fix: re-prompt
+            // the agent for a fresh signed envelope.
+            <div style={{ marginTop: 8, color: PAL.dim, fontFamily: "inherit", fontSize: 11.5 }}>
+              This envelope is single-use — SoDEX consumed the nonce.{" "}
+              <strong style={{ color: PAL.text }}>
+                Re-send your prompt to the agent (e.g. type the same instruction
+                again) to get a fresh envelope.
+              </strong>
+            </div>
+          ) : (
+            // Pre-submit error: signature wasn't produced or chain wasn't switched
+            // → SoDEX never saw the envelope, so the nonce is still valid. Most
+            // common cause: wallet got disconnected (wagmi "Connector not
+            // connected"), user rejected the sign prompt, or chain switch failed.
+            <div style={{ marginTop: 8, color: PAL.dim, fontFamily: "inherit", fontSize: 11.5 }}>
+              The envelope was{" "}
+              <strong style={{ color: PAL.text }}>not submitted</strong> — nonce
+              is still valid.{" "}
+              {/Connector not connected/i.test(errMsg) ? (
+                <>
+                  Reconnect your wallet (top-right) and click{" "}
+                  <strong style={{ color: PAL.text }}>Approve & sign</strong> below
+                  to retry.
+                </>
+              ) : (
+                <>
+                  Click{" "}
+                  <strong style={{ color: PAL.text }}>Approve & sign</strong> again
+                  to retry with the same envelope.
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      {status !== "done" && status !== "error" && (
+      {(status !== "done" && (status !== "error" || failStage === "presubmit")) && (
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button
             type="button"

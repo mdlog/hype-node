@@ -516,6 +516,107 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "sodex_perps_trade",
+        "description": (
+            "PREPARE a perpetual futures trade on SoDEX for the USER'S "
+            "CONNECTED WALLET. Use this when the user mentions futures, "
+            "perps, leverage, long/short, or when the spot side is in "
+            "cancel-only mode / illiquid. Perps symbols are plain tickers "
+            "like 'SOL-USD', 'BTC-USD', 'ETH-USD' (NOT the testnet v-prefixed "
+            "spot pairs). Returns ready_to_sign=True with a typed_data "
+            "envelope under the 'futures' EIP-712 domain — chat UI prompts "
+            "the user to approve in wagmi. Server NEVER touches the private "
+            "key. Use side='buy' to open / increase LONG, side='sell' to "
+            "open SHORT or close LONG (combine with reduce_only=true to "
+            "close without flipping). `quantity` is contract size in the "
+            "BASE asset (e.g. 0.5 SOL), NOT USDC notional. Always summarize "
+            "pair / side / quantity / limit_price / leverage / notional / "
+            "external_url and TELL THE USER to click Approve in the wallet. "
+            "Suggest mode='defensive' for a dry-run that rests off-market."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "side": {
+                    "type": "string",
+                    "enum": ["buy", "sell"],
+                    "description": "buy=open/increase LONG; sell=open SHORT or close LONG (set reduce_only).",
+                },
+                "asset_symbol": {
+                    "type": "string",
+                    "description": "Perps ticker — 'SOL', 'BTC', 'ETH' or full 'SOL-USD' form.",
+                },
+                "quantity": {
+                    "type": "number",
+                    "description": "Contract size in base asset units (e.g. 0.5 SOL, not USDC notional).",
+                },
+                "leverage": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Position leverage. Omit to use the pair's initLeverage default (typically 10-20x on testnet).",
+                },
+                "reduce_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "True when closing — SoDEX rejects if it would open new opposite-side exposure.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["market", "defensive"],
+                    "default": "market",
+                    "description": "market=marketable limit crossing the book; defensive=rests off-market (dry-run).",
+                },
+                "slippage_bps": {
+                    "type": "integer",
+                    "default": 25,
+                    "minimum": 0,
+                    "maximum": 1000,
+                },
+            },
+            "required": ["side", "asset_symbol", "quantity"],
+        },
+    },
+    {
+        "name": "sodex_transfer",
+        "description": (
+            "PREPARE a cross-product transfer on SoDEX between the user's "
+            "SPOT wallet and FUTURES (perps) margin wallet. Use when the user "
+            "asks to 'transfer to futures', 'move USDC to perps', 'fund my "
+            "margin account', 'pull margin back to spot', etc. Returns "
+            "ready_to_sign=True with a typed_data envelope — chat UI prompts "
+            "the user to sign in wagmi. Server NEVER touches the private key. "
+            "The source SoDEX account_id is auto-resolved from the connected "
+            "wallet; the destination is SoDEX's cross-engine route account "
+            "when moving between spot and futures. If the source side hasn't "
+            "been initialized, the tool returns a clear 'initialize on "
+            "testnet.sodex.com first' error. "
+            "After approval, tell the user the funds typically appear on the "
+            "destination side within 1-2 blocks (~5s) and they may need to "
+            "refresh the SoDEX UI to see the updated balance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["spot_to_perps", "perps_to_spot"],
+                    "description": "spot_to_perps=fund margin for opening perps positions. perps_to_spot=pull margin back to spot for withdrawal or spot trading.",
+                },
+                "amount": {
+                    "type": "number",
+                    "description": "Amount of `coin` to transfer. Must be > 0 and ≤ available balance on the source side.",
+                },
+                "coin": {
+                    "type": "string",
+                    "default": "vUSDC",
+                    "description": "Coin name. Default vUSDC (the universal margin / quote asset on testnet). Use tUSDC etc. only if user explicitly asks.",
+                },
+            },
+            "required": ["direction", "amount"],
+        },
+    },
+    {
         "name": "sodex_get_balances",
         "description": (
             "Check the USER'S CONNECTED WALLET balances on SoDEX. Returns "
@@ -764,6 +865,78 @@ async def _tool_sodex_sell_trade(args: dict[str, Any]) -> Any:
     )
 
 
+async def _tool_sodex_perps_trade(args: dict[str, Any]) -> Any:
+    side = args.get("side")
+    if side not in ("buy", "sell"):
+        return {"error": "side must be 'buy' or 'sell'"}
+    sym = args.get("asset_symbol")
+    if not sym:
+        return {"error": "asset_symbol required (e.g. 'SOL', 'BTC-USD')"}
+    qty = args.get("quantity")
+    if qty is None:
+        return {"error": "quantity required (contract size in base asset units)"}
+    try:
+        qty_f = float(qty)
+    except (TypeError, ValueError):
+        return {"error": f"quantity must be numeric, got {qty!r}"}
+    if qty_f <= 0:
+        return {"error": "quantity must be > 0"}
+    signer = _CURRENT_WALLET.get()
+    if not signer:
+        return {
+            "error": (
+                "no connected wallet — connect via the navbar (SIWE) before "
+                "asking the agent to trade. The agent never holds your private key."
+            )
+        }
+    lev_raw = args.get("leverage")
+    lev: int | None = None
+    if lev_raw is not None:
+        try:
+            lev = int(lev_raw)
+        except (TypeError, ValueError):
+            return {"error": f"leverage must be an integer, got {lev_raw!r}"}
+    return await sodex.prepare_perps_trade(
+        side=side,
+        asset_symbol=str(sym).upper(),
+        quantity=qty_f,
+        signer_address=signer,
+        leverage=lev,
+        slippage_bps=int(args.get("slippage_bps", 25)),
+        mode=str(args.get("mode", "market")),
+        reduce_only=bool(args.get("reduce_only", False)),
+    )
+
+
+async def _tool_sodex_transfer(args: dict[str, Any]) -> Any:
+    direction = args.get("direction")
+    if direction not in ("spot_to_perps", "perps_to_spot"):
+        return {"error": "direction must be 'spot_to_perps' or 'perps_to_spot'"}
+    amount = args.get("amount")
+    if amount is None:
+        return {"error": "amount required"}
+    try:
+        amount_f = float(amount)
+    except (TypeError, ValueError):
+        return {"error": f"amount must be numeric, got {amount!r}"}
+    if amount_f <= 0:
+        return {"error": "amount must be > 0"}
+    signer = _CURRENT_WALLET.get()
+    if not signer:
+        return {
+            "error": (
+                "no connected wallet — connect via the navbar (SIWE) before "
+                "asking the agent to transfer. The agent never holds your private key."
+            )
+        }
+    return await sodex.prepare_transfer(
+        direction=direction,
+        amount=amount_f,
+        signer_address=signer,
+        coin=str(args.get("coin", "vUSDC")),
+    )
+
+
 async def _tool_sodex_get_balances(_args: dict[str, Any]) -> Any:
     addr = _resolve_user_address()
     if not addr:
@@ -951,6 +1124,8 @@ TOOL_DISPATCH: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
     "get_rootdata_investor": _tool_get_rootdata_investor,
     "sodex_execute_trade": _tool_sodex_execute_trade,
     "sodex_sell_trade": _tool_sodex_sell_trade,
+    "sodex_perps_trade": _tool_sodex_perps_trade,
+    "sodex_transfer": _tool_sodex_transfer,
     "sodex_get_balances": _tool_sodex_get_balances,
     "sodex_list_orders": _tool_sodex_list_orders,
     "sodex_cancel_order": _tool_sodex_cancel_order,

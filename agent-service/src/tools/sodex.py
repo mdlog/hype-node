@@ -256,6 +256,63 @@ async def resolve_spot_symbol(coin: str) -> dict[str, Any] | None:
     return None
 
 
+# ── Perps symbol / ticker resolvers ──────────────────────────────────────────
+# Perps markets use a different namespace from spot:
+#   spot:  vBTC_vUSDC, vETH_vUSDC, vSOL_vUSDC, …   (testnet "v" prefix)
+#   perps: BTC-USD, ETH-USD, SOL-USD, …            (plain ticker, USD-quoted)
+# Liquidity on the testnet skews heavily toward perps — spot pairs often go
+# stale or flip to cancel-only mode when no market maker is around.
+
+_PERPS_SYMBOL_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
+_PERPS_TICKER_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
+
+
+async def _load_perps_symbols() -> dict[str, dict[str, Any]]:
+    if time.time() - _PERPS_SYMBOL_CACHE["ts"] < _SYMBOL_TTL and _PERPS_SYMBOL_CACHE["data"]:
+        return _PERPS_SYMBOL_CACHE["data"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(f"{PERPS_BASE}/markets/symbols")
+    res.raise_for_status()
+    by_name = {s["name"]: s for s in res.json()["data"]}
+    _PERPS_SYMBOL_CACHE["data"] = by_name
+    _PERPS_SYMBOL_CACHE["ts"] = time.time()
+    return by_name
+
+
+async def _load_perps_tickers() -> dict[str, dict[str, Any]]:
+    if time.time() - _PERPS_TICKER_CACHE["ts"] < _TICKER_TTL and _PERPS_TICKER_CACHE["data"]:
+        return _PERPS_TICKER_CACHE["data"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(f"{PERPS_BASE}/markets/tickers")
+    res.raise_for_status()
+    by_symbol = {t["symbol"]: t for t in res.json()["data"]}
+    _PERPS_TICKER_CACHE["data"] = by_symbol
+    _PERPS_TICKER_CACHE["ts"] = time.time()
+    return by_symbol
+
+
+async def resolve_perps_symbol(coin: str) -> dict[str, Any] | None:
+    """Look up the perps symbol metadata for a given coin label, or None.
+
+    Accepts both bare tickers ("SOL", "btc") and full pair names
+    ("SOL-USD"). Falls back to baseCoin match so testnet-only symbols like
+    "TESTDOGE-USD" (base=DOGE) still resolve when the user types "DOGE".
+    """
+    syms = await _load_perps_symbols()
+    c = coin.strip()
+    upper = c.upper()
+    candidates = [c, upper, f"{upper}-USD"]
+    for cand in candidates:
+        if cand in syms:
+            return syms[cand]
+    target = upper.removesuffix("-USD")
+    for s in syms.values():
+        bc = (s.get("baseCoin") or "").upper()
+        if bc == target and s.get("status") == "TRADING":
+            return s
+    return None
+
+
 async def get_account_id() -> int:
     """Account id of the server signer (SODEX_PRIVATE_KEY). Used by the
     autonomous LangGraph rebalance loop. Browser-signed flows should use
@@ -271,12 +328,14 @@ async def get_account_id() -> int:
     return aid
 
 
-# Per-address account_id cache (different from the server-signer cache above)
+# Per-address account_id caches. Spot and perps each have their own `aid`
+# even for the same wallet — perps maintains a separate margin account.
 _ACCOUNT_ID_BY_ADDR: dict[str, int] = {}
+_PERPS_ACCOUNT_ID_BY_ADDR: dict[str, int] = {}
 
 
 async def get_account_id_for(address: str) -> int:
-    """Resolve SoDEX account_id for an arbitrary EVM address. Cached per addr.
+    """Resolve SoDEX SPOT account_id for an arbitrary EVM address. Cached per addr.
 
     Raises RuntimeError with a chat-friendly message when SoDEX hasn't seen
     this address yet (no account_id assigned) — e.g. fresh wallet that needs
@@ -290,19 +349,64 @@ async def get_account_id_for(address: str) -> int:
         res = await client.get(f"{SPOT_BASE}/accounts/{addr}/state")
     if res.status_code >= 400:
         raise RuntimeError(
-            f"SoDEX has no account for {addr} yet. Fund the wallet at "
+            f"SoDEX has no spot account for {addr} yet. Fund the wallet at "
             f"https://testnet.sodex.com (testnet faucet) before trading."
         )
     body = res.json()
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict) or "aid" not in data:
         raise RuntimeError(
-            f"SoDEX account state empty for {addr}. The wallet hasn't "
+            f"SoDEX spot account state empty for {addr}. The wallet hasn't "
             "deposited / registered yet — visit testnet.sodex.com to "
             "create the account, then retry."
         )
     aid = int(data["aid"])
+    if aid == 0:
+        # SoDEX returns aid=0 for unregistered addresses (and 0 is a valid aid
+        # for the system account, never a user). Treat as not-yet-registered.
+        raise RuntimeError(
+            f"SoDEX hasn't assigned a spot account_id to {addr} yet. Visit "
+            "testnet.sodex.com, connect this wallet, and complete the first "
+            "deposit / faucet step to create the account, then retry."
+        )
     _ACCOUNT_ID_BY_ADDR[addr.lower()] = aid
+    return aid
+
+
+async def get_perps_account_id_for(address: str) -> int:
+    """Resolve SoDEX PERPS account_id for an arbitrary EVM address.
+
+    Perps maintains a separate margin account from spot — different aid even
+    for the same wallet. Required for cross-product transferAsset (the
+    From/To accountIDs span both products) and for perps newOrder.
+    """
+    addr = address.strip()
+    cached = _PERPS_ACCOUNT_ID_BY_ADDR.get(addr.lower())
+    if cached is not None:
+        return cached
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(f"{PERPS_BASE}/accounts/{addr}/state")
+    if res.status_code >= 400:
+        raise RuntimeError(
+            f"SoDEX has no perps margin account for {addr} yet. Make a first "
+            "transfer (or trade) on testnet.sodex.com to initialize the "
+            "margin account, then retry."
+        )
+    body = res.json()
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict) or "aid" not in data:
+        raise RuntimeError(
+            f"SoDEX perps account state empty for {addr}. Initialize the "
+            "perps margin account on testnet.sodex.com first."
+        )
+    aid = int(data["aid"])
+    if aid == 0:
+        raise RuntimeError(
+            f"SoDEX hasn't assigned a perps account_id to {addr} yet. Visit "
+            "testnet.sodex.com → Futures, connect this wallet, and complete "
+            "the first deposit to initialize the margin account, then retry."
+        )
+    _PERPS_ACCOUNT_ID_BY_ADDR[addr.lower()] = aid
     return aid
 
 
@@ -777,6 +881,412 @@ async def prepare_trade(
             "wire_body": wire_body,
             "nonce": nonce,
             "signer_address": signer_address,
+        },
+        "latency_ms": int((time.time() - started) * 1000),
+    }
+
+
+async def prepare_perps_trade(
+    side: str,
+    asset_symbol: str,
+    quantity: float,
+    signer_address: str,
+    leverage: int | None = None,
+    slippage_bps: int = 25,
+    mode: str = "market",
+    reduce_only: bool = False,
+) -> dict[str, Any]:
+    """Build an unsigned SoDEX perps order envelope for browser-side signing.
+
+    Perps differs from spot in three meaningful ways:
+      - Symbol namespace: plain "SOL-USD" / "BTC-USD" instead of "vSOL_vUSDC".
+        See resolve_perps_symbol — testnet perps almost always carries the
+        live liquidity that spot lacks.
+      - Sizing: caller passes asset `quantity` directly (e.g. 0.5 SOL). For
+        perps the user thinks in contract size, not USDC notional.
+      - Action shape: `newOrder` (singular) at `/trade/orders` — NOT the
+        spot's `batchNewOrder` at `/trade/orders/batch`. Params are flat,
+        not wrapped in `{orders: [...]}`.
+
+    EIP-712 domain `name` is the literal string "futures" (not "perps") —
+    see lib/api/sodex/typedData.ts:44.
+
+    Parameters
+    ----------
+    side
+        "buy" (open / increase LONG) or "sell" (open SHORT / close LONG).
+        Set `reduce_only=True` when closing a position so SoDEX won't open
+        a new opposite-side exposure if the position is gone.
+    asset_symbol
+        Either "SOL" or "SOL-USD" — resolver handles both.
+    quantity
+        Number of contracts (asset units). Sized against the pair's
+        stepSize / minQuantity / minNotional before signing.
+    leverage
+        Initial leverage for the position. Defaults to the pair's
+        `initLeverage` when omitted. Honored only when SoDEX margin mode
+        for this symbol is ISOLATED; for cross margin the account-level
+        leverage applies.
+    mode
+        "market" — marketable limit price (above last for buy, below for
+        sell) by `slippage_bps` so the order crosses the book.
+        "defensive" — limit far from market so the order rests; use this
+        for dry-runs that won't fill.
+    reduce_only
+        When True, SoDEX rejects the order if it would flip / increase the
+        position. Use when closing.
+    """
+    started = time.time()
+    side_lower = (side or "").strip().lower()
+    skip_base = {
+        "ok": False,
+        "skipped": True,
+        "ready_to_sign": False,
+        "product": "perps",
+        "side": side_lower,
+        "asset_symbol": asset_symbol,
+        "quantity": quantity,
+        "leverage": leverage,
+        "slippage_bps": slippage_bps,
+        "reduce_only": reduce_only,
+    }
+
+    if side_lower not in ("buy", "sell"):
+        return {**skip_base, "reason": f"side must be 'buy' or 'sell', got {side!r}"}
+    is_buy = side_lower == "buy"
+    side_int = 1 if is_buy else 2
+
+    if not signer_address:
+        return {**skip_base, "reason": "signer_address required (connected wallet)"}
+
+    sym = await resolve_perps_symbol(asset_symbol)
+    if sym is None:
+        return {**skip_base, "reason": f"no SoDEX perps pair for {asset_symbol}"}
+    if sym.get("status") != "TRADING":
+        return {**skip_base, "reason": f"pair {sym['name']} status={sym.get('status')}"}
+
+    tickers = await _load_perps_tickers()
+    tk = tickers.get(sym["name"]) or {}
+    # markPrice is the fairer reference for perps (spot index ± funding) but
+    # falls back to lastPx when an empty book leaves markPrice unset.
+    ref_px_str = tk.get("markPrice") or tk.get("lastPx") or "0"
+    ref_px = float(ref_px_str)
+    if ref_px <= 0:
+        return {**skip_base, "reason": f"no reference price for {sym['name']}"}
+
+    use_market = mode == "market"
+    if use_market:
+        target_px = (
+            ref_px * (1 + slippage_bps / 10_000)
+            if is_buy
+            else ref_px * (1 - slippage_bps / 10_000)
+        )
+    else:
+        target_px = ref_px * (0.5 if is_buy else 2.0)
+
+    tick_str = str(sym["tickSize"])
+    step_str = str(sym["stepSize"])
+    target_px = _quantize(target_px, float(tick_str))
+    if target_px <= 0:
+        return {**skip_base, "reason": "computed price below tick"}
+
+    qty = _quantize(quantity, float(step_str))
+    min_qty = float(sym.get("minQuantity") or "0")
+    if qty < min_qty:
+        return {
+            **skip_base,
+            "reason": f"quantity {qty} below minQuantity {min_qty} on {sym['name']}",
+        }
+    notional = target_px * qty
+    min_notional = float(sym.get("minNotional") or "0")
+    if notional < min_notional:
+        return {
+            **skip_base,
+            "reason": f"notional {notional:.2f} < min {min_notional} on {sym['name']}",
+        }
+
+    cl_ord_id = f"agent-p-{sym['name'][:10]}-{int(time.time() * 1000)}"
+    price_s = _decimal_str(target_px, tick_str)
+    qty_s = _decimal_str(qty, step_str)
+
+    chosen_leverage = int(leverage) if leverage else int(sym.get("initLeverage") or 1)
+    max_lev = int(sym.get("maxLeverage") or chosen_leverage)
+    if chosen_leverage > max_lev:
+        return {**skip_base, "reason": f"leverage {chosen_leverage}x > pair max {max_lev}x"}
+
+    account_id = await get_account_id_for(signer_address)
+    # Perps newOrder params (flat, not wrapped in `orders: [...]`). Key order
+    # must match SoDEX Go SDK's PerpsNewOrderRequest struct field order — the
+    # server reproduces payloadHash by json.Marshal which preserves field order.
+    order_params: dict[str, Any] = {
+        "accountID": account_id,
+        "symbolID": int(sym["id"]),
+        "clOrdID": cl_ord_id,
+        "side": side_int,
+        "type": 1,            # Limit
+        "timeInForce": 1,     # GTC
+        "price": price_s,
+        "quantity": qty_s,
+        "reduceOnly": bool(reduce_only),
+        "leverage": chosen_leverage,
+    }
+    action = {"type": "newOrder", "params": order_params}
+    nonce = int(time.time() * 1000)
+    payload_hash = _payload_hash(action)
+    typed_data = _typed_data_for_wagmi("futures", payload_hash, nonce)
+    wire_body = _canonical_json(action["params"])
+
+    fee_pct = float(sym.get("takerFee") or "0.0004")
+    return {
+        "ok": True,
+        "skipped": False,
+        "ready_to_sign": True,
+        "product": "perps",
+        "summary": {
+            "pair": sym["name"],
+            "side": "BUY" if is_buy else "SELL",
+            "type": "Limit (market-emulated)" if use_market else "Limit (defensive)",
+            "mode": "market" if use_market else "defensive",
+            "quantity": qty_s,
+            "limit_price": price_s,
+            "mark_price": str(ref_px),
+            "notional": round(notional, 4),
+            "leverage": chosen_leverage,
+            "reduce_only": bool(reduce_only),
+            "estimated_fee": round(notional * fee_pct, 4),
+            "external_url": _perps_explorer_url(sym["name"]),
+            "signer_address": signer_address,
+        },
+        "typed_data": typed_data,
+        "submit_payload": {
+            "domain_name": "futures",
+            "base_url": PERPS_BASE,
+            "path": "/trade/orders",
+            "method": "POST",
+            "wire_body": wire_body,
+            "nonce": nonce,
+            "signer_address": signer_address,
+        },
+        "latency_ms": int((time.time() - started) * 1000),
+    }
+
+
+def _perps_explorer_url(pair: str) -> str:
+    host = "testnet.sodex.com" if IS_TESTNET else "sodex.com"
+    return f"https://{host}/trade/futures/{pair}"
+
+
+# ── Spot ↔ perps transfer ────────────────────────────────────────────────────
+# transferAsset action — schema reverse-engineered from the SoDEX REST v1 docs
+# (https://sodex.com/documentation/api/rest-v1/sodex-rest-perps-api) and a
+# series of live validation errors. Authoritative Go struct:
+#
+#   type TransferAssetRequest struct {
+#       ID            uint64  `json:"id"`             // client-minted; ms-ts works
+#       FromAccountID uint64  `json:"fromAccountID"`
+#       ToAccountID   uint64  `json:"toAccountID"`
+#       CoinID        uint64  `json:"coinID"`         // 0 = vUSDC (testnet)
+#       Amount        string  `json:"amount"`         // DecimalString
+#       Type          int32   `json:"type"`           // TransferAssetTypeEnum
+#   }
+#
+# TransferAssetTypeEnum:
+#   0 EVM_DEPOSIT     · 1 PERPS_DEPOSIT  · 2 EVM_WITHDRAW
+#   3 PERPS_WITHDRAW  · 4 INTERNAL        · 5 SPOT_WITHDRAW
+#   6 SPOT_DEPOSIT
+#
+# spot→perps direction: call the SPOT gateway, sign under "spot", and use
+# PERPS_WITHDRAW (3) with toAccountID=999 (the spot chain route account).
+# perps→spot direction: call the PERPS gateway, sign under "futures", and use
+# SPOT_WITHDRAW (5) with toAccountID=999 (the perps chain route account).
+
+_COIN_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
+_PERPS_COIN_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
+_COIN_TTL = 3600  # 1 h — coin list almost never changes
+
+
+async def _load_spot_coins() -> dict[str, dict[str, Any]]:
+    """Coin metadata indexed by name (case-insensitive). Returns {name_upper:
+    {id, name, precision}}."""
+    if time.time() - _COIN_CACHE["ts"] < _COIN_TTL and _COIN_CACHE["data"]:
+        return _COIN_CACHE["data"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(f"{SPOT_BASE}/markets/coins")
+    res.raise_for_status()
+    by_name = {c["name"].upper(): c for c in res.json()["data"]}
+    _COIN_CACHE["data"] = by_name
+    _COIN_CACHE["ts"] = time.time()
+    return by_name
+
+
+async def _load_perps_coins() -> dict[str, dict[str, Any]]:
+    """Perps coin metadata indexed by name (case-insensitive)."""
+    if time.time() - _PERPS_COIN_CACHE["ts"] < _COIN_TTL and _PERPS_COIN_CACHE["data"]:
+        return _PERPS_COIN_CACHE["data"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(f"{PERPS_BASE}/markets/coins")
+    res.raise_for_status()
+    by_name = {c["name"].upper(): c for c in res.json()["data"]}
+    _PERPS_COIN_CACHE["data"] = by_name
+    _PERPS_COIN_CACHE["ts"] = time.time()
+    return by_name
+
+
+async def resolve_coin(name: str, product: str = "spot") -> dict[str, Any] | None:
+    """Look up gateway-local coin metadata by friendly name.
+
+    Defaults bare "USDC" to the testnet's vUSDC since that's the universal
+    quote / margin asset there. Coin IDs are gateway-local, so transfer
+    envelopes must resolve against the endpoint that will receive the submit.
+    """
+    coins = await (_load_perps_coins() if product == "perps" else _load_spot_coins())
+    upper = name.strip().upper()
+    if upper == "USDC" and IS_TESTNET:
+        # Prefer vUSDC over tUSDC since vUSDC is the quote currency for all
+        # perps and spot pairs on testnet — funds in tUSDC can't open positions.
+        for cand in ("VUSDC", "USDC"):
+            if cand in coins:
+                return coins[cand]
+        return None
+    return coins.get(upper)
+
+
+async def prepare_transfer(
+    direction: str,
+    amount: float,
+    signer_address: str,
+    coin: str = "vUSDC",
+) -> dict[str, Any]:
+    """Build an unsigned SoDEX cross-product transferAsset envelope.
+
+    Parameters
+    ----------
+    direction
+        "spot_to_perps" (move USDC into the futures margin account so you can
+        open a perps position) or "perps_to_spot" (pull margin back to spot
+        for withdrawal / spot trading).
+    amount
+        Amount of `coin` to move. Quantized to the coin's precision before
+        signing — SoDEX rejects sub-precision values.
+    signer_address
+        SIWE-connected wallet. The agent never holds this key.
+    coin
+        Coin name (e.g. "vUSDC", "tUSDC"). Default vUSDC because that's the
+        margin currency for perps positions on testnet.
+    """
+    started = time.time()
+    direction_norm = (direction or "").strip().lower().replace("-", "_")
+    skip_base = {
+        "ok": False,
+        "skipped": True,
+        "ready_to_sign": False,
+        "direction": direction_norm,
+        "amount": amount,
+        "coin": coin,
+    }
+
+    if direction_norm not in ("spot_to_perps", "perps_to_spot"):
+        return {
+            **skip_base,
+            "reason": "direction must be 'spot_to_perps' or 'perps_to_spot'",
+        }
+    if amount <= 0:
+        return {**skip_base, "reason": "amount must be > 0"}
+    if not signer_address:
+        return {**skip_base, "reason": "signer_address required (connected wallet)"}
+
+    is_to_perps = direction_norm == "spot_to_perps"
+    domain_name = "spot" if is_to_perps else "futures"
+    base_url = SPOT_BASE if is_to_perps else PERPS_BASE
+    source_product = "spot" if is_to_perps else "perps"
+
+    coin_meta = await resolve_coin(coin, source_product)
+    if coin_meta is None:
+        return {**skip_base, "reason": f"unknown SoDEX {source_product} coin: {coin}"}
+
+    # Quantize amount to coin precision. SoDEX's Go decimal type rejects values
+    # that have more fractional digits than precision allows.
+    precision = int(coin_meta.get("precision") or 6)
+    step = Decimal(1).scaleb(-precision)  # 10^-precision
+    amount_q = (Decimal(str(amount)) / step).to_integral_value(
+        rounding=ROUND_DOWN
+    ) * step
+    if amount_q <= 0:
+        return {
+            **skip_base,
+            "reason": f"amount below coin precision (1e-{precision} {coin_meta['name']})",
+        }
+    amount_s = format(amount_q, "f")
+    if "." in amount_s:
+        amount_s = amount_s.rstrip("0").rstrip(".")
+
+    # SoDEX models cross-engine transfers as withdrawals from the source
+    # engine into a reserved route account (999). The EIP-712 signer tells the
+    # destination engine which wallet to credit.
+    ROUTE_AID = 999
+    if is_to_perps:
+        from_aid = await get_account_id_for(signer_address)
+        to_aid = ROUTE_AID
+    else:
+        from_aid = await get_perps_account_id_for(signer_address)
+        to_aid = ROUTE_AID
+
+    # Idempotency / transfer identifier — uint64. Millisecond timestamp gives
+    # us a monotonically-increasing value unique per call. Distinct from
+    # `nonce`: nonce binds the EIP-712 envelope, `id` is the transfer's own
+    # server-side primary key.
+    transfer_id = int(time.time() * 1000)
+
+    # TransferAssetTypeEnum values per SoDEX REST v1:
+    #   3 = PERPS_WITHDRAW (withdrawal TO perps chain → spot→perps)
+    #   5 = SPOT_WITHDRAW  (withdrawal TO spot chain  → perps→spot)
+    type_int = 3 if is_to_perps else 5
+
+    # Field order matches the Go TransferAssetRequest struct exactly:
+    # id, fromAccountID, toAccountID, coinID, amount, type. payloadHash hashes
+    # the canonical JSON in struct field order — reordering breaks signing.
+    params: dict[str, Any] = {
+        "id": transfer_id,
+        "fromAccountID": from_aid,
+        "toAccountID": to_aid,
+        "coinID": int(coin_meta["id"]),
+        "amount": amount_s,
+        "type": type_int,
+    }
+    action = {"type": "transferAsset", "params": params}
+    nonce = int(time.time() * 1000)
+    payload_hash = _payload_hash(action)
+    typed_data = _typed_data_for_wagmi(domain_name, payload_hash, nonce)
+    wire_body = _canonical_json(action["params"])
+
+    from_label = "spot" if is_to_perps else "perps"
+    to_label = "perps" if is_to_perps else "spot"
+    return {
+        "ok": True,
+        "skipped": False,
+        "ready_to_sign": True,
+        "product": "transfer",
+        "summary": {
+            "action": "transferAsset",
+            "from_account": from_label,
+            "to_account": to_label,
+            "from_account_id": from_aid,
+            "to_account_id": to_aid,
+            "coin": coin_meta["name"],
+            "amount": amount_s,
+            "transfer_id": transfer_id,
+            "signer_address": signer_address,
+        },
+        "typed_data": typed_data,
+        "submit_payload": {
+            "domain_name": domain_name,
+            "base_url": base_url,
+            "path": "/accounts/transfers",
+            "method": "POST",
+            "wire_body": wire_body,
+            "nonce": nonce,
+            "signer_address": signer_address,
+            "action_kind": "transfer",  # hint to /sodex/submit response parser
         },
         "latency_ms": int((time.time() - started) * 1000),
     }
