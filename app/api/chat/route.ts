@@ -25,63 +25,72 @@ export const dynamic = "force-dynamic";
  *      the client can update the Usage panel without a separate round trip.
  */
 export async function POST(req: NextRequest) {
-  const session = await getIronSession<SessionData>(cookies(), sessionOptions);
-  if (!session.address) {
-    return NextResponse.json(
-      { error: "not authenticated" },
-      { status: 401 },
-    );
-  }
-  const address = session.address;
+  try {
+    const session = await getIronSession<SessionData>(cookies(), sessionOptions);
+    if (!session.address) {
+      return NextResponse.json(
+        { error: "not authenticated" },
+        { status: 401 },
+      );
+    }
+    const address = session.address;
 
-  const body = (await req.json()) as { turns: ChatTurn[] };
-  if (!Array.isArray(body.turns)) {
-    return NextResponse.json(
-      { error: "turns array required" },
-      { status: 400 },
-    );
-  }
+    const body = (await req.json()) as { turns: ChatTurn[] };
+    if (!Array.isArray(body.turns)) {
+      return NextResponse.json(
+        { error: "turns array required" },
+        { status: 400 },
+      );
+    }
 
-  const gate = canSend(address);
-  if (!gate.allowed) {
+    const gate = canSend(address);
+    if (!gate.allowed) {
+      return NextResponse.json(
+        {
+          error: "limit_reached",
+          reason: gate.reason,
+          billing: getSnapshot(address),
+        },
+        { status: 402 },
+      );
+    }
+
+    const reply = await chat(body.turns, address);
+
+    if (reply.usage) {
+      const u = reply.usage;
+      const toolCalls = reply.tool_calls?.length ?? 0;
+      const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+      const snapshot = recordUsage(
+        address,
+        model,
+        {
+          input_tokens: u.input_tokens ?? 0,
+          output_tokens: u.output_tokens ?? 0,
+          cache_read_tokens: u.cache_read_tokens ?? 0,
+          cache_creation_tokens: u.cache_creation_tokens ?? 0,
+        },
+        toolCalls,
+      );
+      return NextResponse.json({ ...reply, billing: snapshot });
+    }
+
+    return NextResponse.json({ ...reply, billing: getSnapshot(address) });
+  } catch (err) {
+    // Without this catch, a thrown error (missing SESSION_PASSWORD, corrupt
+    // cookie, agent fetch failure) gives Vercel an empty 500 body — the
+    // browser then surfaces "Unexpected end of JSON input" instead of the
+    // real cause. Reply with structured JSON so the UI shows the actual
+    // failure and Vercel logs capture the stack.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[/api/chat] uncaught", err);
     return NextResponse.json(
       {
-        error: "limit_reached",
-        reason: gate.reason,
-        billing: getSnapshot(address),
+        role: "agent",
+        content: `Server error: ${message}`,
+        error: message,
       },
-      { status: 402 },
+      { status: 500 },
     );
   }
-
-  // Pass the SIWE-connected wallet address to the agent service so the
-  // SoDEX balance / order tools query the user's wallet (not the server's
-  // signer key). Trade execution still uses SODEX_PRIVATE_KEY.
-  const reply = await chat(body.turns, address);
-
-  // Record usage from the live `usage` block on the agent reply. If for any
-  // reason it's missing (e.g. agent service crashed mid-turn), we still
-  // emit the message but the user is not charged — better than blocking on
-  // an instrumentation gap.
-  if (reply.usage) {
-    const u = reply.usage;
-    const toolCalls = reply.tool_calls?.length ?? 0;
-    // The model used is captured by the agent service, fall back to the env
-    // default for cost calc parity.
-    const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
-    const snapshot = recordUsage(
-      address,
-      model,
-      {
-        input_tokens: u.input_tokens ?? 0,
-        output_tokens: u.output_tokens ?? 0,
-        cache_read_tokens: u.cache_read_tokens ?? 0,
-        cache_creation_tokens: u.cache_creation_tokens ?? 0,
-      },
-      toolCalls,
-    );
-    return NextResponse.json({ ...reply, billing: snapshot });
-  }
-
-  return NextResponse.json({ ...reply, billing: getSnapshot(address) });
 }
