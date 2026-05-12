@@ -5,5 +5,7 @@ out
 cache
 .env
 .env.*
+!.env.example
+!agent-service/.env.example
 *.log
 tsconfig.tsbuildinfo
