@@ -15,8 +15,11 @@
 //   GET /crypto-stocks/{stock_ticker}/market-snapshot
 //   GET /crypto-stocks/{stock_ticker}/market-cap     · 100 row max
 //   GET /crypto-stocks/{stock_ticker}/klines         · 1d only, 3-month window
-//   GET /crypto-stocks/sector
-//   GET /crypto-stocks/sector/{sector_name}/index    · 200 row max
+//   GET /crypto-stocks/sectors
+//   GET /crypto-stocks/sectors/{sector_slug}/index    · 200 row max
+//     (Note: SoSoValue renamed `/sector` → `/sectors` (plural) ~2026-04 and
+//     the index path now requires a slug like `btc-treasury`, not the display
+//     name `BTC Treasury`. Slug is returned on each sector row.)
 
 import { request } from "@/lib/api/sosovalue";
 
@@ -70,6 +73,8 @@ export type CryptoStockKline = {
 };
 
 export type CryptoStockSector = {
+  /** Slug used in the `/sectors/{slug}/index` path (e.g. "btc-treasury"). */
+  sector_slug: string;
   sector_name: string;
   total_marketcap: number;
   /** Decimal fraction (e.g. -0.0357 = −3.57%). */
@@ -170,21 +175,20 @@ export async function getCryptoStockKlines(
 }
 
 export async function listCryptoStockSectors(): Promise<CryptoStockSector[]> {
-  return request<CryptoStockSector[]>("/crypto-stocks/sector", () => []);
+  return request<CryptoStockSector[]>("/crypto-stocks/sectors", () => []);
 }
 
 export async function getCryptoStockSectorIndex(
-  sectorName: string,
+  sectorSlug: string,
   opts: GetCryptoStockSectorIndexOpts = {},
 ): Promise<CryptoStockSectorIndexRow[]> {
   const sp = new URLSearchParams();
   if (opts.startDate) sp.set("start_date", opts.startDate);
   if (opts.endDate) sp.set("end_date", opts.endDate);
-  // API hard-caps `limit` at 200; default 100.
   const limit = Math.min(200, Math.max(1, opts.limit ?? 100));
   sp.set("limit", String(limit));
   return request<CryptoStockSectorIndexRow[]>(
-    `/crypto-stocks/sector/${encodeURIComponent(sectorName)}/index?${sp}`,
+    `/crypto-stocks/sectors/${encodeURIComponent(sectorSlug)}/index?${sp}`,
     () => [],
   );
 }

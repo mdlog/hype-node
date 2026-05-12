@@ -82,13 +82,16 @@ export default async function StocksPage() {
 
   // Pre-fetch the sector-index series for each known sector so the client can
   // toggle between them without a round-trip. Each series is independent and
-  // hits a different path → safe to fan out.
+  // hits a different path → safe to fan out. The sector-index endpoint keys
+  // by slug (`btc-treasury`), not the display name — see crypto-stocks.ts.
   const sectorNames = sectors.map((s) => s.sector_name);
   const sectorIndexEntries = await Promise.all(
-    sectorNames.map(async (name) => {
-      const rowsRaw = await getCryptoStockSectorIndex(name, { limit: 90 }).catch(() => []);
+    sectors.map(async (s) => {
+      const rowsRaw = await getCryptoStockSectorIndex(s.sector_slug, { limit: 90 }).catch(
+        () => [],
+      );
       const series: SectorIndexSeries = {
-        sector: name,
+        sector: s.sector_name,
         rows: rowsRaw.map((r) => ({
           date: r.date,
           price: r.price,
@@ -96,7 +99,7 @@ export default async function StocksPage() {
           ndx: r.nasdaq100_index,
         })),
       };
-      return [name, series] as const;
+      return [s.sector_name, series] as const;
     }),
   );
   const sectorIndex: Record<string, SectorIndexSeries> = Object.fromEntries(sectorIndexEntries);
