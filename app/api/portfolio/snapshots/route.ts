@@ -20,6 +20,7 @@ import {
   getSsiSnapshot,
 } from "@/lib/api/sosovalue";
 import {
+  buildPriceLookup,
   buildSnapshotPositions,
   computeAumUsd,
   type SnapshotPosition,
@@ -56,7 +57,16 @@ export async function POST(req: NextRequest) {
     safeNum(() => getSsiSnapshot("ssiMAG7").then((s) => s.price)),
   ]);
 
-  const positions: SnapshotPosition[] = buildSnapshotPositions(portfolio);
+  // Price every spot symbol in the wallet before persisting. The cron path
+  // does this in a single batch across all wallets; here it's just this
+  // user's symbols, so the call is cheap (shares the SoSoValue cache with
+  // the prior `getCurrencySnapshot` calls for benchmarks).
+  const spotSymbols = (portfolio.sodex.balances ?? []).map((b) => b.asset);
+  const priceLookup = await buildPriceLookup(spotSymbols);
+  const positions: SnapshotPosition[] = buildSnapshotPositions(
+    portfolio,
+    priceLookup,
+  );
   const totalAumUsd = computeAumUsd(positions);
   // PnL requires cost basis we don't track yet (v2 — needs on-chain transfer
   // indexing). Persist null until the indexer lands so historical rows aren't

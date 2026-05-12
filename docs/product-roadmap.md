@@ -69,11 +69,11 @@ A personal trader or quant can **research → execute → monitor** a strategy w
 | **Backtest page (standalone)** | ✅ Done | Page exists (~358 lines). |
 | **Settings page** | ✅ Done | Page exists (~457 lines). |
 | **Chat page wiring** | ✅ Done (far exceeds scope) | **22 tools** registered — see "Beyond original scope" for detail. |
-| **Per-asset USD price aggregation in Portfolio** | ⚠️ Deferred to Wave 2 | ~0.5 day if needed. |
+| **Per-asset USD price aggregation in Portfolio** | ✅ Done at snapshot level | `buildPriceLookup` + price-aware `buildSnapshotPositions` in `lib/api/portfolio-snapshot.ts`. Cron route batches one price lookup across all wallets (union of symbols → single `/currencies` walk + per-symbol snapshot fetch). Manual snapshot endpoint prices the user's own balances. Indices still `usd_value: null` pending the Wave 2 vault NAV. Live `BalanceTable` USD column is a small follow-up. |
 | **Logos + sponsor on token detail** | ✅ Done | — |
 | **Empty state per tab on token detail** | ✅ Done | — |
 | **Research page redesign** | ✅ Done | Table layout with filter rail (sector/source/strength/timeframe), sort, and per-investor search — matches the design HTML. |
-| **WalletConnect Project ID** | ❌ Placeholder still `YOUR_WALLETCONNECT_PROJECT_ID` | 5 minutes (free at cloud.reown.com). |
+| **WalletConnect Project ID** | ✅ Obsolete (Privy migration) | Pre-Privy, RainbowKit's `getDefaultConfig` required `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` to enable mobile pairing. After the Privy migration in [`app/providers.tsx`](../app/providers.tsx), Privy bundles WalletConnect internally and the env var is now unused (kept in `.env.example` as legacy only). |
 
 ### Beyond original scope (shipped in Wave 1, originally planned for Wave 2/3)
 
@@ -104,7 +104,7 @@ Wave 1 is considered "ready to ship" when **all seven** items below are satisfie
 - [x] **Risk-gate config functional**: a user can set a drawdown threshold (+ vol/sentiment/weight/outflow caps + per-rule toggles + manual override), and the agent honors it on every cycle. Persistent in SQLite (`agent-service/data/hypenode.db`), exposed via `GET/POST /risk/config`.
 - [x] **History audit trail**: decision log is persistent in SQLite, one row per cycle (sector, basket, risk verdict, breaches, SoDEX placed/skipped/errors, SSI tx hash, strategy source/confidence/reasoning). Surfaced at `/history` via `GET /history` + `GET /history/stats`. Retention is indefinite — at least 30 days satisfies the exit criterion.
 
-**All Wave 1 exit criteria are green.** The remaining work `5 → 12 May` (~7 calendar days) is polish + closing the small ⚠️ items still outstanding (Settings page, standalone Backtest, Triggers field, per-asset USD price aggregation, WalletConnect Project ID). End-of-week buffer for regression testing before Wave 2 kicks off.
+**All Wave 1 exit criteria are green.** The remaining work `5 → 12 May` (~7 calendar days) is polish — Settings page, standalone Backtest, Triggers field are all done; per-asset USD pricing landed at the snapshot level (live `BalanceTable` column is a tiny follow-up); the WalletConnect Project ID line item is obsolete after the Privy migration. End-of-week buffer for regression testing before Wave 2 kicks off.
 
 ---
 

@@ -23,9 +23,12 @@ import {
   getSsiSnapshot,
 } from "@/lib/api/sosovalue";
 import {
+  buildPriceLookup,
   buildSnapshotPositions,
+  collectSpotSymbols,
   computeAumUsd,
 } from "@/lib/api/portfolio-snapshot";
+import type { UserPortfolio } from "@/lib/api/portfolio";
 import type { Json, PfSnapshotInsert } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
@@ -83,10 +86,28 @@ export async function GET(req: NextRequest) {
   let inserted = 0;
   const failures: { address: string; error: string }[] = [];
 
+  // Two-pass design: fetch every wallet's portfolio first so we can collect
+  // a single union of spot symbols, then issue one batched price lookup.
+  // This collapses (N wallets × M symbols) snapshot fetches into a single
+  // `/currencies` walk + one snapshot per unique symbol — cheap enough that
+  // we can price every wallet on every cron tick without quota concerns.
+  const fetched: Array<{ address: string; portfolio: UserPortfolio }> = [];
   for (const addr of addresses) {
     try {
       const portfolio = await getUserPortfolio(addr as Address);
-      const positions = buildSnapshotPositions(portfolio);
+      fetched.push({ address: addr, portfolio });
+    } catch (err) {
+      failures.push({ address: addr, error: (err as Error).message });
+    }
+  }
+
+  const priceLookup = await buildPriceLookup(
+    collectSpotSymbols(fetched.map((f) => f.portfolio)),
+  );
+
+  for (const { address: addr, portfolio } of fetched) {
+    try {
+      const positions = buildSnapshotPositions(portfolio, priceLookup);
       const insert: PfSnapshotInsert = {
         user_address: addr,
         positions: positions as unknown as Json,
