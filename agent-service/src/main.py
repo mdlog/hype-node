@@ -15,8 +15,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Load .env before importing the graph/tools. terminal.py reads its SoSoValue
 # settings at import time, so late dotenv loading can leave it with stale env.
@@ -59,13 +61,76 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="HypeNode Agent", lifespan=lifespan)
+# --- Security config ---------------------------------------------------------
+#
+# Two layers of defense for the public-tunneled service:
+#
+# 1. AGENT_API_KEY — shared secret. Every request except /health and the OPTIONS
+#    pre-flight must carry an `x-agent-key` header matching this value. The
+#    Next.js proxy reads the same value from its server-only env and forwards
+#    it on every fetch to AGENT_SERVICE_URL. When AGENT_API_KEY is unset the
+#    service refuses to start so an unattended deploy can't end up wide-open.
+#
+# 2. Docs are disabled by default. /openapi.json /docs /redoc all 404 unless
+#    AGENT_DOCS_ENABLED=true is set explicitly (handy for local dev).
+#
+# 3. CORS is locked to AGENT_ALLOWED_ORIGINS (comma-separated list of full
+#    origins, e.g. "https://hype-node.vercel.app,http://localhost:3000").
+#    Without it set we fall back to localhost-only — never wildcard in prod.
+
+AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "").strip()
+AGENT_DOCS_ENABLED = os.environ.get("AGENT_DOCS_ENABLED", "").lower() in {"1", "true", "yes"}
+AGENT_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "AGENT_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if o.strip()
+]
+
+if not AGENT_API_KEY:
+    raise RuntimeError(
+        "AGENT_API_KEY is not set. Generate a 48-char random string and set it "
+        "in agent-service/.env AND in the Next.js deployment env (Vercel) so "
+        "the proxy can forward it. Run: "
+        "python -c 'import secrets; print(secrets.token_hex(48))'"
+    )
+
+# Paths that should be reachable without the API key. Keep this list short —
+# anything here is publicly callable, so don't leak business state.
+PUBLIC_PATHS = frozenset({"/health"})
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # CORS preflight has no auth headers by spec.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+        provided = request.headers.get("x-agent-key", "")
+        if provided != AGENT_API_KEY:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+app = FastAPI(
+    title="HypeNode Agent",
+    lifespan=lifespan,
+    # 404 the docs in production. Re-enable per-deploy with AGENT_DOCS_ENABLED.
+    openapi_url="/openapi.json" if AGENT_DOCS_ENABLED else None,
+    docs_url="/docs" if AGENT_DOCS_ENABLED else None,
+    redoc_url="/redoc" if AGENT_DOCS_ENABLED else None,
+)
+# CORS first so preflight is handled before the API-key middleware kicks in.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=AGENT_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(ApiKeyMiddleware)
 
 START_TS = time.time()
 LATEST_STATE: dict[str, Any] = {}

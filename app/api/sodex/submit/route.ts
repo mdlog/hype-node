@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { sessionOptions, type SessionData } from "@/lib/auth/session";
 
 const AGENT_URL = process.env.AGENT_SERVICE_URL ?? "http://localhost:8001";
+const AGENT_API_KEY = process.env.AGENT_API_KEY ?? "";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,10 @@ export async function POST(req: NextRequest) {
   try {
     const res = await fetch(`${AGENT_URL}/sodex/submit`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(AGENT_API_KEY ? { "x-agent-key": AGENT_API_KEY } : {}),
+      },
       body: JSON.stringify(body),
     });
     const data = await res.json();

@@ -2,6 +2,19 @@
 // The agent service is a separate FastAPI process (see agent-service/).
 
 const AGENT_URL = process.env.AGENT_SERVICE_URL ?? "http://localhost:8001";
+// Server-only shared secret. The agent-service rejects every request except
+// /health that doesn't carry x-agent-key matching this value. Kept on the
+// server because exposing it to the browser bundle would defeat the gate.
+const AGENT_API_KEY = process.env.AGENT_API_KEY ?? "";
+
+// Merge the API-key header into a caller-supplied init so all routes that
+// talk to the agent share one auth path. Callers don't need to remember
+// the header name themselves.
+function authedInit(init: RequestInit = {}): RequestInit {
+  const headers = new Headers(init.headers);
+  if (AGENT_API_KEY) headers.set("x-agent-key", AGENT_API_KEY);
+  return { ...init, headers };
+}
 
 export type AgentNode = {
   id: string;
@@ -97,9 +110,7 @@ function normalizeAgentState(wire: AgentStateWire): AgentState {
 
 export async function getAgentState(): Promise<AgentState> {
   try {
-    const res = await fetch(`${AGENT_URL}/state`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`${AGENT_URL}/state`, authedInit({ cache: "no-store" }));
     const wire = await safeJson<AgentStateWire>(res, {});
     return normalizeAgentState(wire);
   } catch {
@@ -116,7 +127,7 @@ export type ToolHealth = {
 
 export async function getToolsHealth(): Promise<ToolHealth | null> {
   try {
-    const res = await fetch(`${AGENT_URL}/tools/health`, { cache: "no-store" });
+    const res = await fetch(`${AGENT_URL}/tools/health`, authedInit({ cache: "no-store" }));
     if (!res.ok) return null;
     return (await res.json()) as ToolHealth;
   } catch {
@@ -126,7 +137,7 @@ export async function getToolsHealth(): Promise<ToolHealth | null> {
 
 export async function getReasoningLog(): Promise<ReasoningEntry[]> {
   try {
-    const res = await fetch(`${AGENT_URL}/reasoning`, { cache: "no-store" });
+    const res = await fetch(`${AGENT_URL}/reasoning`, authedInit({ cache: "no-store" }));
     return await safeJson<ReasoningEntry[]>(res, []);
   } catch {
     return [];
@@ -148,11 +159,14 @@ export type ControlResult = {
 
 async function postControl(action: "pause" | "step" | "reset" | "halt"): Promise<ControlResult> {
   try {
-    const res = await fetch(`${AGENT_URL}/${action}`, {
-      method: "POST",
-      cache: "no-store",
-      headers: { "content-type": "application/json" },
-    });
+    const res = await fetch(
+      `${AGENT_URL}/${action}`,
+      authedInit({
+        method: "POST",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+      }),
+    );
     if (!res.ok) {
       return { ok: false, error: `HTTP ${res.status}` };
     }
@@ -203,7 +217,7 @@ export type TerminalStatus = {
 
 export async function getTerminalStatus(): Promise<TerminalStatus | null> {
   try {
-    const res = await fetch(`${AGENT_URL}/terminal/status`, { cache: "no-store" });
+    const res = await fetch(`${AGENT_URL}/terminal/status`, authedInit({ cache: "no-store" }));
     if (!res.ok) {
       console.warn(`[agent] /terminal/status ${res.status}`);
       return null;
@@ -253,9 +267,10 @@ export async function proposeBasket(
       n_assets: String(nAssets),
       weighting,
     });
-    const res = await fetch(`${AGENT_URL}/propose-basket?${params}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(
+      `${AGENT_URL}/propose-basket?${params}`,
+      authedInit({ cache: "no-store" }),
+    );
     if (!res.ok) {
       console.warn(`[agent] /propose-basket ${res.status}`);
       return null;
@@ -318,12 +333,15 @@ export async function runBacktest(
   costs: BacktestCostParams = {},
 ): Promise<BacktestResult | null> {
   try {
-    const res = await fetch(`${AGENT_URL}/run-backtest`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ constituents, days, ...costs }),
-      cache: "no-store",
-    });
+    const res = await fetch(
+      `${AGENT_URL}/run-backtest`,
+      authedInit({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ constituents, days, ...costs }),
+        cache: "no-store",
+      }),
+    );
     if (!res.ok) {
       console.warn(`[agent] /run-backtest ${res.status}`);
       return null;
@@ -371,7 +389,7 @@ const RISK_CONFIG_DEFAULTS: RiskConfig = {
 
 export async function getRiskConfig(): Promise<RiskConfig> {
   try {
-    const res = await fetch(`${AGENT_URL}/risk/config`, { cache: "no-store" });
+    const res = await fetch(`${AGENT_URL}/risk/config`, authedInit({ cache: "no-store" }));
     if (!res.ok) return RISK_CONFIG_DEFAULTS;
     return (await res.json()) as RiskConfig;
   } catch {
@@ -385,12 +403,15 @@ export async function updateRiskConfig(
   patch: Partial<RiskConfig>,
 ): Promise<RiskConfig | null> {
   try {
-    const res = await fetch(`${AGENT_URL}/risk/config`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(patch),
-      cache: "no-store",
-    });
+    const res = await fetch(
+      `${AGENT_URL}/risk/config`,
+      authedInit({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+        cache: "no-store",
+      }),
+    );
     if (!res.ok) return null;
     return (await res.json()) as RiskConfig;
   } catch {
@@ -450,7 +471,7 @@ export async function getDecisionHistory(opts?: {
     if (opts?.since) params.set("since", opts.since);
     const qs = params.toString();
     const url = `${AGENT_URL}/history${qs ? `?${qs}` : ""}`;
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url, authedInit({ cache: "no-store" }));
     if (!res.ok) return [];
     const body = (await res.json()) as { rows?: DecisionRow[] };
     return body.rows ?? [];
@@ -461,7 +482,7 @@ export async function getDecisionHistory(opts?: {
 
 export async function getHistoryStats(): Promise<HistoryStats | null> {
   try {
-    const res = await fetch(`${AGENT_URL}/history/stats`, { cache: "no-store" });
+    const res = await fetch(`${AGENT_URL}/history/stats`, authedInit({ cache: "no-store" }));
     if (!res.ok) return null;
     return (await res.json()) as HistoryStats;
   } catch {
@@ -474,14 +495,17 @@ export async function chat(
   walletAddress?: string | null,
 ): Promise<ChatTurn> {
   try {
-    const res = await fetch(`${AGENT_URL}/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        turns,
-        wallet_address: walletAddress ?? null,
+    const res = await fetch(
+      `${AGENT_URL}/chat`,
+      authedInit({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          turns,
+          wallet_address: walletAddress ?? null,
+        }),
       }),
-    });
+    );
     return await safeJson<ChatTurn>(res, {
       role: "agent",
       content: "Agent service unreachable. Start the Python service with `npm run agent`.",
