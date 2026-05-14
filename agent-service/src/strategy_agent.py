@@ -38,9 +38,56 @@ from anthropic import (
     RateLimitError,
 )
 
+# OpenAI is the secondary provider — used when LLM_PROVIDER=openai or as
+# auto-failover when Anthropic returns an auth/billing failure mid-cycle.
+from openai import AsyncOpenAI
+from openai import APIStatusError as OpenAIAPIStatusError
+from openai import APIConnectionError as OpenAIConnectionError
+from openai import APITimeoutError as OpenAITimeoutError
+
 from .chat_agent import TOOL_DISPATCH, TOOL_SCHEMAS as CHAT_TOOL_SCHEMAS, _summarize_output
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Provider failover plumbing
+# ---------------------------------------------------------------------------
+#
+# `_SwitchProvider` is the signal an inner provider loop sends to the top-
+# level dispatcher when it hits an auth- or billing-class failure. The
+# dispatcher then tries the OTHER provider before giving up to the rule-
+# based fallback. Network/transient errors do NOT raise this — those go
+# straight to rule-based since cross-provider switching wouldn't help.
+
+class _SwitchProvider(Exception):
+    """Raised by a provider loop when failover to the other provider should
+    be attempted (auth, billing, exhausted quota). Carries a short reason
+    string for the operator log."""
+
+
+# Substrings (case-insensitive) the upstream uses for auth/billing problems
+# that aren't caught by a 401 status. Anthropic returns 400 with "credit
+# balance" wording when the account balance hits zero; OpenAI returns 429
+# with "insufficient_quota" / "billing_hard_limit_reached" wording.
+_AUTH_BILLING_BODY_HINTS = (
+    "credit balance",
+    "insufficient_quota",
+    "quota_exceeded",
+    "billing_hard_limit",
+    "billing_not_active",
+    "monthly quota",
+    "exceeded your current quota",
+)
+
+
+def _is_billing_or_auth_error(status: int | None, body: str) -> bool:
+    if status in (401, 402, 403):
+        return True
+    if not body:
+        return False
+    needle = body.lower()
+    return any(hint in needle for hint in _AUTH_BILLING_BODY_HINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -256,25 +303,55 @@ async def _claude_create_with_retry(
 
 
 async def run_strategy_agent(sector: str) -> dict[str, Any]:
-    """Drive Claude through one strategy cycle for `sector`.
+    """Drive an LLM through one strategy cycle for `sector`.
+
+    Provider selection follows `LLM_PROVIDER` env (anthropic|openai), with
+    automatic failover to the other provider when the primary returns an
+    auth/billing error (e.g. credits exhausted on Anthropic). Network and
+    transient failures fall straight through to a rule-based fallback —
+    cross-provider switching wouldn't help those.
 
     Returns:
         {
           "basket": dict[symbol -> weight],
           "reasoning": str,
           "confidence": "low" | "medium" | "high",
-          "source": "claude" | "fallback",
+          "source": "claude" | "openai" | "fallback",
           "tokens_in": int,
           "tokens_out": int,
         }
-
-    Always returns — never raises. On any failure, returns a rule-based
-    fallback so the LangGraph loop keeps progressing.
     """
+    primary = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+    if primary not in ("anthropic", "openai"):
+        primary = "anthropic"
+    chain: list[str] = [primary, "openai" if primary == "anthropic" else "anthropic"]
+
+    last_reason = ""
+    for provider in chain:
+        try:
+            if provider == "anthropic":
+                return await _run_anthropic_strategy_loop(sector)
+            return await _run_openai_strategy_loop(sector)
+        except _SwitchProvider as exc:
+            last_reason = str(exc)
+            other = "openai" if provider == "anthropic" else "anthropic"
+            _emit(
+                "WAIT",
+                f"strategy · {provider} unavailable ({exc}) — failing over to {other}",
+            )
+            logger.warning("strategy provider %s failed: %s — switching to %s", provider, exc, other)
+            continue
+    return _rule_based_fallback(f"all providers failed: {last_reason or 'unknown'}")
+
+
+async def _run_anthropic_strategy_loop(sector: str) -> dict[str, Any]:
+    """Anthropic implementation of the strategy cycle. Raises _SwitchProvider
+    on auth/billing failure so the dispatcher can fail over to OpenAI."""
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
-        _emit("WAIT", "strategy · ANTHROPIC_API_KEY not set — using rule-based fallback")
-        return _rule_based_fallback("no api key")
+        # Missing key → try the other provider before giving up (the operator
+        # may have only configured OpenAI).
+        raise _SwitchProvider("ANTHROPIC_API_KEY not set")
 
     # Configure SDK with extra retries + a generous per-request timeout. The
     # SDK's built-in retry handles the most common transient blips (429 with
@@ -338,7 +415,9 @@ async def run_strategy_agent(sector: str) -> dict[str, Any]:
             return _rule_based_fallback(f"network: {type(exc).__name__}")
         except APIStatusError as exc:
             # Either retries exhausted (transient still down) or permanent
-            # status (auth/bad-request) bubbled up immediately. Both fallback.
+            # status (auth/bad-request) bubbled up immediately. Auth/billing
+            # errors raise _SwitchProvider so the dispatcher can fail over
+            # to OpenAI; everything else returns the rule-based fallback.
             status = getattr(exc, "status_code", None)
             kind = type(exc).__name__
             # Pull the structured error body from the response — without it
@@ -352,6 +431,16 @@ async def run_strategy_agent(sector: str) -> dict[str, Any]:
                     body_excerpt = (resp.text or "")[:500]
             except Exception:  # noqa: BLE001
                 body_excerpt = ""
+            logger.warning(
+                "Claude API error: %s status=%s body=%s",
+                kind,
+                status,
+                body_excerpt or "<empty>",
+            )
+            if _is_billing_or_auth_error(status, body_excerpt):
+                raise _SwitchProvider(
+                    f"Anthropic {kind} {status} ({_short_reason(body_excerpt) or 'auth/billing'})"
+                ) from exc
             if status and _is_retryable_status(exc):
                 msg = (
                     f"strategy · Anthropic still {kind} {status} after "
@@ -360,12 +449,6 @@ async def run_strategy_agent(sector: str) -> dict[str, Any]:
             else:
                 msg = f"strategy · Anthropic {kind} {status} (permanent) — fallback"
             _emit("WAIT", msg)
-            logger.warning(
-                "Claude API error: %s status=%s body=%s",
-                kind,
-                status,
-                body_excerpt or "<empty>",
-            )
             return _rule_based_fallback(f"http {status or 'error'}")
         except Exception as exc:  # noqa: BLE001 — final safety net
             _emit("WAIT", f"strategy · Claude API error: {exc} — fallback")
@@ -494,8 +577,251 @@ def _finalize_submission(
 
 
 # ---------------------------------------------------------------------------
-# Fallback — same shape as a Claude submission so callers can treat both
-# uniformly. Used when API key missing, Claude unreachable, or budget caps.
+# OpenAI strategy loop — mirrors the Anthropic loop using function-call
+# protocol. Reused as the auto-failover when Anthropic credits run out, so
+# the autonomous LangGraph cycle keeps producing real LLM-driven baskets
+# instead of falling all the way to the rule-based 50/30/20 default.
+# ---------------------------------------------------------------------------
+
+
+def _short_reason(body: str) -> str:
+    """Pull a short human-readable reason out of an Anthropic / OpenAI error
+    body so operator log lines stay scannable instead of dumping JSON."""
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            err = parsed.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message")
+                if isinstance(msg, str) and msg:
+                    return msg[:160]
+            msg = parsed.get("message")
+            if isinstance(msg, str) and msg:
+                return msg[:160]
+    except Exception:  # noqa: BLE001
+        pass
+    return body[:160]
+
+
+def _strategy_tools_openai() -> list[dict[str, Any]]:
+    """Convert the strategy tool list (Anthropic shape) to OpenAI's
+    {type: function, function: {...}} schema. Cached per-process."""
+    global _STRATEGY_OPENAI_TOOLS_CACHE
+    if _STRATEGY_OPENAI_TOOLS_CACHE is None:
+        _STRATEGY_OPENAI_TOOLS_CACHE = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["input_schema"],
+                },
+            }
+            for t in _build_tool_schemas()
+        ]
+    return _STRATEGY_OPENAI_TOOLS_CACHE
+
+
+_STRATEGY_OPENAI_TOOLS_CACHE: list[dict[str, Any]] | None = None
+
+
+async def _run_openai_strategy_loop(sector: str) -> dict[str, Any]:
+    """OpenAI implementation of the strategy cycle. Function-call protocol
+    instead of Anthropic tool_use, but the workflow + termination contract
+    is identical: the model is expected to call `submit_basket` exactly
+    once to end the cycle. Raises _SwitchProvider on auth/billing failure."""
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise _SwitchProvider("OPENAI_API_KEY not set")
+
+    client = AsyncOpenAI(api_key=api_key, max_retries=SDK_MAX_RETRIES, timeout=SDK_TIMEOUT_SEC)
+    model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", os.getenv("ANTHROPIC_TEMPERATURE", "0.2")))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", os.getenv("ANTHROPIC_MAX_TOKENS", "2048")))
+    tools = _strategy_tools_openai()
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Sector this cycle: {sector}\n\n"
+                "Run your standard workflow. End the cycle with submit_basket."
+            ),
+        },
+    ]
+
+    _emit(
+        "THINK",
+        f"strategy · sector={sector} · invoking {model} (openai) · temp={temperature} max_tokens={max_tokens}",
+    )
+
+    tokens_in = 0
+    tokens_out = 0
+
+    for _ in range(MAX_ITER):
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except (OpenAIConnectionError, OpenAITimeoutError) as exc:
+            _emit("WAIT", f"strategy · OpenAI {type(exc).__name__} — fallback")
+            logger.warning("OpenAI network error: %s", exc)
+            return _rule_based_fallback(f"openai network: {type(exc).__name__}")
+        except OpenAIAPIStatusError as exc:
+            status = getattr(exc, "status_code", None)
+            kind = type(exc).__name__
+            body_excerpt: str = ""
+            try:
+                resp_obj = getattr(exc, "response", None)
+                if resp_obj is not None:
+                    body_excerpt = (resp_obj.text or "")[:500]
+            except Exception:  # noqa: BLE001
+                body_excerpt = ""
+            logger.warning(
+                "OpenAI API error: %s status=%s body=%s",
+                kind,
+                status,
+                body_excerpt or "<empty>",
+            )
+            if _is_billing_or_auth_error(status, body_excerpt):
+                raise _SwitchProvider(
+                    f"OpenAI {kind} {status} ({_short_reason(body_excerpt) or 'auth/billing'})"
+                ) from exc
+            _emit("WAIT", f"strategy · OpenAI {kind} {status} — fallback")
+            return _rule_based_fallback(f"openai http {status or 'error'}")
+        except Exception as exc:  # noqa: BLE001
+            _emit("WAIT", f"strategy · OpenAI error: {exc} — fallback")
+            logger.exception("OpenAI call failed (unexpected)")
+            return _rule_based_fallback("openai api error")
+
+        u = resp.usage
+        if u is not None:
+            tokens_in += getattr(u, "prompt_tokens", 0) or 0
+            tokens_out += getattr(u, "completion_tokens", 0) or 0
+
+        choice = resp.choices[0]
+        msg = choice.message
+
+        # Stream any text the model emitted before its tool calls so the
+        # operator sees its reasoning live, matching the Anthropic loop.
+        if msg.content:
+            for paragraph in msg.content.split("\n\n"):
+                para = paragraph.strip()
+                if para:
+                    _emit("THINK", f"strategy · {para}")
+
+        if choice.finish_reason in ("stop", "length"):
+            _emit(
+                "WAIT",
+                f"strategy · finish_reason={choice.finish_reason} without submit — fallback",
+            )
+            return _rule_based_fallback(
+                "no submit_basket" if choice.finish_reason == "stop" else "max_tokens"
+            )
+
+        if choice.finish_reason != "tool_calls" or not msg.tool_calls:
+            _emit(
+                "WAIT",
+                f"strategy · unexpected finish_reason={choice.finish_reason} — fallback",
+            )
+            return _rule_based_fallback(f"finish_reason={choice.finish_reason}")
+
+        # Mirror the assistant turn back into history so the next call has
+        # matching tool_call_id values to attach tool results to.
+        messages.append(
+            {
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ],
+            }
+        )
+
+        submitted: dict[str, Any] | None = None
+
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+
+            if name == "submit_basket":
+                submitted = args if isinstance(args, dict) else {}
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": "basket submitted — cycle complete",
+                    }
+                )
+                continue
+
+            handler = TOOL_DISPATCH.get(name)
+            t0 = time.monotonic()
+            if handler is None:
+                result: Any = {"error": f"unknown tool: {name}"}
+                ok = False
+            else:
+                try:
+                    result = await handler(args if isinstance(args, dict) else {})
+                    ok = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("strategy tool %s failed", name)
+                    result = {"error": str(exc)}
+                    ok = False
+            duration_ms = int((time.monotonic() - t0) * 1000)
+
+            summary = (
+                _summarize_output(name, result)
+                if ok
+                else f"error: {result.get('error') if isinstance(result, dict) else result}"
+            )
+            args_brief = (
+                ",".join(f"{k}={v!r}" for k, v in args.items())[:80]
+                if isinstance(args, dict)
+                else ""
+            )
+            _emit("TOOL", f"strategy · {name}({args_brief}) → {summary} · {duration_ms}ms")
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, default=str)[:TOOL_RESULT_MAX_CHARS],
+                }
+            )
+
+        if submitted is not None:
+            out = _finalize_submission(submitted, tokens_in, tokens_out)
+            out["source"] = "openai"
+            return out
+
+    _emit("WAIT", f"strategy · OpenAI MAX_ITER {MAX_ITER} reached without submit — fallback")
+    return _rule_based_fallback("max_iter (openai)")
+
+
+# ---------------------------------------------------------------------------
+# Fallback — same shape as a Claude / OpenAI submission so callers can treat
+# all three uniformly. Used when API key missing, both providers unreachable,
+# or budget caps.
 # ---------------------------------------------------------------------------
 
 
