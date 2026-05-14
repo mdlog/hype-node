@@ -341,6 +341,17 @@ async def run_strategy_agent(sector: str) -> dict[str, Any]:
             # status (auth/bad-request) bubbled up immediately. Both fallback.
             status = getattr(exc, "status_code", None)
             kind = type(exc).__name__
+            # Pull the structured error body from the response — without it
+            # a 400 is undebuggable (could be malformed tool, oversized
+            # context, bad model name, etc.). Anthropic returns
+            # {"type":"error","error":{"type":"...","message":"..."}}.
+            body_excerpt: str = ""
+            try:
+                resp = getattr(exc, "response", None)
+                if resp is not None:
+                    body_excerpt = (resp.text or "")[:500]
+            except Exception:  # noqa: BLE001
+                body_excerpt = ""
             if status and _is_retryable_status(exc):
                 msg = (
                     f"strategy · Anthropic still {kind} {status} after "
@@ -349,7 +360,12 @@ async def run_strategy_agent(sector: str) -> dict[str, Any]:
             else:
                 msg = f"strategy · Anthropic {kind} {status} (permanent) — fallback"
             _emit("WAIT", msg)
-            logger.warning("Claude API error: %s status=%s", kind, status)
+            logger.warning(
+                "Claude API error: %s status=%s body=%s",
+                kind,
+                status,
+                body_excerpt or "<empty>",
+            )
             return _rule_based_fallback(f"http {status or 'error'}")
         except Exception as exc:  # noqa: BLE001 — final safety net
             _emit("WAIT", f"strategy · Claude API error: {exc} — fallback")
