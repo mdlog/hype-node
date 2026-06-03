@@ -205,6 +205,27 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         }
     }
 
+    // --- management fee ---
+
+    /// @notice Accrue 1%/yr management fee as diluted creator shares. Idempotent per UTC day.
+    function accrueMgmt(bytes32 indexId) external onlyKeeper nonReentrant {
+        IndexVault storage v = vaults[indexId];
+        if (!v.active) revert VaultInactive();
+        uint256 day = block.timestamp / 1 days;
+        if (mgmtAccruedOnDay[indexId][day]) revert BadRequest();
+        mgmtAccruedOnDay[indexId][day] = true;
+
+        uint256 dt = block.timestamp - v.lastMgmtAccrualAt;
+        v.lastMgmtAccrualAt = block.timestamp;
+        if (v.totalShares == 0 || dt == 0) return;
+
+        uint256 feeShares = v.totalShares * MGMT_FEE_BPS * dt / (YEAR * 10_000);
+        if (feeShares == 0) return;
+        v.creatorFeeShares += feeShares;
+        v.totalShares      += feeShares;
+        emit MgmtAccrued(indexId, feeShares, day);
+    }
+
     // --- test-only exposers (remove before mainnet build) ---
     function verifyNavExposed(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig) external view {
         _verifyNav(indexId, navPerShare, signedAt, sig);

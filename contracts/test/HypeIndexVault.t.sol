@@ -209,4 +209,33 @@ contract HypeIndexVaultTest is Test {
         vm.stopPrank();
         assertEq(usdc.balanceOf(alice), 200e6);
     }
+
+    function test_accrueMgmt_oneYearIsOnePercent() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        (, , uint256 sharesBefore,,,,) = vault.vaults(INDEX);
+
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(keeper);
+        vault.accrueMgmt(INDEX);
+
+        (, , uint256 sharesAfter,, , uint256 creatorFeeShares,) = vault.vaults(INDEX);
+        // feeShares ≈ totalShares * 1% * (365d/365d)
+        uint256 expected = sharesBefore * vault.MGMT_FEE_BPS() * 365 days / (vault.YEAR() * 10_000);
+        assertEq(creatorFeeShares, expected);
+        assertEq(sharesAfter, sharesBefore + expected);
+    }
+
+    function test_accrueMgmt_idempotentSameDay() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        vm.warp(block.timestamp + 2 days);
+        vm.startPrank(keeper);
+        vault.accrueMgmt(INDEX);
+        uint256 day = block.timestamp / 1 days;
+        assertTrue(vault.mgmtAccruedOnDay(INDEX, day));
+        vm.expectRevert(HypeIndexVault.BadRequest.selector);
+        vault.accrueMgmt(INDEX); // second call same day reverts
+        vm.stopPrank();
+    }
 }
