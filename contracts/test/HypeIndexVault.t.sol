@@ -178,4 +178,35 @@ contract HypeIndexVaultTest is Test {
         vm.expectRevert(HypeIndexVault.SlippageExceeded.selector);
         vault.settleDeposit(id, 1e6, 200e6, block.timestamp, sig);
     }
+
+    function test_cancelDeposit_beforePull_refundsFromReserve() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.cancelDeposit(id, 0);
+        assertEq(usdc.balanceOf(alice), 200e6); // fully refunded
+    }
+
+    function test_cancelDeposit_afterPull_keeperReturnsUsdc() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+        vm.prank(keeper);
+        vault.pullForDeposit(id);
+
+        // keeper unwound the partial swap and approves the return
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 200e6);
+        vault.cancelDeposit(id, 200e6);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(alice), 200e6);
+    }
 }

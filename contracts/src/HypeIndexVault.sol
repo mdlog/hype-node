@@ -187,6 +187,24 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         emit Subscribed(id, d.indexId, d.who, shares, navPerShare);
     }
 
+    /// @param returnedUsdc USDC the keeper sends back when the deposit was already pulled
+    ///        (it equals what the keeper recovered unwinding the swap; for an un-pulled
+    ///        request pass 0 — the funds are still in the vault reserve).
+    function cancelDeposit(uint256 id, uint256 returnedUsdc) external onlyKeeper nonReentrant {
+        PendingDeposit memory d = pendingDeposits[id];
+        if (d.who == address(0)) revert BadRequest();
+        delete pendingDeposits[id];
+        if (d.pulled) {
+            if (returnedUsdc > 0) usdc.safeTransferFrom(keeper, address(this), returnedUsdc);
+            usdc.safeTransfer(d.who, returnedUsdc);
+            emit DepositCancelled(id, d.who, returnedUsdc);
+        } else {
+            vaults[d.indexId].usdcReserve -= d.usdcIn;
+            usdc.safeTransfer(d.who, d.usdcIn);
+            emit DepositCancelled(id, d.who, d.usdcIn);
+        }
+    }
+
     // --- test-only exposers (remove before mainnet build) ---
     function verifyNavExposed(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig) external view {
         _verifyNav(indexId, navPerShare, signedAt, sig);
