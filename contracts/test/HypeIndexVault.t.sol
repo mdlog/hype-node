@@ -133,12 +133,12 @@ contract HypeIndexVaultTest is Test {
         assertTrue(pulled);
     }
 
-    // Full deposit→pull→settle for `amount` USDC at `nav`. Returns the requestId.
-    function _deposit(address who, uint256 amount, uint256 nav, uint256 minOut) internal returns (uint256 id) {
+    // Full deposit→pull→settle for `amount` USDC at `nav`. Returns the shares minted.
+    function _deposit(address who, uint256 amount, uint256 nav, uint256 minOut) internal returns (uint256 shares) {
         usdc.mint(who, amount);
         vm.startPrank(who);
         usdc.approve(address(vault), amount);
-        id = vault.requestDeposit(INDEX, amount, minOut);
+        uint256 id = vault.requestDeposit(INDEX, amount, minOut);
         vm.stopPrank();
         vm.prank(keeper);
         vault.pullForDeposit(id);
@@ -146,6 +146,7 @@ contract HypeIndexVaultTest is Test {
         bytes memory sig = _signNav(INDEX, nav, block.timestamp);
         vm.prank(keeper);
         vault.settleDeposit(id, nav, amount, block.timestamp, sig);
+        (shares,) = vault.positions(INDEX, who);
     }
 
     function test_settleDeposit_mintsSharesAtNav() public {
@@ -356,5 +357,175 @@ contract HypeIndexVaultTest is Test {
         _deposit(makeAddr("bob"), 200e6, 1e6, 0);
         (uint256 bobShares,) = vault.positions(INDEX, makeAddr("bob"));
         assertEq(bobShares, 200e6 * vault.WAD() / 1e6);
+    }
+
+    function test_inflationAttack_isNeutralized() public {
+        _open();
+        // attacker deposits the minimum, then donates USDC directly to the vault
+        _deposit(alice, 100e6, 1e6, 0);
+        usdc.mint(address(vault), 1_000_000e6); // raw donation
+        // NAV is signer-attested, not balanceOf-derived → a second depositor's share
+        // price is unaffected by the donation.
+        uint256 bobShares = _deposit(makeAddr("bob"), 100e6, 1e6, 0);
+        assertEq(bobShares, 100e6 * vault.WAD() / 1e6); // unchanged by the donation
+    }
+
+    function test_settleDeposit_rejectsNavDeviation() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);            // lastNav = 1e6
+        // next settle tries nav = 2e6 (+100%, beyond ±20%)
+        usdc.mint(makeAddr("bob"), 200e6);
+        vm.startPrank(makeAddr("bob"));
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+        vm.prank(keeper);
+        vault.pullForDeposit(id);
+        bytes memory sig = _signNav(INDEX, 2e6, block.timestamp);
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.NavDeviation.selector);
+        vault.settleDeposit(id, 2e6, 200e6, block.timestamp, sig);
+    }
+
+    // ---- coverage gap tests ----
+
+    function test_unpause_restoresOperation() public {
+        vm.prank(guardian);
+        vault.pause();
+        assertTrue(vault.paused());
+        vm.prank(guardian);
+        vault.unpause();
+        assertFalse(vault.paused());
+        // operations work again after unpause
+        _open();
+        _deposit(alice, 100e6, 1e6, 0);
+    }
+
+    function test_requestDeposit_revertsPaused() public {
+        _open();
+        vm.prank(guardian);
+        vault.pause();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        vm.expectRevert(HypeIndexVault.Paused.selector);
+        vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+    }
+
+    function test_pullForDeposit_revertsNotKeeper() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+        vm.prank(alice);
+        vm.expectRevert(HypeIndexVault.NotKeeper.selector);
+        vault.pullForDeposit(id);
+    }
+
+    function test_pullForDeposit_revertsAlreadyPulled() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+        vm.prank(keeper);
+        vault.pullForDeposit(id);
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.AlreadyPulled.selector);
+        vault.pullForDeposit(id);
+    }
+
+    function test_openVault_revertsVaultExists() public {
+        _open();
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.VaultExists.selector);
+        vault.openVault(INDEX, creator);
+    }
+
+    function test_accrueMgmt_revertsVaultInactive() public {
+        // INDEX has never been opened
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.VaultInactive.selector);
+        vault.accrueMgmt(INDEX);
+    }
+
+    function test_claimFees_revertsBadRequestWhenNoFees() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        // no time has passed → no fees accrued
+        vm.prank(creator);
+        vm.expectRevert(HypeIndexVault.BadRequest.selector);
+        vault.claimFees(INDEX);
+    }
+
+    function test_requestRedeem_revertsBadRequestExceedsShares() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);
+        (uint256 shares,) = vault.positions(INDEX, alice);
+        vm.prank(alice);
+        vm.expectRevert(HypeIndexVault.BadRequest.selector);
+        vault.requestRedeem(INDEX, shares + 1, 0);
+    }
+
+    function test_requestRedeem_revertsZeroShares() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);
+        vm.prank(alice);
+        vm.expectRevert(HypeIndexVault.BadRequest.selector);
+        vault.requestRedeem(INDEX, 0, 0);
+    }
+
+    function test_settleRedeem_rejectsFuturePrice() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);
+        (uint256 shares,) = vault.positions(INDEX, alice);
+        vm.prank(alice);
+        uint256 id = vault.requestRedeem(INDEX, shares, 0);
+        // sign a price from the future
+        uint256 futureTs = block.timestamp + 1 hours;
+        bytes32 structHash = keccak256(abi.encode(vault.PRICE_TYPEHASH(), INDEX, uint256(1e6), futureTs));
+        bytes32 digest = vault.hashTypedDataV4Exposed(structHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+        usdc.mint(keeper, 200e6);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 200e6);
+        vm.expectRevert(HypeIndexVault.FuturePrice.selector);
+        vault.settleRedeem(id, 200e6, 1e6, futureTs, sig);
+        vm.stopPrank();
+    }
+
+    function test_settleRedeem_revertsZeroNav() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);
+        (uint256 shares,) = vault.positions(INDEX, alice);
+        vm.prank(alice);
+        uint256 id = vault.requestRedeem(INDEX, shares, 0);
+        bytes32 structHash = keccak256(abi.encode(vault.PRICE_TYPEHASH(), INDEX, uint256(0), block.timestamp));
+        bytes32 digest = vault.hashTypedDataV4Exposed(structHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+        usdc.mint(keeper, 200e6);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 200e6);
+        vm.expectRevert(HypeIndexVault.ZeroNav.selector);
+        vault.settleRedeem(id, 200e6, 0, block.timestamp, sig);
+        vm.stopPrank();
+    }
+
+    function test_setKeeper_updatesKeeper() public {
+        address newKeeper = makeAddr("newKeeper");
+        vault.setKeeper(newKeeper);
+        assertEq(vault.keeper(), newKeeper);
+    }
+
+    function test_setGuardian_updatesGuardian() public {
+        address newGuardian = makeAddr("newGuardian");
+        vault.setGuardian(newGuardian);
+        assertEq(vault.guardian(), newGuardian);
     }
 }
