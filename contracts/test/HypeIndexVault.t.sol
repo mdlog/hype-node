@@ -132,4 +132,50 @@ contract HypeIndexVaultTest is Test {
         (,,,,, bool pulled) = vault.pendingDeposits(id);
         assertTrue(pulled);
     }
+
+    // Full deposit→pull→settle for `amount` USDC at `nav`. Returns the requestId.
+    function _deposit(address who, uint256 amount, uint256 nav, uint256 minOut) internal returns (uint256 id) {
+        usdc.mint(who, amount);
+        vm.startPrank(who);
+        usdc.approve(address(vault), amount);
+        id = vault.requestDeposit(INDEX, amount, minOut);
+        vm.stopPrank();
+        vm.prank(keeper);
+        vault.pullForDeposit(id);
+        // keeper "swapped" amount USDC into basket worth `amount` (1:1 for the test)
+        bytes memory sig = _signNav(INDEX, nav, block.timestamp);
+        vm.prank(keeper);
+        vault.settleDeposit(id, nav, amount, block.timestamp, sig);
+    }
+
+    function test_settleDeposit_mintsSharesAtNav() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);
+        (uint256 shares, uint256 hwm) = vault.positions(INDEX, alice);
+        assertEq(shares, 200e6 * vault.WAD() / 1e6); // basketValue * WAD / nav
+        assertEq(hwm, 1e6);
+    }
+
+    function test_settleDeposit_firstDepositMintsDeadShares() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);
+        (, , uint256 totalShares,,,,) = vault.vaults(INDEX);
+        uint256 aliceShares = 200e6 * vault.WAD() / 1e6;
+        assertEq(totalShares, aliceShares + vault.MIN_SHARES());
+    }
+
+    function test_settleDeposit_revertsOnSlippage() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, type(uint256).max); // impossible minSharesOut
+        vm.stopPrank();
+        vm.prank(keeper);
+        vault.pullForDeposit(id);
+        bytes memory sig = _signNav(INDEX, 1e6, block.timestamp);
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.SlippageExceeded.selector);
+        vault.settleDeposit(id, 1e6, 200e6, block.timestamp, sig);
+    }
 }

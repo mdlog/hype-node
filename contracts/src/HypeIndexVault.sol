@@ -162,6 +162,31 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         emit DepositPulled(id, d.usdcIn);
     }
 
+    function settleDeposit(
+        uint256 id, uint256 navPerShare, uint256 basketValueUsdc, uint256 signedAt, bytes calldata sig
+    ) external onlyKeeper nonReentrant whenNotPaused {
+        PendingDeposit memory d = pendingDeposits[id];
+        if (d.who == address(0)) revert BadRequest();
+        if (!d.pulled) revert NotPulled();
+        _verifyNav(d.indexId, navPerShare, signedAt, sig);
+
+        uint256 shares = basketValueUsdc * WAD / navPerShare;
+        if (shares < d.minSharesOut) revert SlippageExceeded();
+
+        IndexVault storage v = vaults[d.indexId];
+        if (v.totalShares == 0) {
+            v.totalShares += MIN_SHARES; // dead shares — never assigned to any position
+        }
+        Position storage p = positions[d.indexId][d.who];
+        if (p.shares == 0) p.hwmNav = navPerShare;
+        p.shares      += shares;
+        v.totalShares += shares;
+        v.lastNav      = navPerShare;
+
+        delete pendingDeposits[id];
+        emit Subscribed(id, d.indexId, d.who, shares, navPerShare);
+    }
+
     // --- test-only exposers (remove before mainnet build) ---
     function verifyNavExposed(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig) external view {
         _verifyNav(indexId, navPerShare, signedAt, sig);
