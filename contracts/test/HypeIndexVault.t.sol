@@ -301,6 +301,37 @@ contract HypeIndexVaultTest is Test {
         vm.stopPrank();
     }
 
+    function test_claimFees_movesCreatorSharesToRedeemQueue() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(keeper);
+        vault.accrueMgmt(INDEX);
+        (, , , , , uint256 feeShares,) = vault.vaults(INDEX);
+        assertGt(feeShares, 0);
+
+        vm.prank(creator);
+        uint256 id = vault.claimFees(INDEX);
+
+        // creator fee shares zeroed, a redeem request created for `creator`
+        (, , , , , uint256 feeSharesAfter,) = vault.vaults(INDEX);
+        assertEq(feeSharesAfter, 0);
+        (, address who, uint256 shares,,,) = vault.pendingRedeems(id);
+        assertEq(who, creator);
+        assertEq(shares, feeShares);
+    }
+
+    function test_claimFees_onlyCreator() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(keeper);
+        vault.accrueMgmt(INDEX);
+        vm.prank(alice);
+        vm.expectRevert(HypeIndexVault.NotCreator.selector);
+        vault.claimFees(INDEX);
+    }
+
     function test_redeem_doesNotPoisonDepositGuard() public {
         _open();
         _deposit(alice, 1_000e6, 1e6, 0);                  // lastNav = 1e6

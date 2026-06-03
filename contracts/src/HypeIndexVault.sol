@@ -261,7 +261,7 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
 
         IndexVault storage v = vaults[r.indexId];
         uint256 perfFeeUsdc = 0;
-        if (navPerShare > r.hwmNav) {
+        if (navPerShare > r.hwmNav && r.hwmNav != 0) {
             uint256 profitUsdc = (navPerShare - r.hwmNav) * r.shares / WAD;
             perfFeeUsdc = profitUsdc * PERF_FEE_BPS / 10_000;
             if (perfFeeUsdc > usdcReceived) perfFeeUsdc = usdcReceived; // safety clamp
@@ -281,6 +281,22 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         delete pendingRedeems[id];
         usdc.safeTransfer(r.who, netUsdc);
         emit Redeemed(id, r.indexId, r.who, netUsdc, perfFeeUsdc);
+    }
+
+    /// @notice Creator converts accrued fee shares into a redeem request (HWM=0 → no perf fee on fee shares).
+    function claimFees(bytes32 indexId) external nonReentrant returns (uint256 id) {
+        IndexVault storage v = vaults[indexId];
+        if (msg.sender != v.creator) revert NotCreator();
+        uint256 shares = v.creatorFeeShares;
+        if (shares == 0) revert BadRequest();
+        v.creatorFeeShares = 0;
+        id = nextRequestId++;
+        pendingRedeems[id] = PendingRedeem({
+            indexId: indexId, who: v.creator, shares: shares,
+            hwmNav: 0, minUsdcOut: 0, ts: uint64(block.timestamp)
+        });
+        emit FeesClaimed(indexId, v.creator, shares);
+        emit RedeemRequested(id, indexId, v.creator, shares);
     }
 
     // --- test-only exposers (remove before mainnet build) ---
