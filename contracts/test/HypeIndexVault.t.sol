@@ -528,4 +528,40 @@ contract HypeIndexVaultTest is Test {
         vault.setGuardian(newGuardian);
         assertEq(vault.guardian(), newGuardian);
     }
+
+    // ---- Fix A1: pullForDeposit must be whenNotPaused ----
+
+    function test_pullForDeposit_revertsWhenPaused() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+        vm.prank(guardian);
+        vault.pause();
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.Paused.selector);
+        vault.pullForDeposit(id);
+    }
+
+    // ---- Fix H1: zero-address guards ----
+
+    function test_constructor_rejectsZeroAddresses() public {
+        vm.expectRevert(HypeIndexVault.ZeroAddress.selector);
+        new HypeIndexVault(address(0), signer, keeper, guardian);
+        vm.expectRevert(HypeIndexVault.ZeroAddress.selector);
+        new HypeIndexVault(address(usdc), address(0), keeper, guardian);
+    }
+
+    function test_setSigner_rejectsZero() public {
+        vm.expectRevert(HypeIndexVault.ZeroAddress.selector);
+        vault.setSigner(address(0));
+    }
+
+    function test_openVault_rejectsZeroCreator() public {
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.ZeroAddress.selector);
+        vault.openVault(keccak256("ZERO"), address(0));
+    }
 }

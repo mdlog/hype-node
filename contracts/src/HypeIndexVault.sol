@@ -59,6 +59,9 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
     mapping(bytes32 => mapping(uint256 => bool)) public mgmtAccruedOnDay; // indexId => epochDay => done
 
     // --- events ---
+    event SignerSet(address signer);
+    event KeeperSet(address keeper);
+    event GuardianSet(address guardian);
     event VaultOpened(bytes32 indexed indexId, address indexed creator);
     event DepositRequested(uint256 indexed id, bytes32 indexed indexId, address indexed who, uint256 usdcIn);
     event DepositPulled(uint256 indexed id, uint256 usdcIn);
@@ -86,11 +89,16 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
     error ZeroNav();
     error AlreadyPulled();
     error NotPulled();
+    error ZeroAddress();
 
     constructor(address _usdc, address _signer, address _keeper, address _guardian)
         EIP712("HypeIndexVault", "1")
         Ownable(msg.sender)
     {
+        if (_usdc    == address(0)) revert ZeroAddress();
+        if (_signer  == address(0)) revert ZeroAddress();
+        if (_keeper  == address(0)) revert ZeroAddress();
+        if (_guardian == address(0)) revert ZeroAddress();
         usdc     = IERC20(_usdc);
         signer   = _signer;
         keeper   = _keeper;
@@ -103,9 +111,21 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
     modifier whenNotPaused() { if (paused) revert Paused(); _; }
 
     // --- admin ---
-    function setSigner(address s)   external onlyOwner { signer = s; }
-    function setKeeper(address k)   external onlyOwner { keeper = k; }
-    function setGuardian(address g) external onlyOwner { guardian = g; }
+    function setSigner(address s)   external onlyOwner {
+        if (s == address(0)) revert ZeroAddress();
+        signer = s;
+        emit SignerSet(s);
+    }
+    function setKeeper(address k)   external onlyOwner {
+        if (k == address(0)) revert ZeroAddress();
+        keeper = k;
+        emit KeeperSet(k);
+    }
+    function setGuardian(address g) external onlyOwner {
+        if (g == address(0)) revert ZeroAddress();
+        guardian = g;
+        emit GuardianSet(g);
+    }
     function pause()   external onlyGuardian { paused = true; }
     function unpause() external onlyGuardian { paused = false; }
 
@@ -137,6 +157,7 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
 
     // --- vault lifecycle ---
     function openVault(bytes32 indexId, address creator) external onlyKeeper {
+        if (creator == address(0)) revert ZeroAddress();
         if (vaults[indexId].active) revert VaultExists();
         vaults[indexId].active            = true;
         vaults[indexId].creator           = creator;
@@ -160,7 +181,7 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         emit DepositRequested(id, indexId, msg.sender, usdcAmount);
     }
 
-    function pullForDeposit(uint256 id) external onlyKeeper nonReentrant {
+    function pullForDeposit(uint256 id) external onlyKeeper nonReentrant whenNotPaused {
         PendingDeposit storage d = pendingDeposits[id];
         if (d.who == address(0)) revert BadRequest();
         if (d.pulled) revert AlreadyPulled();
