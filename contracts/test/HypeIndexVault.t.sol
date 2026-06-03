@@ -283,4 +283,47 @@ contract HypeIndexVaultTest is Test {
 
         assertEq(usdc.balanceOf(alice), 800e6); // no fee on a loss
     }
+
+    function test_redeem_revertsOnMinUsdcOut() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        (uint256 shares,) = vault.positions(INDEX, alice);
+        vm.prank(alice);
+        uint256 id = vault.requestRedeem(INDEX, shares, 5_000e6); // demands >= 5000 USDC out
+
+        uint256 nav = 1e6;
+        bytes memory sig = _signNav(INDEX, nav, block.timestamp);
+        usdc.mint(keeper, 800e6);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 800e6);
+        vm.expectRevert(HypeIndexVault.SlippageExceeded.selector);
+        vault.settleRedeem(id, 800e6, nav, block.timestamp, sig); // only 800 < 5000 -> revert
+        vm.stopPrank();
+    }
+
+    function test_redeem_doesNotPoisonDepositGuard() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);                  // lastNav = 1e6
+        (uint256 shares,) = vault.positions(INDEX, alice);
+
+        // redeem HALF at an extreme nav (no deviation guard on redeem)
+        vm.prank(alice);
+        uint256 id = vault.requestRedeem(INDEX, shares / 2, 0);
+        uint256 wildNav = 10e6;                            // 10x — would trip deposit guard if it set lastNav
+        bytes memory sig = _signNav(INDEX, wildNav, block.timestamp);
+        usdc.mint(keeper, 5_000e6);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 5_000e6);
+        vault.settleRedeem(id, 5_000e6, wildNav, block.timestamp, sig);
+        vm.stopPrank();
+
+        // lastNav must still be the deposit price (1e6), NOT poisoned to 10e6
+        (, , , , , , uint256 lastNav) = vault.vaults(INDEX);
+        assertEq(lastNav, 1e6);
+
+        // and a legit follow-up deposit at the true price 1e6 must still succeed (guard not poisoned)
+        _deposit(makeAddr("bob"), 200e6, 1e6, 0);
+        (uint256 bobShares,) = vault.positions(INDEX, makeAddr("bob"));
+        assertEq(bobShares, 200e6 * vault.WAD() / 1e6);
+    }
 }

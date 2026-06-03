@@ -272,9 +272,12 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
             v.usdcReserve      += perfFeeUsdc; // retained to back the new creator shares
         }
         v.totalShares -= r.shares; // burn the redeemed shares
-        v.lastNav      = navPerShare;
+        // NB: redeem deliberately does NOT update lastNav. lastNav is the deviation-guard
+        // baseline used by settleDeposit; an un-deviation-checked redeem nav must not be able
+        // to poison the next deposit's guard. Baseline stays deposit-only.
 
         uint256 netUsdc = usdcReceived - perfFeeUsdc;
+        if (netUsdc < r.minUsdcOut) revert SlippageExceeded();
         delete pendingRedeems[id];
         usdc.safeTransfer(r.who, netUsdc);
         emit Redeemed(id, r.indexId, r.who, netUsdc, perfFeeUsdc);
