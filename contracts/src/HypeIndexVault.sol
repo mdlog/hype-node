@@ -127,6 +127,41 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         }
     }
 
+    // --- vault lifecycle ---
+    function openVault(bytes32 indexId, address creator) external onlyKeeper {
+        if (vaults[indexId].active) revert VaultExists();
+        vaults[indexId].active            = true;
+        vaults[indexId].creator           = creator;
+        vaults[indexId].lastMgmtAccrualAt = block.timestamp;
+        emit VaultOpened(indexId, creator);
+    }
+
+    // --- deposit (async mint-on-fill) ---
+    function requestDeposit(bytes32 indexId, uint256 usdcAmount, uint256 minSharesOut)
+        external nonReentrant whenNotPaused returns (uint256 id)
+    {
+        if (!vaults[indexId].active) revert VaultInactive();
+        if (usdcAmount < MIN_DEPOSIT) revert BelowMinDeposit();
+        usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
+        vaults[indexId].usdcReserve += usdcAmount;
+        id = nextRequestId++;
+        pendingDeposits[id] = PendingDeposit({
+            indexId: indexId, who: msg.sender, usdcIn: usdcAmount,
+            minSharesOut: minSharesOut, ts: uint64(block.timestamp), pulled: false
+        });
+        emit DepositRequested(id, indexId, msg.sender, usdcAmount);
+    }
+
+    function pullForDeposit(uint256 id) external onlyKeeper nonReentrant {
+        PendingDeposit storage d = pendingDeposits[id];
+        if (d.who == address(0)) revert BadRequest();
+        if (d.pulled) revert AlreadyPulled();
+        d.pulled = true;
+        vaults[d.indexId].usdcReserve -= d.usdcIn;
+        usdc.safeTransfer(keeper, d.usdcIn);
+        emit DepositPulled(id, d.usdcIn);
+    }
+
     // --- test-only exposers (remove before mainnet build) ---
     function verifyNavExposed(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig) external view {
         _verifyNav(indexId, navPerShare, signedAt, sig);

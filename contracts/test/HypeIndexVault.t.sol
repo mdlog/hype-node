@@ -78,4 +78,58 @@ contract HypeIndexVaultTest is Test {
         vm.expectRevert(HypeIndexVault.BadSigner.selector);
         vault.verifyNavExposed(INDEX, 1e6, block.timestamp, abi.encodePacked(r, s, v));
     }
+
+    function _open() internal {
+        vm.prank(keeper);
+        vault.openVault(INDEX, creator);
+    }
+
+    function test_openVault_setsCreatorActive() public {
+        _open();
+        (bool active, address c,,,,,) = vault.vaults(INDEX);
+        assertTrue(active);
+        assertEq(c, creator);
+    }
+
+    function test_requestDeposit_pullsUsdcAndQueues() public {
+        _open();
+        usdc.mint(alice, 500e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 500e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+
+        assertEq(id, 1);
+        assertEq(usdc.balanceOf(address(vault)), 200e6);
+        (bytes32 idx, address who, uint256 usdcIn,,, bool pulled) = vault.pendingDeposits(id);
+        assertEq(idx, INDEX);
+        assertEq(who, alice);
+        assertEq(usdcIn, 200e6);
+        assertFalse(pulled);
+    }
+
+    function test_requestDeposit_rejectsBelowMin() public {
+        _open();
+        usdc.mint(alice, 50e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 50e6);
+        vm.expectRevert(HypeIndexVault.BelowMinDeposit.selector);
+        vault.requestDeposit(INDEX, 50e6, 0);
+        vm.stopPrank();
+    }
+
+    function test_pullForDeposit_sendsUsdcToKeeper() public {
+        _open();
+        usdc.mint(alice, 200e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 200e6);
+        uint256 id = vault.requestDeposit(INDEX, 200e6, 0);
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vault.pullForDeposit(id);
+        assertEq(usdc.balanceOf(keeper), 200e6);
+        (,,,,, bool pulled) = vault.pendingDeposits(id);
+        assertTrue(pulled);
+    }
 }
