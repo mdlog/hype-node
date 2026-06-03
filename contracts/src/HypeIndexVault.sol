@@ -108,4 +108,30 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
     function setGuardian(address g) external onlyOwner { guardian = g; }
     function pause()   external onlyGuardian { paused = true; }
     function unpause() external onlyGuardian { paused = false; }
+
+    // --- NAV oracle ---
+    function _verifyNav(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig)
+        internal view
+    {
+        if (navPerShare == 0) revert ZeroNav();
+        if (signedAt > block.timestamp) revert FuturePrice();
+        if (block.timestamp > signedAt + MAX_STALENESS) revert StalePrice();
+        bytes32 structHash = keccak256(abi.encode(PRICE_TYPEHASH, indexId, navPerShare, signedAt));
+        bytes32 digest = _hashTypedDataV4(structHash);
+        if (ECDSA.recover(digest, sig) != signer) revert BadSigner();
+        uint256 last = vaults[indexId].lastNav;
+        if (last != 0) {
+            uint256 hi = last * (10_000 + MAX_DEV_BPS) / 10_000;
+            uint256 lo = last * (10_000 - MAX_DEV_BPS) / 10_000;
+            if (navPerShare > hi || navPerShare < lo) revert NavDeviation();
+        }
+    }
+
+    // --- test-only exposers (remove before mainnet build) ---
+    function verifyNavExposed(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig) external view {
+        _verifyNav(indexId, navPerShare, signedAt, sig);
+    }
+    function hashTypedDataV4Exposed(bytes32 structHash) external view returns (bytes32) {
+        return _hashTypedDataV4(structHash);
+    }
 }

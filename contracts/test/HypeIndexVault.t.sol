@@ -48,4 +48,34 @@ contract HypeIndexVaultTest is Test {
         vault.setSigner(address(0xDEAD));
         assertEq(vault.signer(), address(0xDEAD));
     }
+
+    // EIP-712 helper: sign a PriceAttestation as `signer`.
+    function _signNav(bytes32 indexId, uint256 navPerShare, uint256 signedAt) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(abi.encode(vault.PRICE_TYPEHASH(), indexId, navPerShare, signedAt));
+        bytes32 digest = vault.hashTypedDataV4Exposed(structHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function test_verifyNav_acceptsFreshSignedPrice() public view {
+        bytes memory sig = _signNav(INDEX, 1e6, block.timestamp);
+        vault.verifyNavExposed(INDEX, 1e6, block.timestamp, sig); // does not revert
+    }
+
+    function test_verifyNav_rejectsStale() public {
+        uint256 t = 1_000_000;
+        vm.warp(t);
+        bytes memory sig = _signNav(INDEX, 1e6, t);
+        vm.warp(t + 6 minutes);
+        vm.expectRevert(HypeIndexVault.StalePrice.selector);
+        vault.verifyNavExposed(INDEX, 1e6, t, sig);
+    }
+
+    function test_verifyNav_rejectsWrongSigner() public {
+        bytes32 structHash = keccak256(abi.encode(vault.PRICE_TYPEHASH(), INDEX, uint256(1e6), block.timestamp));
+        bytes32 digest = vault.hashTypedDataV4Exposed(structHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(uint256(0xBADBAD), digest); // not the signer
+        vm.expectRevert(HypeIndexVault.BadSigner.selector);
+        vault.verifyNavExposed(INDEX, 1e6, block.timestamp, abi.encodePacked(r, s, v));
+    }
 }
