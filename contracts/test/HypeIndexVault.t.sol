@@ -238,4 +238,49 @@ contract HypeIndexVaultTest is Test {
         vault.accrueMgmt(INDEX); // second call same day reverts
         vm.stopPrank();
     }
+
+    function test_redeem_profit_deductsPerfFee() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);            // hwm = 1e6
+        (uint256 shares,) = vault.positions(INDEX, alice);
+
+        // request redeem of all shares
+        vm.prank(alice);
+        uint256 id = vault.requestRedeem(INDEX, shares, 0);
+
+        // NAV doubled to 2e6 → profit per share = 1e6; keeper sold basket for 2_000e6
+        uint256 nav = 2e6;
+        bytes memory sig = _signNav(INDEX, nav, block.timestamp);
+        usdc.mint(keeper, 2_000e6);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 2_000e6);
+        vault.settleRedeem(id, 2_000e6, nav, block.timestamp, sig);
+        vm.stopPrank();
+
+        // profitUsdc = (2e6-1e6)*shares/WAD = 1_000e6 ; perfFee = 10% = 100e6
+        // alice nets 2_000e6 - 100e6 = 1_900e6
+        assertEq(usdc.balanceOf(alice), 1_900e6);
+        // creator got perf as diluted shares worth 100e6 at nav 2e6
+        (, , , , , uint256 creatorFeeShares,) = vault.vaults(INDEX);
+        assertEq(creatorFeeShares, 100e6 * vault.WAD() / nav);
+    }
+
+    function test_redeem_loss_noPerfFee() public {
+        _open();
+        _deposit(alice, 1_000e6, 1e6, 0);
+        (uint256 shares,) = vault.positions(INDEX, alice);
+        vm.prank(alice);
+        uint256 id = vault.requestRedeem(INDEX, shares, 0);
+
+        // NAV dropped to 0.8e6; keeper sold for 800e6
+        uint256 nav = 8e5;
+        bytes memory sig = _signNav(INDEX, nav, block.timestamp);
+        usdc.mint(keeper, 800e6);
+        vm.startPrank(keeper);
+        usdc.approve(address(vault), 800e6);
+        vault.settleRedeem(id, 800e6, nav, block.timestamp, sig);
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice), 800e6); // no fee on a loss
+    }
 }

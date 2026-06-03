@@ -110,7 +110,8 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
     function unpause() external onlyGuardian { paused = false; }
 
     // --- NAV oracle ---
-    function _verifyNav(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig)
+    /// @dev Validates signature, freshness. Shared by both deposit and redeem paths.
+    function _verifyNavSig(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig)
         internal view
     {
         if (navPerShare == 0) revert ZeroNav();
@@ -119,6 +120,13 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         bytes32 structHash = keccak256(abi.encode(PRICE_TYPEHASH, indexId, navPerShare, signedAt));
         bytes32 digest = _hashTypedDataV4(structHash);
         if (ECDSA.recover(digest, sig) != signer) revert BadSigner();
+    }
+
+    /// @dev Validates signature, freshness, AND deviation guard (used on deposit settlement).
+    function _verifyNav(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig)
+        internal view
+    {
+        _verifyNavSig(indexId, navPerShare, signedAt, sig);
         uint256 last = vaults[indexId].lastNav;
         if (last != 0) {
             uint256 hi = last * (10_000 + MAX_DEV_BPS) / 10_000;
@@ -224,6 +232,52 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
         v.creatorFeeShares += feeShares;
         v.totalShares      += feeShares;
         emit MgmtAccrued(indexId, feeShares, day);
+    }
+
+    // --- redeem (async, perf fee crystallized here) ---
+    function requestRedeem(bytes32 indexId, uint256 shares, uint256 minUsdcOut)
+        external nonReentrant whenNotPaused returns (uint256 id)
+    {
+        Position storage p = positions[indexId][msg.sender];
+        if (shares == 0 || shares > p.shares) revert BadRequest();
+        p.shares -= shares;                       // escrow out of the position
+        id = nextRequestId++;
+        pendingRedeems[id] = PendingRedeem({
+            indexId: indexId, who: msg.sender, shares: shares,
+            hwmNav: p.hwmNav, minUsdcOut: minUsdcOut, ts: uint64(block.timestamp)
+        });
+        emit RedeemRequested(id, indexId, msg.sender, shares);
+    }
+
+    function settleRedeem(
+        uint256 id, uint256 usdcReceived, uint256 navPerShare, uint256 signedAt, bytes calldata sig
+    ) external onlyKeeper nonReentrant whenNotPaused {
+        PendingRedeem memory r = pendingRedeems[id];
+        if (r.who == address(0)) revert BadRequest();
+        _verifyNavSig(r.indexId, navPerShare, signedAt, sig);
+
+        // keeper delivers the sale proceeds to the vault
+        usdc.safeTransferFrom(keeper, address(this), usdcReceived);
+
+        IndexVault storage v = vaults[r.indexId];
+        uint256 perfFeeUsdc = 0;
+        if (navPerShare > r.hwmNav) {
+            uint256 profitUsdc = (navPerShare - r.hwmNav) * r.shares / WAD;
+            perfFeeUsdc = profitUsdc * PERF_FEE_BPS / 10_000;
+            if (perfFeeUsdc > usdcReceived) perfFeeUsdc = usdcReceived; // safety clamp
+            // convert fee to diluted creator shares at current nav
+            uint256 feeShares = perfFeeUsdc * WAD / navPerShare;
+            v.creatorFeeShares += feeShares;
+            v.totalShares      += feeShares;
+            v.usdcReserve      += perfFeeUsdc; // retained to back the new creator shares
+        }
+        v.totalShares -= r.shares; // burn the redeemed shares
+        v.lastNav      = navPerShare;
+
+        uint256 netUsdc = usdcReceived - perfFeeUsdc;
+        delete pendingRedeems[id];
+        usdc.safeTransfer(r.who, netUsdc);
+        emit Redeemed(id, r.indexId, r.who, netUsdc, perfFeeUsdc);
     }
 
     // --- test-only exposers (remove before mainnet build) ---
