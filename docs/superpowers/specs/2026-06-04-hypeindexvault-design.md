@@ -255,3 +255,46 @@ wallet.
 - [ ] Redeem in a profit scenario deducts the 10% HWM perf fee; in a loss scenario it does not.
 - [ ] `claimFees` transfers USDC to the creator wallet.
 - [ ] Foundry coverage > 80%; first-deposit attack + stale-oracle tests pass.
+
+---
+
+## 12. Hardening backlog (from implementation review)
+
+The contract was implemented as plan `docs/superpowers/plans/2026-06-04-hypeindexvault-contract.md`
+(12 TDD tasks, branch `feat/wave2-hypeindexvault`, 46 passing Foundry tests, ~99% line
+coverage). A whole-contract security review found **no Critical issues** and confirmed
+share/USDC conservation across the full lifecycle. The items below were surfaced by per-task
+and final review.
+
+**Applied during implementation (already in the contract):**
+- ✅ `pullForDeposit` is `whenNotPaused` — a guardian pause freezes deposit-USDC outflow.
+- ✅ Zero-address guards on the constructor, `setSigner`/`setKeeper`/`setGuardian`, and
+  `openVault` creator (a zero creator would permanently lock fees).
+- ✅ Role-rotation events (`SignerSet`/`KeeperSet`/`GuardianSet`) for trusted-key monitoring.
+- ✅ Redeem does **not** write `lastNav` (closes a deviation-baseline poisoning vector);
+  `minUsdcOut` is enforced on redeem.
+
+**Deferred to pre-mainnet hardening (documented, not MVP/testnet-blocking):**
+- **H2** — bind the NAV EIP-712 attestation to a `requestId` or per-index nonce (today it is
+  replay-protected only by the 5-minute staleness window).
+- **H3** — strip the test-only `verifyNavExposed`/`hashTypedDataV4Exposed` view functions
+  before the mainnet build.
+- **H4** — add a `usdcIn`-relative sanity band (config-settable BPS) on the keeper-supplied
+  `basketValueUsdc` in `settleDeposit`, capping the keeper's quantity-side blast radius. **This
+  is the central audit item** (the share quantity is keeper-controlled and unsigned).
+- **H5** — add a periodic keeper `markNav` so `lastNav` stays fresh, then restore a **symmetric**
+  deviation guard on both deposit and redeem. Today the deviation guard is deposit-only, so a
+  legitimate large NAV move after a long settlement gap is wrongly rejected (a liveness limit).
+- **H6** — replace the single EIP-712 signer with an N-of-M multisig/threshold signer before any
+  mainnet funds (the locked decision's mainnet gate).
+- **A2** — implement the §7 per-tx deposit cap + per-index AUM cap (only `MIN_DEPOSIT` exists).
+- External tier-1 audit (Wave-3 gate) before mainnet.
+
+**Known MVP limitations (documented, acceptable for testnet):**
+- **L1** — per-position single HWM: repeat deposits at a higher NAV inherit the earlier HWM,
+  slightly over-charging perf fees on later tranches. Consider share-weighted HWM in hardening.
+- **L2** — management fee uses `feeShares = totalShares · r` (≈0.990% effective for r=1%) vs the
+  exact `r/(1-r)`; ~1 bp under-charge on a 100 bp fee.
+- **L3** — the keeper-supplied `basketValueUsdc`/`usdcReceived` and signer-supplied `navPerShare`
+  are trusted (the MVP single-keeper/single-signer boundary); all abuse cases remain
+  vault-solvent. The keeper/UI must always set `minUsdcOut > 0` on redeem.
