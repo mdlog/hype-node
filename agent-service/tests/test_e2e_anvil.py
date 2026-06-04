@@ -224,8 +224,13 @@ def test_full_e2e_lifecycle(deployed):
     print(f"accrue mgmt fee: OK — creatorFeeShares={creator_fee_shares}")
 
     # ------------------------------------------------------------------
-    # Step 6: Redeem
+    # Step 6: Profit leg — mark up NAV so perf fee is triggered on redeem
     # ------------------------------------------------------------------
+    idx_hex = "0x" + idx.hex()
+    # Multiply basket 1.5x: basket goes from 1000 USDC → 1500 USDC.
+    # New NAV = 1,500,000 (above subscriber HWM of 1,000,000) → perf fee fires.
+    nav_engine.mark(idx_hex, 1.5)
+
     # Subscriber redeems all shares
     _send_as(w3, ACCT1_PK, vault.functions.requestRedeem(idx, shares, 0))
     print("requestRedeem: OK")
@@ -233,16 +238,17 @@ def test_full_e2e_lifecycle(deployed):
     usdc_before = usdc.functions.balanceOf(ACCT1).call()
     print(f"subscriber USDC before redeem settle: {usdc_before}")
 
-    # Pre-fund keeper so it can deliver realized USDC (settleRedeem transfers from keeper)
+    # Pre-fund keeper so it can deliver realized USDC (settleRedeem transfers from keeper).
+    # With 1.5x mark-up the keeper must deliver ~1500 USDC; 2000 is ample.
     _send_as(w3, ACCT0_PK, usdc.functions.mint(ACCT0, int(2_000e6)))
 
     keeper.poll_once()
     usdc_after = usdc.functions.balanceOf(ACCT1).call()
     print(f"subscriber USDC after redeem settle: {usdc_after}")
     assert usdc_after > usdc_before, f"expected subscriber USDC to increase after redeem, before={usdc_before} after={usdc_after}"
-    # Should get back approximately the deposit amount (no perf fee since nav=INITIAL_NAV==hwmNav)
-    # Tolerance: at least 900 USDC (allowing for sim behaviour)
-    assert usdc_after - usdc_before >= int(900e6), f"expected ~1000 USDC returned, got {(usdc_after - usdc_before) / 1e6:.2f} USDC"
+    # With 1.5x NAV mark-up: gross = 1500 USDC, perf fee = 10% of profit on 500 USDC = 50 USDC.
+    # Net to subscriber ≈ 1450 USDC. Tolerance: at least 1300 USDC.
+    assert usdc_after - usdc_before >= int(1300e6), f"expected ~1450 USDC returned (1.5x profit leg), got {(usdc_after - usdc_before) / 1e6:.2f} USDC"
     print(f"poll_once (redeem): OK — subscriber received {(usdc_after - usdc_before)/1e6:.2f} USDC")
 
     # ------------------------------------------------------------------
@@ -263,3 +269,38 @@ def test_full_e2e_lifecycle(deployed):
     )
     print(f"claimFees + settle: OK — creator received {(creator_usdc_after - creator_usdc_before)/1e6:.6f} USDC")
     print("\n=== E2E LIFECYCLE PASSED ===")
+
+    # ------------------------------------------------------------------
+    # Step 8: VaultIndexer — replay chain events and assert Supabase rows
+    # ------------------------------------------------------------------
+    from src.vault.store import InMemoryStore
+    from src.vault.indexer import VaultIndexer
+
+    CREATOR_ADDR = ACCT2  # creator set in open_vault
+    store = InMemoryStore()
+    store.add_proposal({
+        "id": "p1",
+        "creator_address": CREATOR_ADDR,
+        "on_chain_index_id": "0x" + idx.hex(),
+    })
+
+    counts = VaultIndexer(w3, vault, store).index_range(0, w3.eth.block_number)
+
+    mgmt = [e for e in store.earnings if e["event_type"] == "mgmt_fee"]
+    perf = [e for e in store.earnings if e["event_type"] == "perf_fee"]
+
+    assert len(mgmt) >= 1 and mgmt[0]["amount_usd"] > 0, (
+        f"expected mgmt_fee earning with amount_usd > 0, got: {mgmt}"
+    )
+    assert len(perf) >= 1 and perf[0]["amount_usd"] > 0, (
+        f"expected perf_fee earning with amount_usd > 0 (profit leg), got: {perf}"
+    )
+    subs = store.subscriptions_for_index("0x" + idx.hex())
+    assert len(subs) >= 1, f"expected at least 1 subscription row, got: {subs}"
+
+    print(
+        f"INDEXER: {counts} "
+        f"mgmt_usd={mgmt[0]['amount_usd']} "
+        f"perf_usd={perf[0]['amount_usd']}"
+    )
+    print("=== INDEXER ASSERTIONS PASSED ===")
