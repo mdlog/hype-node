@@ -298,3 +298,41 @@ and final review.
 - **L3** — the keeper-supplied `basketValueUsdc`/`usdcReceived` and signer-supplied `navPerShare`
   are trusted (the MVP single-keeper/single-signer boundary); all abuse cases remain
   vault-solvent. The keeper/UI must always set `minUsdcOut > 0` on redeem.
+
+---
+
+## 13. SoDEX router spike — RESOLVED (2026-06-04)
+
+**Verdict: off-chain only → EOA-keeper forced.** SoDEX exposes **no callable on-chain
+router/settlement contract** on ValueChain — the EIP-712 `verifyingContract` is the null
+address (`lib/api/sodex/typedData.ts`, `agent-service/src/tools/sodex.py`), trades are
+HTTPS POSTs of signed JSON envelopes to `*-gw.sodex.dev`, and the gateway recovers a raw
+secp256k1 ECDSA signature with **no EIP-1271 path** — so a smart contract literally cannot
+be the SoDEX signer/counterparty. Traded assets live as **custodian-backed mirror tokens**
+(vUSDC/vBTC/vSOL, gateway coinIDs) inside a SoDEX exchange account keyed to an EOA, not as
+on-chain ERC20s the vault reads via `balanceOf`.
+
+**Consequences (locked for the MVP):**
+- The vault keeps its on-chain USDC custody + settlement accounting, but the SoDEX trading
+  leg is an **EOA-keeper relay**. A dedicated, isolated hot keeper EOA (NOT the deployer/owner
+  key; HSM/MPC/KMS-backed) holds USDC in-flight, bridges into the SoDEX Spot Account, signs
+  EIP-712 actions, and relays them over REST. **Effective custody of in-flight + basket funds
+  sits at the keeper EOA + SoDEX custodians — not the vault contract.** This is "vault-accounting
+  + trusted-keeper execution," not trustless custody.
+- **USDC on ValueChain is NOT a canonical free-standing ERC20** — it is a bridged mirror token
+  (vUSDC). Real USDC lives on external chains (Base/Ethereum); you bridge to a SoDEX deposit
+  address and Mirror Protocol mints 1:1 vUSDC. **No public ValueChain-native USDC ERC20 address
+  is published.** Spot USDC liquidity exists on SoDEX **mainnet** (~25 USDC-quoted pairs);
+  **testnet spot is thin** (perps-skewed).
+- The deposit/withdraw bridge legs (`EVM_DEPOSIT`/`EVM_WITHDRAW`) are **not implemented** in
+  `sodex.py` — plan 1b must build/confirm them, and they need SoDEX-team info.
+
+**Honest user-facing custody copy:** "Your USDC enters and leaves through an on-chain vault,
+but while it is deployed into the index it is held and traded by a trusted off-chain keeper
+inside a SoDEX exchange account — SoDEX has no on-chain router we can call, so the keeper's
+key, not the vault contract, controls funds in-flight."
+
+**Open questions requiring the SoDEX/SoSoValue team (block the real-money bridge + mainnet):**
+on-chain contract path / EIP-1271 roadmap; exact deposit/withdraw mechanism + canonical USDC
+address + finality/KYC; per-account/per-key limits + sub-account isolation; acceptable in-flight
+float + required custody hardening (MPC/HSM/multisig) before mainnet.
