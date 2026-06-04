@@ -13,7 +13,7 @@ import Link from "next/link";
 import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
-import type { PbEarningRow, PbProposalRow } from "@/lib/supabase/types";
+import type { PbEarningRow, PbProposalRow, PbSubscriptionRow } from "@/lib/supabase/types";
 
 import { DiscoverFilters, type SortKey } from "./DiscoverFilters";
 
@@ -67,14 +67,17 @@ type DiscoverItem = PbProposalRow & {
     subscriber_count: number | null;
   } | null;
   total_earned_usd: number | null;
+  live_subscriber_count: number;
 };
 
 // Roll up one row per proposal: pick the most recent earning entry for AUM /
 // subscriber snapshot, and sum amount_usd across the full ledger for total
-// earned.
+// earned. live_subscriber_count comes from the pb_subscriptions map keyed by
+// the proposal's on_chain_index_id.
 function aggregateEarnings(
   proposals: PbProposalRow[],
   earnings: PbEarningRow[],
+  subCountsByIndexId: Map<string, number>,
 ): DiscoverItem[] {
   const byId = new Map<
     string,
@@ -93,6 +96,10 @@ function aggregateEarnings(
   }
   return proposals.map((p) => {
     const slot = byId.get(p.id);
+    const liveCount =
+      p.on_chain_index_id != null
+        ? (subCountsByIndexId.get(p.on_chain_index_id) ?? 0)
+        : 0;
     return {
       ...p,
       latest_earning: slot?.latest
@@ -102,6 +109,7 @@ function aggregateEarnings(
           }
         : null,
       total_earned_usd: slot && slot.total > 0 ? slot.total : null,
+      live_subscriber_count: liveCount,
     };
   });
 }
@@ -189,7 +197,33 @@ export default async function DiscoverPage({
     }
   }
 
-  const enriched = aggregateEarnings(filtered, earnings);
+  // Live subscriber counts — query pb_subscriptions for active rows keyed by
+  // index_id. We only fetch index_id (the group key); counts are rolled up in
+  // JS so no SQL RPC is needed. Falls back to an empty map on error so the
+  // rest of the page still renders.
+  const subCountsByIndexId = new Map<string, number>();
+  {
+    const indexIds = filtered
+      .map((p) => p.on_chain_index_id)
+      .filter((id): id is string => id != null);
+    if (indexIds.length > 0) {
+      const subsRes = await db
+        .from("pb_subscriptions")
+        .select("index_id")
+        .eq("status", "active")
+        .in("index_id", indexIds);
+      if (!subsRes.error) {
+        for (const row of (subsRes.data ?? []) as Pick<PbSubscriptionRow, "index_id">[]) {
+          subCountsByIndexId.set(
+            row.index_id,
+            (subCountsByIndexId.get(row.index_id) ?? 0) + 1,
+          );
+        }
+      }
+    }
+  }
+
+  const enriched = aggregateEarnings(filtered, earnings, subCountsByIndexId);
   const items = sortItems(enriched, sortParam);
 
   return (
@@ -269,7 +303,10 @@ function DiscoverCard({ item }: { item: DiscoverItem }) {
   const sharpeVal = item.backtest_sharpe;
   const maxDdVal = item.backtest_max_dd;
   const aum = item.latest_earning?.aum_usd_at_accrual ?? null;
-  const subs = item.latest_earning?.subscriber_count ?? null;
+  // Use real-time count from pb_subscriptions; fall back to "—" only when the
+  // proposal has no on_chain_index_id yet (not yet deployed on-chain).
+  const subs =
+    item.on_chain_index_id != null ? item.live_subscriber_count : null;
 
   return (
     <Card pad={0} className="flex flex-col">
