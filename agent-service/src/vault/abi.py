@@ -498,6 +498,56 @@ VAULT_ABI = [
         ],
         "anonymous": False
     },
+    {
+        "type": "event",
+        "name": "FeesClaimed",
+        "inputs": [
+            {
+                "name": "indexId",
+                "type": "bytes32",
+                "indexed": True,
+                "internalType": "bytes32"
+            },
+            {
+                "name": "creator",
+                "type": "address",
+                "indexed": True,
+                "internalType": "address"
+            },
+            {
+                "name": "shares",
+                "type": "uint256",
+                "indexed": False,
+                "internalType": "uint256"
+            }
+        ],
+        "anonymous": False
+    },
+    {
+        "type": "event",
+        "name": "MgmtAccrued",
+        "inputs": [
+            {
+                "name": "indexId",
+                "type": "bytes32",
+                "indexed": True,
+                "internalType": "bytes32"
+            },
+            {
+                "name": "feeShares",
+                "type": "uint256",
+                "indexed": False,
+                "internalType": "uint256"
+            },
+            {
+                "name": "epochDay",
+                "type": "uint256",
+                "indexed": False,
+                "internalType": "uint256"
+            }
+        ],
+        "anonymous": False
+    },
 ]
 
 # Minimal ERC-20 ABI fragments (hand-written standard; also covers MockUSDC.mint).
