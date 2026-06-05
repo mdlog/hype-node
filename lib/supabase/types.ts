@@ -170,6 +170,28 @@ export type PbProposalInsert = Omit<
 };
 export type PbProposalUpdate = Partial<PbProposalInsert>;
 
+// ---------- pb_subscriptions ----------
+export type PbSubscriptionRow = {
+  id: string;
+  proposal_id: string;
+  index_id: string;
+  subscriber_address: string;
+  shares: number;
+  status: "active" | "redeemed";
+  first_subscribed_at: string;
+  updated_at: string;
+};
+export type PbSubscriptionInsert = Omit<
+  PbSubscriptionRow,
+  "id" | "first_subscribed_at" | "updated_at" | "status" | "shares"
+> & {
+  id?: string;
+  first_subscribed_at?: string;
+  updated_at?: string;
+  status?: PbSubscriptionRow["status"];
+  shares?: number;
+};
+
 // ---------- pb_earnings ----------
 export type PbEarningRow = {
   id: string;
@@ -307,6 +329,19 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "pb_earnings_proposal_id_fkey";
+            columns: ["proposal_id"];
+            referencedRelation: "pb_proposals";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      pb_subscriptions: {
+        Row: PbSubscriptionRow;
+        Insert: PbSubscriptionInsert;
+        Update: Partial<PbSubscriptionInsert>;
+        Relationships: [
+          {
+            foreignKeyName: "pb_subscriptions_proposal_id_fkey";
             columns: ["proposal_id"];
             referencedRelation: "pb_proposals";
             referencedColumns: ["id"];

@@ -16,6 +16,7 @@ import { MacroCalendar } from "@/components/dashboard/MacroCalendar";
 import { SmartMoneyWidget } from "@/components/dashboard/SmartMoneyWidget";
 import { StablecoinFlowWidget } from "@/components/dashboard/StablecoinFlowWidget";
 import { SsiCompositeLogo } from "@/components/dashboard/SsiCompositeLogo";
+import { FirstRunChecklistCard } from "@/components/onboarding";
 
 export const revalidate = 60;
 
@@ -235,6 +236,8 @@ export default async function DashboardPage({
           </Btn>
         </div>
       </header>
+
+      <FirstRunChecklistCard />
 
       {/* ---------- snapshot KPI row ---------- */}
       <SectionLabel meta={`SoSoValue · ${clock}`}>Snapshot</SectionLabel>

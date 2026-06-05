@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { tokens } from "@/lib/tokens";
+import { useFirstRun } from "@/lib/hooks/useFirstRun";
+import { CoachCallout } from "@/components/onboarding";
 
 /* ---------- types (mirror lib/api/agent.ts) ---------- */
 
@@ -180,6 +182,12 @@ export default function AgentPage() {
   );
   const [holding, setHolding] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
+  const { completeStep } = useFirstRun();
+  const hasState = state !== null;
+
+  useEffect(() => {
+    if (hasState) completeStep("monitor");
+  }, [hasState, completeStep]);
 
   // Pull state + reasoning from the agent service. Defined as a callback so
   // the run-control buttons can request an immediate refresh after a /pause,
@@ -325,6 +333,13 @@ export default function AgentPage() {
           halted={state?.halted ?? false}
           refresh={refresh}
         />
+        {!state && (
+          <CoachCallout
+            icon="🧭"
+            title="How the agent works"
+            body="This console streams the LangGraph loop: signal → sentiment → flow → strategy → backtest → risk → wrap → exec → emergency_exit → loop. Start or resume the agent to watch each node light up."
+          />
+        )}
         <KpiStrip state={state} />
         <StateGraph
           nodeById={nodeById}
