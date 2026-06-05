@@ -183,10 +183,11 @@ export default function AgentPage() {
   const [holding, setHolding] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
   const { completeStep } = useFirstRun();
+  const hasState = state !== null;
 
   useEffect(() => {
-    if (state) completeStep("monitor");
-  }, [state, completeStep]);
+    if (hasState) completeStep("monitor");
+  }, [hasState, completeStep]);
 
   // Pull state + reasoning from the agent service. Defined as a callback so
   // the run-control buttons can request an immediate refresh after a /pause,
