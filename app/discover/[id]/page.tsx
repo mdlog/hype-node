@@ -21,6 +21,7 @@ import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
 import type { PbEarningRow, PbProposalRow } from "@/lib/supabase/types";
+import { SubscribePanel } from "./SubscribePanel";
 
 export const dynamic = "force-dynamic";
 
@@ -377,39 +378,7 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
 
         {/* Action panel */}
         <div className="flex flex-col gap-2.5 min-w-0">
-          <Card pad={14}>
-            <Label>SUBSCRIBE</Label>
-            <div style={{ fontSize: 13, fontWeight: 600, marginTop: 6 }}>
-              Mint into this index
-            </div>
-            <Mono size={10} color={tokens.textDim} className="block mt-1">
-              Deposit USDC → receive HYPE-{proposal.ssi_ticker} shares.
-            </Mono>
-            <button
-              type="button"
-              disabled
-              title="HypeIndexVault contract not deployed — Wave 2 milestone."
-              style={{
-                marginTop: 10,
-                width: "100%",
-                padding: "10px 14px",
-                fontSize: 13,
-                fontWeight: 600,
-                background: tokens.bgElev2,
-                color: tokens.textFaint,
-                border: `1px dashed ${tokens.border}`,
-                borderRadius: 6,
-                cursor: "not-allowed",
-                letterSpacing: "-0.01em",
-              }}
-            >
-              Coming Soon — Wave 2 vault
-            </button>
-            <Mono size={10} color={tokens.textFaint} className="block mt-2">
-              HypeIndexVault deploys in Wave 2 — subscribe button will mint
-              ERC-20 shares against this constituent set.
-            </Mono>
-          </Card>
+          <SubscribePanel indexId={proposal.on_chain_index_id} ticker={proposal.ssi_ticker} />
 
           <Card pad={14}>
             <Label>LINKS</Label>
