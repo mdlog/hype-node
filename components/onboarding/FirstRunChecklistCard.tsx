@@ -8,14 +8,13 @@ import { tokens } from "@/lib/tokens";
 
 const STEPS: {
   id: FirstRunStepId;
-  n: number;
   label: string;
   cta: string;
   href: string;
 }[] = [
-  { id: "createIndex", n: 1, label: "Create your first index", cta: "Open builder", href: "/builder" },
-  { id: "chat", n: 2, label: "Ask the agent a question", cta: "Open chat", href: "/chat" },
-  { id: "monitor", n: 3, label: "Watch a live execution", cta: "Open console", href: "/agent" },
+  { id: "createIndex", label: "Create your first index", cta: "Open builder", href: "/builder" },
+  { id: "chat", label: "Ask the agent a question", cta: "Open chat", href: "/chat" },
+  { id: "monitor", label: "Watch a live execution", cta: "Open console", href: "/agent" },
 ];
 
 export function FirstRunChecklistCard() {
@@ -38,7 +37,7 @@ export function FirstRunChecklistCard() {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 15 }} aria-hidden>🚀</span>
           <span style={{ fontSize: 14, fontWeight: 600, color: tokens.text }}>Get started</span>
-          <Mono size={12} color={tokens.textDim}>{doneCount}/3</Mono>
+          <Mono size={12} color={tokens.textDim}>{doneCount}/{STEPS.length}</Mono>
         </div>
         <button
           type="button"
@@ -59,7 +58,7 @@ export function FirstRunChecklistCard() {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {STEPS.map((s) => {
+        {STEPS.map((s, i) => {
           const done = isDone(s.id);
           return (
             <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -74,7 +73,7 @@ export function FirstRunChecklistCard() {
                   textDecoration: done ? "line-through" : "none",
                 }}
               >
-                {s.n}. {s.label}
+                {i + 1}. {s.label}
               </span>
               {!done && (
                 <Link href={s.href} className="hype-btn" style={{ fontSize: 12, padding: "4px 10px" }}>
