@@ -66,9 +66,11 @@ export function useFirstRun() {
   }, []);
 
   const reset = useCallback(() => {
-    const next = defaultState();
-    write(next);
-    setState(next);
+    setState(() => {
+      const next = defaultState();
+      write(next);
+      return next;
+    });
   }, []);
 
   const isDone = useCallback((id: FirstRunStepId) => state.steps[id], [state]);

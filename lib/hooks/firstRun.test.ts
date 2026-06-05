@@ -38,6 +38,11 @@ describe("firstRun pure logic", () => {
     expect(dismiss(defaultState()).dismissed).toBe(true);
   });
 
+  it("dismiss is idempotent (same reference when already dismissed)", () => {
+    const s = dismiss(defaultState());
+    expect(dismiss(s)).toBe(s);
+  });
+
   it("parseState falls back to default on null or malformed JSON", () => {
     expect(parseState(null)).toEqual(defaultState());
     expect(parseState("{not valid json")).toEqual(defaultState());
