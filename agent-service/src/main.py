@@ -101,9 +101,42 @@ if not AGENT_API_KEY:
 # anything here is publicly callable, so don't leak business state.
 PUBLIC_PATHS = frozenset({"/health"})
 
+# --- Activity-aware loop cadence ---------------------------------------------
+#
+# Last wall-clock time a REAL USER ACTION hit the service. The background
+# _runner uses this to switch between two cadences:
+#   - "active": within AGENT_ACTIVE_WINDOW_SEC of last activity → run cycle
+#                every AGENT_LOOP_SEC (default 120s, fast — judges see live)
+#   - "idle":  no recent activity → run cycle every AGENT_IDLE_LOOP_SEC
+#                (default 1800s = 30 min, cheap — burn near-zero LLM tokens)
+#
+# A "real user action" is a POST that changes state, or a /chat /run /
+# run-backtest call that costs LLM tokens. Background pollers (the UI
+# refreshes /state and /reasoning every 5-30s while a tab is open) do NOT
+# count — otherwise any open tab would pin the service in active mode
+# forever and the cost saving evaporates.
+LAST_ACTIVITY_TS: float = time.time()
+
+# Endpoints that the UI polls passively. These read-only paths do NOT bump
+# the activity timestamp; otherwise a single open Dashboard / Chat / Agent
+# tab would keep the loop in active mode 24/7 (since each tab polls every
+# 5-30s) and defeat the idle slowdown.
+POLLING_PATHS = frozenset(
+    {
+        "/state",
+        "/reasoning",
+        "/tools/health",
+        "/terminal/status",
+        "/history",
+        "/history/stats",
+        "/risk/config",  # GET only — POST handled by method check below
+    }
+)
+
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        global LAST_ACTIVITY_TS
         # CORS preflight has no auth headers by spec.
         if request.method == "OPTIONS":
             return await call_next(request)
@@ -112,6 +145,13 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         provided = request.headers.get("x-agent-key", "")
         if provided != AGENT_API_KEY:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+        # Bump activity only on real user actions (anything that's NOT a
+        # GET to a polling endpoint). POSTs and non-listed GETs all count.
+        is_polling = (
+            request.method == "GET" and request.url.path in POLLING_PATHS
+        )
+        if not is_polling:
+            LAST_ACTIVITY_TS = time.time()
         return await call_next(request)
 
 
@@ -271,11 +311,21 @@ def _maybe_float(value: Any) -> float | None:
 
 
 async def _runner() -> None:
-    """Background task that drives the LangGraph loop on a cadence.
+    """Background task that drives the LangGraph loop on an activity-aware
+    cadence.
 
-    Cadence is controlled by AGENT_LOOP_SEC, while SoSoValue request pacing and
-    cache TTLs are controlled by SOSOVALUE_* env vars. Demo-tier deployments
-    should use a much slower loop and longer cache than paid-tier/dev setups.
+    Two cadences:
+      - AGENT_LOOP_SEC      (active mode, default 120s)  — used while there
+                                                           has been an auth'd
+                                                           request in the last
+                                                           AGENT_ACTIVE_WINDOW_SEC
+      - AGENT_IDLE_LOOP_SEC (idle mode,   default 1800s) — used when nobody
+                                                           is interacting
+
+    This keeps the service alive during judging (judges may probe at any
+    time) without burning $3-7/day in LLM tokens during the long stretches
+    when nobody is watching. The loop polls activity every 5s, so transition
+    from idle → active happens almost immediately when a judge opens the UI.
 
     Honors three control flags exposed via the /pause /step /halt endpoints:
       - RUN_STATE["halted"]: hard stop until /reset clears it. Idle-polls 1s.
@@ -287,6 +337,14 @@ async def _runner() -> None:
     global TOOL_CALLS, DECISIONS, GAS_VAL
     sectors_cycle = ["DePIN", "RWA", "AI", "Memes", "GameFi"]  # rotates through SSI indices
     i = 0
+
+    active_loop_sec = int(os.getenv("AGENT_LOOP_SEC", "120"))
+    idle_loop_sec = int(os.getenv("AGENT_IDLE_LOOP_SEC", "1800"))
+    active_window_sec = int(os.getenv("AGENT_ACTIVE_WINDOW_SEC", "300"))
+    activity_poll_sec = 5  # how often we re-check activity while waiting
+    last_cycle_at = 0.0  # 0 → run first cycle immediately on boot
+    last_logged_mode: str | None = None
+
     while True:
         # Halt is a latched safety stop — exits only via /reset.
         if RUN_STATE["halted"]:
@@ -297,6 +355,35 @@ async def _runner() -> None:
         if RUN_STATE["paused"] and not (STEP_REQUEST and STEP_REQUEST.is_set()):
             await asyncio.sleep(0.5)
             continue
+
+        now = time.time()
+        is_step = bool(STEP_REQUEST and STEP_REQUEST.is_set())
+        is_active = (now - LAST_ACTIVITY_TS) < active_window_sec
+        cadence = active_loop_sec if is_active else idle_loop_sec
+
+        # Wait for the next cycle (unless this is a /step or the very first
+        # tick). Poll activity every `activity_poll_sec` so when a judge
+        # arrives mid-idle-window we transition to active within seconds.
+        if not is_step and last_cycle_at > 0 and (now - last_cycle_at) < cadence:
+            await asyncio.sleep(activity_poll_sec)
+            continue
+
+        # First-time log + on every transition so operators can see in the
+        # /reasoning stream which cadence the loop is on.
+        mode = "active" if is_active else "idle"
+        if mode != last_logged_mode:
+            LATEST_LOG.append(
+                ReasoningEntry(
+                    ts=datetime.now(timezone.utc),
+                    kind="WAIT",
+                    text=(
+                        f"loop · cadence={mode} · next cycle every "
+                        f"{cadence}s (last activity {int(now - LAST_ACTIVITY_TS)}s ago)"
+                    ),
+                )
+            )
+            last_logged_mode = mode
+
         try:
             sector = sectors_cycle[i % len(sectors_cycle)]
             i += 1
@@ -332,16 +419,11 @@ async def _runner() -> None:
                 )
             )
         finally:
+            last_cycle_at = time.time()
             # Step is a one-shot — clear after the iteration regardless of
             # success so the next paused tick goes back to idle-polling.
             if STEP_REQUEST and STEP_REQUEST.is_set():
                 STEP_REQUEST.clear()
-        # If paused or halted, skip the long sleep so the next state-change
-        # control takes effect immediately.
-        if RUN_STATE["paused"] or RUN_STATE["halted"]:
-            continue
-        # Override with AGENT_LOOP_SEC. Demo tier should usually be >=120s.
-        await asyncio.sleep(int(os.getenv("AGENT_LOOP_SEC", "120")))
 
 
 @app.get("/health")
