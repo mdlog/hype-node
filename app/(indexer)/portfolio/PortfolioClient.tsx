@@ -7,6 +7,8 @@ import { tokens } from "@/lib/tokens";
 import { useSessionGuard } from "@/lib/auth/useSessionGuard";
 import { formatSyncLabel, useAutoRefetch } from "@/lib/hooks/useAutoRefetch";
 import { WalletMismatchBanner } from "@/components/auth/WalletMismatchBanner";
+import { CoachCallout } from "@/components/onboarding";
+import { useFirstRun } from "@/lib/hooks/useFirstRun";
 import type {
   UserPortfolio,
   PublishedIndex,
@@ -297,11 +299,22 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
   // state until the in-flight initial fetch resolves.
 
   const walletConnecting = wagmiStatus === "connecting";
+  const { isDone } = useFirstRun();
+  const createdIndex = isDone("createIndex");
 
   return (
     <>
       {/* Mismatch banner — only renders when wagmi addr ≠ session addr */}
       <WalletMismatchBanner guard={guard} />
+
+      {!createdIndex && (
+        <CoachCallout
+          icon="📊"
+          title="This is a reference benchmark (ssiDePIN)"
+          body="The charts below track a sample DePIN index, not your own holdings. Create your first index to track real, personal performance."
+          cta={{ label: "Open builder", href: "/builder" }}
+        />
+      )}
 
       {/* View switcher + snapshot button — only meaningful when signed in */}
       {isConnected && address && !walletConnecting && (
