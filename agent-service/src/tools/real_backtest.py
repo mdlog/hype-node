@@ -164,6 +164,34 @@ def _win_rate(returns: list[float]) -> float:
     return wins / len(returns)
 
 
+def build_purity_block(
+    n_assets: int,
+    n_returns: int,
+    excluded_assets: list[str],
+    oldest_ts: int | None,
+    newest_ts: int | None,
+) -> dict[str, Any]:
+    """Return the purity metadata block for a successful real backtest.
+
+    All fields are derivable from data the caller already has — no I/O.
+    The two boolean assertions reflect constants of the algorithm:
+      - lookahead_free: the backtester only uses closes[0..t-1] to compute
+        returns[t]; it never peeks at future prices.
+      - synthetic_free: on the ok-path, every asset's returns come from
+        real SoSoValue klines; no synthetic curve is blended in.
+    """
+    return {
+        "lookahead_free": True,
+        "synthetic_free": True,
+        "kline_source": "sosovalue_daily_klines",
+        "n_assets": n_assets,
+        "excluded_assets": list(excluded_assets),
+        "kline_count": n_returns + 1,
+        "oldest_ts": oldest_ts,
+        "newest_ts": newest_ts,
+    }
+
+
 async def run_real_backtest(
     constituents: list[dict[str, Any]],
     days: int = 90,
@@ -229,6 +257,10 @@ async def run_real_backtest(
     asset_closes: dict[str, list[float]] = {}
     excluded: list[str] = []
     raw_weights: dict[str, float] = {}
+    # Capture min/max kline timestamps across surviving assets BEFORE closes
+    # are extracted — needed for the purity block (oldest_ts / newest_ts).
+    oldest_ts: int | None = None
+    newest_ts: int | None = None
 
     for c, klines in zip(constituents, const_klines):
         symbol = c.get("symbol") or c.get("currency_id")
@@ -241,6 +273,18 @@ async def run_real_backtest(
         if not rets:
             excluded.append(str(symbol))
             continue
+        # Track timestamp range from raw klines before discarding them.
+        for k in klines:
+            ts = k.get("timestamp")
+            if ts is not None:
+                try:
+                    ts_int = int(ts)
+                    if oldest_ts is None or ts_int < oldest_ts:
+                        oldest_ts = ts_int
+                    if newest_ts is None or ts_int > newest_ts:
+                        newest_ts = ts_int
+                except (TypeError, ValueError):
+                    pass
         asset_closes[symbol] = closes
         asset_returns[symbol] = rets
         raw_weights[symbol] = weight
@@ -336,5 +380,13 @@ async def run_real_backtest(
                     bench_return = (closes[-1] / closes[0]) - 1.0
                     out[f"{label}_return"] = round(bench_return, 4)
                     out[f"vs_{label}"] = round(total_return - bench_return, 4)
+
+    out["purity"] = build_purity_block(
+        n_assets=len(asset_returns),
+        n_returns=len(portfolio_returns),
+        excluded_assets=excluded,
+        oldest_ts=oldest_ts,
+        newest_ts=newest_ts,
+    )
 
     return out
