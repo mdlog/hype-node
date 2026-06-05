@@ -15,6 +15,7 @@ import type { BasketProposal, BacktestResult } from "@/lib/api/agent";
 import type { CurrencyListItem } from "@/lib/api/sosovalue/tokens";
 import { SSI_REGISTRY_ABI } from "@/lib/contracts/ssiRegistryAbi";
 import { useSessionGuard } from "@/lib/auth/useSessionGuard";
+import { useFirstRun } from "@/lib/hooks/useFirstRun";
 import { WalletMismatchBanner } from "@/components/auth/WalletMismatchBanner";
 import { AddAssetModal } from "./AddAssetModal";
 
@@ -694,6 +695,8 @@ export default function BuilderPage() {
   const deployArgsValid = Array.isArray(deployArgs);
 
   const [deployLocalError, setDeployLocalError] = useState<string | null>(null);
+  const { completeStep } = useFirstRun();
+
   const deploy = useCallback(async () => {
     setDeployLocalError(null);
     resetWrite();
@@ -745,6 +748,10 @@ export default function BuilderPage() {
 
   const deploying = signing || switching || confirming;
   const deployed = receipt?.status === "success";
+
+  useEffect(() => {
+    if (deployed) completeStep("createIndex");
+  }, [deployed, completeStep]);
   const deployFailed = receipt?.status === "reverted" || !!writeError || !!receiptError;
   const explorer = txHash ? explorerTxUrl(TARGET_CHAIN_ID, txHash) : null;
 
