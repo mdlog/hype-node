@@ -367,6 +367,24 @@ To deploy elsewhere (e.g. ValueChain L1 mainnet `286623`), override
 
 Copy [`.env.example`](.env.example) and [`agent-service/.env.example`](agent-service/.env.example).
 
+## Use HypeNode inside Claude Desktop (Wave-1 delivered)
+
+The standalone MCP server ships as part of the `agent-service` package and exposes **17 read-only SoSoValue research tools** directly inside Claude Desktop — no API or custom UI required.
+
+```bash
+cd agent-service
+pip install -e .   # registers `hypenode-mcp` console-script
+```
+
+Then point Claude Desktop at the binary — see the full setup guide in
+[`agent-service/docs/CLAUDE_DESKTOP_SETUP.md`](agent-service/docs/CLAUDE_DESKTOP_SETUP.md)
+and copy the ready-made config from
+[`agent-service/claude_desktop_config.example.json`](agent-service/claude_desktop_config.example.json).
+
+Available tools: sector sentiment, fund flows, news, sector spotlight, SSI index list, basket builder, real-klines backtest, currency snapshots, risk-gate checker, macro calendar, macro event history, smart-money signal, fundraising rounds, RootData project/investor search. All read-only — stateful trade tools are excluded by design.
+
+---
+
 ## Roadmap
 
 The detailed plan lives in [`docs/product-roadmap.md`](docs/product-roadmap.md).
