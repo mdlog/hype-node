@@ -109,12 +109,30 @@ export function TopUpModal({ open, onClose, onSuccess }: Props) {
           color: PAL.text,
         }}
       >
-        <h2
-          id="topup-title"
-          style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 6 }}
-        >
-          Top up your balance
-        </h2>
+        <div className="flex items-center" style={{ gap: 10, marginBottom: 6 }}>
+          <h2
+            id="topup-title"
+            style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em", margin: 0 }}
+          >
+            Top up your balance
+          </h2>
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+              color: PAL.bg,
+              background: "#f59e0b",
+              padding: "2px 7px",
+              borderRadius: 4,
+              fontFamily: '"JetBrains Mono", monospace',
+              flexShrink: 0,
+            }}
+          >
+            DEMO MODE
+          </span>
+        </div>
         <p style={{ fontSize: 13, color: PAL.dim, lineHeight: 1.5, marginBottom: 16 }}>
           Add credit to keep using the agent after your free daily quota is
           exhausted. Balance is persistent — anything left over rolls into the
@@ -254,7 +272,7 @@ export function TopUpModal({ open, onClose, onSuccess }: Props) {
               opacity: busy || amount <= 0 ? 0.6 : 1,
             }}
           >
-            {busy ? "Processing…" : `Pay $${amount.toFixed(2)}`}
+            {busy ? "Simulating…" : `Simulate top-up ($${amount.toFixed(2)})`}
           </button>
         </div>
       </div>
