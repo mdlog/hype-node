@@ -9,6 +9,7 @@ import { useAccount, useSignTypedData, useSwitchChain } from "wagmi";
 import { TopUpModal } from "@/components/billing/TopUpModal";
 import { LogoSplash } from "@/components/ui/LogoSplash";
 import { formatSyncLabel, useAutoRefetch } from "@/lib/hooks/useAutoRefetch";
+import { useFirstRun } from "@/lib/hooks/useFirstRun";
 import { tokens } from "@/lib/tokens";
 import type { ToolHealth, ToolStatus } from "@/lib/api/agent";
 
@@ -775,6 +776,8 @@ export default function ChatPage() {
     [persistAuthed, activeThreadId, refreshThreads, loadThread, createThread],
   );
 
+  const { completeStep } = useFirstRun();
+
   async function send(text?: string) {
     const value = (text ?? input).trim();
     if (!value || busy) return;
@@ -823,6 +826,7 @@ export default function ChatPage() {
         ts: reply.ts ?? new Date().toISOString(),
       };
       setTurns([...next, agentTurn]);
+      completeStep("chat");
       if (reply.billing) {
         setBilling(reply.billing);
       } else {
@@ -1891,11 +1895,11 @@ function EmptyState() {
         height={88}
         style={{ display: "block" }}
       />
-      <div style={{ fontSize: 18, fontWeight: 600 }}>Ask the HypeNode agent</div>
+      <div style={{ fontSize: 18, fontWeight: 600 }}>Try one of these to see the agent in action</div>
       <div style={{ fontSize: 13, color: PAL.dim, maxWidth: 460, lineHeight: 1.55 }}>
-        SoSoValue Terminal sentiment, ETF flows, basket backtests, on-chain
-        actions via SoDEX — driven through {MCP_TOOLS.length} MCP tools. Try one
-        of the suggestions below or type your own.
+        Pick a suggestion below (or type your own) and watch the agent reason
+        through SoSoValue Terminal sentiment, ETF flows, basket backtests, and
+        on-chain actions via SoDEX — driven through {MCP_TOOLS.length} MCP tools.
       </div>
     </div>
   );
