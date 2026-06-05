@@ -5,9 +5,9 @@
 // in (published, live) 404s for non-creators.
 //
 // CTAs:
-//   - Subscribe with USDC: DISABLED. The HypeIndexVault contract isn't
-//     deployed yet (Wave 2), so we render a clearly-labeled "Coming soon"
-//     state with a tooltip explaining why.
+//   - Subscribe with USDC: live via <SubscribePanel> (approve + requestDeposit
+//     to HypeIndexVault). Env-gated: shows a clear "vault not deployed yet"
+//     fallback until NEXT_PUBLIC_HYPE_VAULT_ADDRESS / _USDC_ADDRESS are set.
 //   - View on chain: link to Sepolia explorer when on_chain_tx exists.
 //   - View backtest: link to the share page when a bt_share_link has been
 //     published for the proposal's source run; otherwise just a "saved by

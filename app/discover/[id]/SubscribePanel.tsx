@@ -109,7 +109,7 @@ function SubscribePanelLive({
   vaultAddress: `0x${string}`;
   usdcAddress: `0x${string}`;
 }) {
-  const { isConnected, address } = useAccount();
+  const { isConnected } = useAccount();
   const chainId = useChainId();
   const { switchChainAsync, isPending: switching } = useSwitchChain();
 
@@ -196,7 +196,6 @@ function SubscribePanelLive({
     vaultAddress,
     usdcAddress,
     indexId,
-    address,
   ]);
 
   return (
@@ -228,8 +227,10 @@ function SubscribePanelLive({
           <div style={{ marginTop: 10 }}>
             <input
               type="number"
+              inputMode="decimal"
+              aria-label="Deposit amount in USDC"
               min={MIN_DEPOSIT_USDC}
-              step="1"
+              step="any"
               value={amount}
               onChange={(e) => {
                 setLocalError(null);
