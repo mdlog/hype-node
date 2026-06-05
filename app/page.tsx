@@ -217,7 +217,7 @@ function Hero() {
         </p>
         <div style={{ display: "flex", gap: 12, marginTop: 36, alignItems: "center", flexWrap: "wrap" }}>
           <SignInButton className="hype-btn primary lg" label="Start free trial →" />
-          <a className="hype-btn lg" href="#demo">Watch 2-min demo</a>
+          <a className="hype-btn lg" href="#how">See how it works</a>
           <span
             style={{
               fontFamily: MONO_STACK,
@@ -789,7 +789,7 @@ function ProductCard({
             {primaryLabel}
           </button>
         </form>
-        <a className="hype-btn" href={`#${kind}-tour`}>Take the tour</a>
+        <a className="hype-btn" href="#how">Take the tour</a>
       </div>
     </div>
   );
