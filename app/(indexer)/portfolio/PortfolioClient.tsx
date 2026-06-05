@@ -299,7 +299,7 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
   // state until the in-flight initial fetch resolves.
 
   const walletConnecting = wagmiStatus === "connecting";
-  const { isDone } = useFirstRun();
+  const { isDone, hydrated: firstRunHydrated } = useFirstRun();
   const createdIndex = isDone("createIndex");
 
   return (
@@ -307,7 +307,7 @@ export function PortfolioClient({ reference }: { reference: ReferenceData }) {
       {/* Mismatch banner — only renders when wagmi addr ≠ session addr */}
       <WalletMismatchBanner guard={guard} />
 
-      {!createdIndex && (
+      {firstRunHydrated && !createdIndex && (
         <CoachCallout
           icon="📊"
           title="This is a reference benchmark (ssiDePIN)"

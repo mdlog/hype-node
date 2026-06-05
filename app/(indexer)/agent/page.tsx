@@ -337,7 +337,7 @@ export default function AgentPage() {
           <CoachCallout
             icon="🧭"
             title="How the agent works"
-            body="This console streams the LangGraph loop: signal → sentiment → flow → strategy → backtest → risk → wrap → exec → loop. Start or resume the agent to watch each node light up."
+            body="This console streams the LangGraph loop: signal → sentiment → flow → strategy → backtest → risk → wrap → exec → emergency_exit → loop. Start or resume the agent to watch each node light up."
           />
         )}
         <KpiStrip state={state} />
