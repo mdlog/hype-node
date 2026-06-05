@@ -191,6 +191,19 @@ NODE_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
+def _active_model_label() -> str:
+    """Model name to surface in the /state panel — provider-aware.
+
+    Mirrors the LLM_PROVIDER dispatch in chat_agent / strategy_agent so the UI
+    reports the model actually in use (e.g. a Qwen id when running against
+    DashScope via LLM_PROVIDER=openai), not a hardcoded Anthropic default.
+    """
+    provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+    if provider == "openai":
+        return os.getenv("OPENAI_MODEL", "gpt-4o")
+    return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+
+
 def _build_state_response() -> AgentState:
     current = LATEST_STATE.get("current_node")
     nodes: list[AgentNode] = []
@@ -206,7 +219,7 @@ def _build_state_response() -> AgentState:
         decisions_24h=DECISIONS,
         tool_calls=TOOL_CALLS,
         gas_spent_val=GAS_VAL,
-        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+        model=_active_model_label(),
         current_node=current,
         nodes=nodes,
         paused=RUN_STATE["paused"],

@@ -627,6 +627,16 @@ def _strategy_tools_openai() -> list[dict[str, Any]]:
 _STRATEGY_OPENAI_TOOLS_CACHE: list[dict[str, Any]] | None = None
 
 
+def _openai_base_url() -> str | None:
+    """Optional OpenAI-compatible endpoint override (shared semantics with the
+    chat agent). Set OPENAI_BASE_URL to run the `openai` provider against any
+    OpenAI-compatible API — e.g. Alibaba Qwen via DashScope's compatible-mode
+    endpoint. Blank → None so the SDK keeps its default base; an empty
+    OPENAI_BASE_URL would otherwise be used by the SDK as a broken base URL."""
+    url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+    return url or None
+
+
 async def _run_openai_strategy_loop(sector: str) -> dict[str, Any]:
     """OpenAI implementation of the strategy cycle. Function-call protocol
     instead of Anthropic tool_use, but the workflow + termination contract
@@ -636,7 +646,12 @@ async def _run_openai_strategy_loop(sector: str) -> dict[str, Any]:
     if not api_key:
         raise _SwitchProvider("OPENAI_API_KEY not set")
 
-    client = AsyncOpenAI(api_key=api_key, max_retries=SDK_MAX_RETRIES, timeout=SDK_TIMEOUT_SEC)
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=_openai_base_url(),
+        max_retries=SDK_MAX_RETRIES,
+        timeout=SDK_TIMEOUT_SEC,
+    )
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     temperature = float(os.getenv("OPENAI_TEMPERATURE", os.getenv("ANTHROPIC_TEMPERATURE", "0.2")))
     max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", os.getenv("ANTHROPIC_MAX_TOKENS", "2048")))

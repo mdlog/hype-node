@@ -1452,6 +1452,20 @@ def _openai_tools() -> list[dict[str, Any]]:
     return _OPENAI_TOOLS_CACHE
 
 
+def _openai_base_url() -> str | None:
+    """Optional OpenAI-compatible endpoint override.
+
+    Lets the `openai` provider point at any OpenAI-compatible API instead of
+    api.openai.com — e.g. Alibaba Qwen via DashScope's compatible-mode
+    endpoint (https://dashscope-intl.aliyuncs.com/compatible-mode/v1). Returns
+    None when unset or blank so the SDK falls back to its default base; we
+    normalize "" → None here because the SDK would otherwise treat an empty
+    OPENAI_BASE_URL as a literal (broken) base URL.
+    """
+    url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+    return url or None
+
+
 async def _run_anthropic_loop(
     turns: list[ChatTurn],
 ) -> tuple[str, list[ToolCallTrace], ChatUsage]:
@@ -1582,7 +1596,7 @@ async def _run_openai_loop(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    client = AsyncOpenAI(api_key=api_key)
+    client = AsyncOpenAI(api_key=api_key, base_url=_openai_base_url())
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     messages: list[dict[str, Any]] = _to_openai_messages(turns, SYSTEM_PROMPT)
     tools = _openai_tools()
