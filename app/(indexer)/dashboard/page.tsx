@@ -12,6 +12,7 @@ import {
   type SsiSnapshot,
   type IndexConstituent,
 } from "@/lib/api/sosovalue";
+import { SOSOVALUE_ENDPOINT_COUNT } from "@/lib/api/endpoints-meta";
 import { MacroCalendar } from "@/components/dashboard/MacroCalendar";
 import { SmartMoneyWidget } from "@/components/dashboard/SmartMoneyWidget";
 import { StablecoinFlowWidget } from "@/components/dashboard/StablecoinFlowWidget";
@@ -240,7 +241,7 @@ export default async function DashboardPage({
       <FirstRunChecklistCard />
 
       {/* ---------- snapshot KPI row ---------- */}
-      <SectionLabel meta={`SoSoValue · ${clock}`}>Snapshot</SectionLabel>
+      <SectionLabel meta={`SoSoValue · ${SOSOVALUE_ENDPOINT_COUNT} endpoints · synced ${clock}`}>Snapshot</SectionLabel>
       <div
         className="grid"
         style={{ gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 22 }}

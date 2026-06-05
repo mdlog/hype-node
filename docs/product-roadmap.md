@@ -76,7 +76,7 @@ Between 5–10 May, a few Wave 2/3 features were pulled forward because they wer
 
 | Feature | Originally planned for | Status now |
 |---|---|---|
-| **Standalone MCP server** ([agent-service/src/mcp_server.py](../agent-service/src/mcp_server.py)) | Not in roadmap | ✅ 8 tools, entry point for Claude Desktop / external MCP clients. |
+| **Standalone MCP server** ([agent-service/src/mcp_server.py](../agent-service/src/mcp_server.py)) | Not in roadmap | ✅ **Wave-1 delivered: 17 read-only research tools, installable via `hypenode-mcp` (`pip install -e .`).** Exposes sector sentiment, fund flows, news, basket builder, real-klines backtest, macro calendar, smart-money signal, RootData fundraising search — all read-only. Stateful trade tools excluded by design. Setup: see [`agent-service/docs/CLAUDE_DESKTOP_SETUP.md`](../agent-service/docs/CLAUDE_DESKTOP_SETUP.md). Wave-2 follow-up: HTTP/SSE transport + API-key auth + stateful trade-tool tier. |
 | **`/api/agent/tools/health`** — real per-tool readiness probe | Not in roadmap | ✅ Status `ok` / `degraded` / `missing_config` per tool, 16 tools monitored, colored dot rendered in the chat MCP panel. |
 | **RootData OpenAPI integration** | Not in roadmap | ✅ Plus tier (1,000 free credits/mo), 3 chat tools (`search_rootdata`, `get_rootdata_project`, `get_rootdata_investor`). Upstream for the fundraising data on sosovalue.com. |
 | **Browser-signed EIP-712 SoDEX trade flow** | Wave 2 (component 2.2, SoDEX router integration) | ✅ Pulled forward — agent prepares → wagmi `signTypedDataAsync` in the browser → server proxies `/api/sodex/submit` to the SoDEX gateway. **Server never holds the user's private key.** Buy + sell + balance + list orders + cancel via chat. |

@@ -895,6 +895,46 @@ export function BacktestClient(props: BacktestClientProps) {
             />
           </div>
 
+          {/* Purity seal — shown when a real backtest result is in scope */}
+          {usingResult && result?.purity && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 10px",
+                background: `${tokens.emerald}12`,
+                border: `1px solid ${tokens.emerald}30`,
+                borderRadius: 6,
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ color: tokens.emerald, fontSize: 11, fontWeight: 700 }}>
+                ✓ lookahead-free
+              </span>
+              <span style={{ color: tokens.textFaint, fontSize: 11 }}>·</span>
+              <span style={{ color: tokens.emerald, fontSize: 11, fontWeight: 700 }}>
+                ✓ synthetic-free
+              </span>
+              <span style={{ color: tokens.textFaint, fontSize: 11 }}>·</span>
+              <Mono size={11} color={tokens.textDim}>
+                {result.purity.kline_count} real klines
+              </Mono>
+              <span style={{ color: tokens.textFaint, fontSize: 11 }}>·</span>
+              <Mono size={11} color={tokens.textDim}>
+                {result.purity.n_assets} assets
+              </Mono>
+              {result.purity.excluded_assets.length > 0 && (
+                <>
+                  <span style={{ color: tokens.textFaint, fontSize: 11 }}>·</span>
+                  <Mono size={11} color={tokens.amber}>
+                    {result.purity.excluded_assets.length} excluded
+                  </Mono>
+                </>
+              )}
+            </div>
+          )}
+
           {/* Equity card */}
           <Card pad={0}>
             <div style={{ padding: "14px 16px 0" }}>
@@ -904,7 +944,7 @@ export function BacktestClient(props: BacktestClientProps) {
                     Equity curve · base 100
                   </div>
                   <Mono size={10.5} color={tokens.textFaint} style={{ marginTop: 2 }}>
-                    {usingResult ? resultDays : props.initialDays}d · daily SSI klines · synthetic NAV
+                    {usingResult ? resultDays : props.initialDays}d · daily SSI klines · NAV reconstructed from constituent klines
                   </Mono>
                 </div>
                 <div className="flex items-center" style={{ gap: 14, flexWrap: "wrap" }}>

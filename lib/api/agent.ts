@@ -325,6 +325,17 @@ export type BacktestResult = {
   n_rebalances?: number;
   nav_final?: number;
   error?: string;
+  /** Purity block — present only on ok: true results. */
+  purity?: {
+    lookahead_free: boolean;
+    synthetic_free: boolean;
+    kline_source: string;
+    n_assets: number;
+    excluded_assets: string[];
+    kline_count: number;
+    oldest_ts: number | null;
+    newest_ts: number | null;
+  };
 };
 
 export async function runBacktest(

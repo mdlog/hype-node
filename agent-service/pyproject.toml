@@ -19,6 +19,9 @@ dependencies = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+hypenode-mcp = "src.mcp_server:cli"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]

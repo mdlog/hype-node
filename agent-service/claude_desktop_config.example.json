@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hypenode": {
+      "command": "hypenode-mcp",
+      "env": {
+        "SOSOVALUE_API_KEY": "your_sosovalue_key",
+        "ROOTDATA_API_KEY": "your_rootdata_key_optional"
+      }
+    }
+  }
+}
