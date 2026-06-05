@@ -114,7 +114,7 @@ agent-service/                  Python FastAPI + LangGraph + MCP
     chat_agent.py               Multi-provider (Anthropic / OpenAI) tool-use loop
     graph.py                    10-node state machine: signal → … → exec
                                 with emergency_exit branch (USSI hedge)
-    mcp_server.py               Standalone MCP server (stdio)
+    mcp_server.py               Standalone MCP server — 17 read-only tools, installable via hypenode-mcp
     state.py                    Pydantic models
     tools/                      terminal · ssi · sodex · risk · backtest ·
                                 real_backtest · basket · macro · treasuries ·

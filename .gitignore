@@ -13,6 +13,7 @@ tsconfig.tsbuildinfo
 agent-service/.venv
 agent-service/__pycache__
 agent-service/**/__pycache__
+agent-service/*.egg-info/
 agent-service/.env
 agent-service/.env.*
 !agent-service/.env.example
