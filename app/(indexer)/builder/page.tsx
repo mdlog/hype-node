@@ -16,6 +16,7 @@ import type { CurrencyListItem } from "@/lib/api/sosovalue/tokens";
 import { SSI_REGISTRY_ABI } from "@/lib/contracts/ssiRegistryAbi";
 import { useSessionGuard } from "@/lib/auth/useSessionGuard";
 import { useFirstRun } from "@/lib/hooks/useFirstRun";
+import { useDemoMode } from "@/components/demo/DemoProvider";
 import { WalletMismatchBanner } from "@/components/auth/WalletMismatchBanner";
 import { AddAssetModal } from "./AddAssetModal";
 
@@ -286,6 +287,9 @@ export default function BuilderPage() {
   // don't re-parse during render.
   const [legacyDrafts, setLegacyDrafts] = useState<LegacyDraft[] | null>(null);
   const [migrating, setMigrating] = useState(false);
+
+  // ---- Demo mode ----
+  const { isDemo } = useDemoMode();
 
   // ---- Auth + Wagmi for deploy ----
   // Session guard reconciles SIWE session cookie ↔ wagmi-active wallet.
@@ -1403,6 +1407,7 @@ export default function BuilderPage() {
             small
             onClick={deploy}
             disabled={
+              isDemo ||
               !isConnected ||
               guard.status !== "ok" ||
               !simulateResult?.ok ||
@@ -1411,21 +1416,23 @@ export default function BuilderPage() {
               !deployArgsValid
             }
           >
-            {!isConnected
-              ? "Connect wallet"
-              : guard.status === "mismatch"
-                ? "Resolve wallet mismatch ↑"
-                : guard.status === "loading" || guard.status === "signing"
-                  ? "Verifying session…"
-                  : guard.status === "no-session"
-                    ? "Session missing — sign in"
-                    : deployed
-                      ? "✓ Deployed"
-                      : deploying
-                        ? "Signing…"
-                        : wrongChain
-                          ? "Switch chain & deploy"
-                          : "Sign & Deploy →"}
+            {isDemo
+              ? "Demo — connect a wallet to deploy"
+              : !isConnected
+                ? "Connect wallet"
+                : guard.status === "mismatch"
+                  ? "Resolve wallet mismatch ↑"
+                  : guard.status === "loading" || guard.status === "signing"
+                    ? "Verifying session…"
+                    : guard.status === "no-session"
+                      ? "Session missing — sign in"
+                      : deployed
+                        ? "✓ Deployed"
+                        : deploying
+                          ? "Signing…"
+                          : wrongChain
+                            ? "Switch chain & deploy"
+                            : "Sign & Deploy →"}
           </Btn>
         </div>
         {(deployLocalError || writeError || receiptError) && (

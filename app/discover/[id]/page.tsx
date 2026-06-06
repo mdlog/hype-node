@@ -22,6 +22,7 @@ import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
 import type { PbEarningRow, PbProposalRow } from "@/lib/supabase/types";
 import { getDemoProposalById } from "@/lib/demo/seed";
+import { getOptionalUser } from "@/lib/supabase/auth";
 import { SubscribePanel } from "./SubscribePanel";
 
 export const dynamic = "force-dynamic";
@@ -145,6 +146,10 @@ const STATUS_COLOR: Record<PbProposalRow["status"], string> = {
 };
 
 export default async function DiscoverDetailPage({ params }: Ctx) {
+  // Read the session to know if we're in demo mode (for CTA gating).
+  const user = await getOptionalUser();
+  const isDemo = !!user?.demo;
+
   // Short-circuit: demo-* ids never hit Supabase — serve from seed data.
   if (params.id.startsWith("demo-")) {
     const demoProposal = getDemoProposalById(params.id);
@@ -158,7 +163,8 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
     };
     const demoConstituents = parseConstituents(demoProposal.constituents);
     const demoTotalWeight = demoConstituents.reduce((s, r) => s + (r.weight ?? 0), 0);
-    return renderDetailJsx(demoProposal, demoStats, demoConstituents, demoTotalWeight, null);
+    // Demo proposals always gate the subscribe CTA.
+    return renderDetailJsx(demoProposal, demoStats, demoConstituents, demoTotalWeight, null, true);
   }
 
   const { data: proposalRaw, error: proposalErr } = await db
@@ -219,7 +225,7 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
   const constituents = parseConstituents(proposal.constituents);
   const totalWeight = constituents.reduce((s, r) => s + (r.weight ?? 0), 0);
 
-  return renderDetailJsx(proposal, stats, constituents, totalWeight, shareCode);
+  return renderDetailJsx(proposal, stats, constituents, totalWeight, shareCode, isDemo);
 }
 
 function renderDetailJsx(
@@ -228,6 +234,7 @@ function renderDetailJsx(
   constituents: ConstituentRow[],
   totalWeight: number,
   shareCode: string | null,
+  isDemo = false,
 ) {
   return (
     <div className="px-6 py-5 flex flex-col gap-3 max-w-6xl mx-auto">
@@ -405,7 +412,11 @@ function renderDetailJsx(
 
         {/* Action panel */}
         <div className="flex flex-col gap-2.5 min-w-0">
-          <SubscribePanel indexId={proposal.on_chain_index_id} ticker={proposal.ssi_ticker} />
+          <SubscribePanel
+            indexId={proposal.on_chain_index_id}
+            ticker={proposal.ssi_ticker}
+            isDemo={isDemo}
+          />
 
           <Card pad={14}>
             <Label>LINKS</Label>
