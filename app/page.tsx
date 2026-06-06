@@ -114,6 +114,9 @@ function TopNav() {
           <a className="hype-nav-link" href="#pricing">Pricing</a>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <a className="hype-btn" href="/api/demo/enter" style={{ fontSize: 12.5 }}>
+            Try demo →
+          </a>
           <SignInButton />
         </div>
       </div>
@@ -217,6 +220,7 @@ function Hero() {
         </p>
         <div style={{ display: "flex", gap: 12, marginTop: 36, alignItems: "center", flexWrap: "wrap" }}>
           <SignInButton className="hype-btn primary lg" label="Start free trial →" />
+          <a className="hype-btn lg" href="/api/demo/enter">Try demo (no wallet) →</a>
           <a className="hype-btn lg" href="#how">See how it works</a>
           <span
             style={{
@@ -778,7 +782,7 @@ function ProductCard({
           </div>
         ))}
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <form action="/api/auth/role" method="POST" style={{ margin: 0 }}>
           <input type="hidden" name="role" value={kind} />
           <input type="hidden" name="redirect" value={primaryHref} />
@@ -789,6 +793,7 @@ function ProductCard({
             {primaryLabel}
           </button>
         </form>
+        <a className="hype-btn" href={`/api/demo/enter?role=${kind}`}>Try demo →</a>
         <a className="hype-btn" href="#how">Take the tour</a>
       </div>
     </div>
@@ -1207,8 +1212,9 @@ function CTA() {
               sectors, let the agent do the rest.
             </p>
           </div>
-          <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 10, flexShrink: 0, flexWrap: "wrap" }}>
             <SignInButton className="hype-btn primary lg" label="Start free trial →" />
+            <a className="hype-btn lg" href="/api/demo/enter">Try demo (no wallet) →</a>
             <a className="hype-btn lg" href="#docs">Read the docs</a>
           </div>
         </div>
