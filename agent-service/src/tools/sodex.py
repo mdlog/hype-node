@@ -578,7 +578,11 @@ async def execute_trade(
     # these were silently counted as success because only orderID was checked.
     item_status = first.get("status") or ""
     item_code = first.get("code")
-    if item_status.upper() == "REJECTED" or (item_code is not None and int(item_code) != 0):
+    try:
+        code_nonzero = item_code is not None and int(item_code) != 0
+    except (TypeError, ValueError):
+        code_nonzero = True  # unparseable code => treat as rejection
+    if item_status.upper() == "REJECTED" or code_nonzero:
         return {
             "ok": False,
             "skipped": False,
@@ -746,7 +750,11 @@ async def execute_perps_trade(
     # Check for per-item reject in the perps response.
     item_status = (data.get("status") or "").upper()
     item_code = data.get("code")
-    if item_status == "REJECTED" or (item_code is not None and int(item_code) != 0):
+    try:
+        code_nonzero = item_code is not None and int(item_code) != 0
+    except (TypeError, ValueError):
+        code_nonzero = True  # unparseable code => treat as rejection
+    if item_status == "REJECTED" or code_nonzero:
         return {
             "ok": False,
             "skipped": False,

@@ -227,6 +227,7 @@ async def exec_node(state: HypeState) -> HypeState:
     state["current_node"] = "exec"
     basket = state.get("basket") or {}
     if not basket:
+        state.setdefault("sodex_txs", [])
         return _log(state, "WAIT", "exec · skipped (empty basket)")
 
     # Allocate USDC across constituents proportionally — bobot di basket
