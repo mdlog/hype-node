@@ -25,6 +25,12 @@ type SaveBody = {
 export async function POST(req: NextRequest) {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+  if (auth.user.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
   const userAddress = auth.user.address;
 
   let body: SaveBody;

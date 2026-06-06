@@ -18,6 +18,12 @@ export async function POST(req: NextRequest) {
   if (!session.address) {
     return NextResponse.json({ error: "not authenticated" }, { status: 401 });
   }
+  if (session.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
 
   const body = (await req.json().catch(() => ({}))) as { amount_usd?: unknown };
   const amount = Number(body.amount_usd);

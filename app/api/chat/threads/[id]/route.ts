@@ -70,6 +70,12 @@ export async function GET(req: NextRequest, { params }: Ctx) {
 export async function PATCH(req: NextRequest, { params }: Ctx) {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+  if (auth.user.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
   const userAddress = auth.user.address;
 
   const body = (await req.json().catch(() => null)) as
@@ -110,6 +116,12 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
 export async function DELETE(req: NextRequest, { params }: Ctx) {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+  if (auth.user.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
   const userAddress = auth.user.address;
 
   const { error, count } = await threads()

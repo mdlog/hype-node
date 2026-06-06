@@ -795,8 +795,14 @@ export default function BuilderPage() {
           </Mono>
         </div>
         <div className="flex gap-1.5">
-          <Btn small onClick={saveCurrentDraft} disabled={savingDraft}>
-            {savingDraft ? "Saving…" : currentDraftId ? "Save draft" : "Save as new"}
+          <Btn small onClick={saveCurrentDraft} disabled={savingDraft || isDemo}>
+            {isDemo
+              ? "Demo — connect a wallet to save"
+              : savingDraft
+                ? "Saving…"
+                : currentDraftId
+                  ? "Save draft"
+                  : "Save as new"}
           </Btn>
           <Btn small onClick={() => setDraftsOpen((v) => !v)}>
             {draftsLoading
@@ -1392,8 +1398,14 @@ export default function BuilderPage() {
         <div className="flex items-center gap-2 flex-wrap">
           <Btn small>← Back</Btn>
           <div className="flex-1" />
-          <Btn small onClick={saveCurrentDraft} disabled={savingDraft}>
-            {savingDraft ? "Saving…" : currentDraftId ? "Save draft" : "Save as new"}
+          <Btn small onClick={saveCurrentDraft} disabled={savingDraft || isDemo}>
+            {isDemo
+              ? "Demo — connect a wallet to save"
+              : savingDraft
+                ? "Saving…"
+                : currentDraftId
+                  ? "Save draft"
+                  : "Save as new"}
           </Btn>
           <Btn
             small
