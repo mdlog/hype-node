@@ -572,6 +572,28 @@ async def execute_trade(
     items = result.get("data") or []
     first = items[0] if items else {}
     order_id = first.get("orderID")
+
+    # Detect per-item silent rejects: SoDEX may return HTTP 200 with an item
+    # whose status is "REJECTED" or a non-zero per-item error code — previously
+    # these were silently counted as success because only orderID was checked.
+    item_status = first.get("status") or ""
+    item_code = first.get("code")
+    if item_status.upper() == "REJECTED" or (item_code is not None and int(item_code) != 0):
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": f"SoDEX item reject: {item_status}/{item_code}",
+            "symbol_in": symbol_in,
+            "symbol_out": symbol_out,
+            "amount_in": amount_in,
+            "pair": sym["name"],
+            "limit_price": price_s,
+            "quantity": qty_s,
+            "gas_val": 0.0,
+            "latency_ms": int((time.time() - started) * 1000),
+            "external_url": _explorer_url(sym["name"]),
+        }
+
     fee_pct = float(sym.get("takerFee") or "0.001")
 
     return {
