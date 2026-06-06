@@ -10,6 +10,11 @@ export type SessionData = {
   // Drives the post-SIWE redirect and the landing CTA highlight. Independent
   // of address — the user can express a preference before signing in.
   preferredRole?: "indexer" | "publisher";
+  // Demo-mode flag — set by /api/demo/enter, cleared by /api/demo/exit.
+  // When true, all stateful DB writes are gated with 403.
+  demo?: boolean;
+  // Unix ms timestamp when the demo session was started — used for TTL checks.
+  demoStartedAt?: number;
 };
 
 const password =
