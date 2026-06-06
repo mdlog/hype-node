@@ -13,11 +13,12 @@ import Link from "next/link";
 import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
-import type { PbEarningRow, PbProposalRow, PbSubscriptionRow } from "@/lib/supabase/types";
+import type { PbEarningRow, PbProposalRow, PbSubscriptionRow, PtRebalanceRow } from "@/lib/supabase/types";
 import { getOptionalUser } from "@/lib/supabase/auth";
-import { DEMO_PROPOSALS } from "@/lib/demo/seed";
+import { DEMO_PROPOSALS, DEMO_REBALANCES } from "@/lib/demo/seed";
 
 import { DiscoverFilters, type SortKey } from "./DiscoverFilters";
+import { CreatorLeaderboard } from "./CreatorLeaderboard";
 
 export const dynamic = "force-dynamic";
 
@@ -234,8 +235,24 @@ export default async function DiscoverPage({
   const enriched = aggregateEarnings(filtered, earnings, subCountsByIndexId);
   let items = sortItems(enriched, sortParam);
 
+  // Fetch pt_rebalances for the leaderboard (best-effort, fails silently).
+  let allRebalances: PtRebalanceRow[] = [];
+  {
+    const rebalancesRes = await db
+      .from("pt_rebalances")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (!rebalancesRes.error) {
+      allRebalances = (rebalancesRes.data ?? []) as PtRebalanceRow[];
+    }
+  }
+
   // Demo mode: prepend seeded DEMO items so they're always visible at the top.
   // Map PbProposalRow → DiscoverItem with demo-appropriate stats.
+  // Also merge demo rebalances so the leaderboard reflects DEMO data.
+  let leaderboardProposals = allProposals;
+  let leaderboardRebalances = allRebalances;
   if (user?.demo) {
     const demoItems: DiscoverItem[] = DEMO_PROPOSALS.map((p) => ({
       ...p,
@@ -244,6 +261,8 @@ export default async function DiscoverPage({
       live_subscriber_count: 0, // on_chain_index_id is null → not yet deployed
     }));
     items = [...demoItems, ...items];
+    leaderboardProposals = [...DEMO_PROPOSALS, ...allProposals];
+    leaderboardRebalances = [...DEMO_REBALANCES, ...allRebalances];
   }
 
   return (
@@ -273,6 +292,12 @@ export default async function DiscoverPage({
         activeSort={sortParam}
         activeCreator={creatorParam}
         totalCount={items.length}
+      />
+
+      <CreatorLeaderboard
+        proposals={leaderboardProposals}
+        rebalances={leaderboardRebalances}
+        isDemo={!!user?.demo}
       />
 
       {items.length === 0 ? (
