@@ -29,6 +29,7 @@ from .graph import GRAPH, HypeState  # noqa: E402
 from .state import AgentNode, AgentState, ChatRequest, ChatTurn, ReasoningEntry  # noqa: E402
 from . import store  # noqa: E402
 from . import strategy_agent  # noqa: E402
+from . import pt_store  # noqa: E402
 from .tools import basket as basket_tool  # noqa: E402
 from .tools import real_backtest  # noqa: E402
 from .tools import terminal  # noqa: E402
@@ -421,6 +422,18 @@ async def _runner() -> None:
                         ts=datetime.now(timezone.utc),
                         kind="WAIT",
                         text=f"history · persist failed: {exc}",
+                    )
+                )
+            # Best-effort: write rebalance + trade rows to Supabase (track-record).
+            # No-op when Supabase env vars unset; never crashes the loop.
+            try:
+                await pt_store.insert_rebalance(state, state.get("sodex_txs") or [])
+            except Exception as exc:  # noqa: BLE001
+                LATEST_LOG.append(
+                    ReasoningEntry(
+                        ts=datetime.now(timezone.utc),
+                        kind="WAIT",
+                        text=f"track-record · persist failed: {exc}",
                     )
                 )
         except Exception as exc:  # noqa: BLE001
