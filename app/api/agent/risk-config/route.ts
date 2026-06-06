@@ -3,6 +3,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getRiskConfig, updateRiskConfig } from "@/lib/api/agent";
 import { db } from "@/lib/supabase/server";
 import { getRequestUser } from "@/lib/supabase/auth";
+import { getIronSession } from "iron-session";
+import { cookies } from "next/headers";
+import { sessionOptions, type SessionData } from "@/lib/auth/session";
 import type { Json } from "@/lib/supabase/types";
 
 // Browser-side proxy to the FastAPI agent service. The Risk page UI fetches
@@ -20,6 +23,16 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // Guard: demo sessions must not write risk-config. This route is not
+  // normally auth-gated (GET is open) so we check the session directly.
+  const session = await getIronSession<SessionData>(cookies(), sessionOptions);
+  if (session.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
+
   let body: Record<string, unknown> = {};
   try {
     body = (await req.json()) as Record<string, unknown>;

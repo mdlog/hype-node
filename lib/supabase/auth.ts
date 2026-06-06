@@ -52,6 +52,7 @@ export async function getRequestUser(
     address: session.address.toLowerCase(),
     chainId: session.chainId,
     preferredRole: session.preferredRole,
+    demo: session.demo ?? false,
   };
 }
 
