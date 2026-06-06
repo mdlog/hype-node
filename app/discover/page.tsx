@@ -159,7 +159,10 @@ export default async function DiscoverPage({
     .in("status", [...PUBLIC_STATUSES])
     .order("updated_at", { ascending: false })
     .limit(200);
-  if (proposalsRes.error) {
+  // Non-demo: a feed-load failure is fatal — show the error card. Demo mode is
+  // resilient: it falls back to an empty live feed so the seeded DEMO items
+  // still render even when Supabase is unreachable.
+  if (proposalsRes.error && !user?.demo) {
     return (
       <div className="px-6 py-8 max-w-5xl mx-auto">
         <Card pad={20}>
@@ -171,7 +174,7 @@ export default async function DiscoverPage({
       </div>
     );
   }
-  const allProposals = (proposalsRes.data ?? []) as PbProposalRow[];
+  const allProposals = (proposalsRes.error ? [] : (proposalsRes.data ?? [])) as PbProposalRow[];
 
   // Filter the loaded set in JS — sector + creator. Sector chips need the
   // unfiltered ticker set, so derive it before applying any filter.
