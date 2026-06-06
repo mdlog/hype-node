@@ -10,6 +10,7 @@ stream the log."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Any, TypedDict
@@ -22,6 +23,11 @@ from .tools import risk as risk_tool
 from .tools import sodex
 from .tools import ssi
 from .tools import terminal
+from .tools.sodex_policy import (
+    MAX_TRADE_ATTEMPTS,
+    backoff_seconds,
+    classify_trade_result,
+)
 from .strategy_agent import run_strategy_agent
 
 # Total USDC notional spread across basket constituents per rebalance cycle.
@@ -221,35 +227,127 @@ async def exec_node(state: HypeState) -> HypeState:
     state["current_node"] = "exec"
     basket = state.get("basket") or {}
     if not basket:
+        state.setdefault("sodex_txs", [])
         return _log(state, "WAIT", "exec · skipped (empty basket)")
 
     # Allocate USDC across constituents proportionally — bobot di basket
     # nilainya 0..1, total ≈ 1.0.
     notional_total = float(state.get("exec_notional_usdc") or EXEC_NOTIONAL_USDC)
-    txs: list[dict[str, Any]] = []
+    txs: list[dict[str, Any]] = []        # summary list (kept for legacy callers)
+    sodex_txs: list[dict[str, Any]] = []  # per-asset result dicts for Feature 2 / _persist_cycle
     placed = skipped = errors = 0
     total_latency = 0
+
     for sym, weight in basket.items():
         amount_in = max(notional_total * float(weight), 1.0)
-        tx = await sodex.execute_trade("USDC", sym, amount_in)
+        tx: dict[str, Any] = {}
+
+        for attempt in range(MAX_TRADE_ATTEMPTS):
+            tx = await sodex.execute_trade("USDC", sym, amount_in)
+            disposition = classify_trade_result(tx)
+
+            if disposition == "done":
+                placed += 1
+                _log(
+                    state,
+                    "ACT",
+                    f"sodex · {sym} order #{tx.get('order_id')} "
+                    f"{tx.get('quantity')} @ {tx.get('limit_price')} "
+                    f"(attempt {attempt + 1})",
+                    url=tx.get("external_url"),
+                )
+                # Best-effort partial-fill log (non-blocking).
+                if tx.get("cl_ord_id") and tx.get("pair"):
+                    try:
+                        fill = await sodex.poll_spot_fill(
+                            tx["cl_ord_id"], tx["pair"]
+                        )
+                        if fill.get("resting") is True:
+                            _log(
+                                state,
+                                "WAIT",
+                                f"sodex · {sym} resting "
+                                f"filled={fill.get('filled_pct', 0):.1f}%",
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+                break
+
+            elif disposition == "retry":
+                wait = backoff_seconds(attempt)
+                _log(
+                    state,
+                    "THINK",
+                    f"sodex · {sym} retry in {wait:.0f}s "
+                    f"(attempt {attempt + 1}/{MAX_TRADE_ATTEMPTS}): "
+                    f"{tx.get('error') or tx.get('reason')}",
+                )
+                if attempt < MAX_TRADE_ATTEMPTS - 1:
+                    await asyncio.sleep(wait)
+                else:
+                    # Exhausted retries — record as error.
+                    errors += 1
+                    _log(
+                        state,
+                        "WAIT",
+                        f"sodex · {sym} gave up after {MAX_TRADE_ATTEMPTS} retries: "
+                        f"{tx.get('error') or tx.get('reason')}",
+                    )
+
+            elif disposition == "route_to_perps":
+                _log(
+                    state,
+                    "THINK",
+                    f"sodex · {sym} spot cancel-only ({tx.get('reason')}), "
+                    "cascading to perps",
+                )
+                perps_tx = await sodex.execute_perps_trade(sym, amount_in)
+                perps_d = classify_trade_result(perps_tx)
+                if perps_d == "done":
+                    placed += 1
+                    tx = perps_tx
+                    _log(
+                        state,
+                        "ACT",
+                        f"sodex · {sym} via perps order #{perps_tx.get('order_id')} "
+                        f"{perps_tx.get('quantity')} @ {perps_tx.get('limit_price')}",
+                        url=perps_tx.get("external_url"),
+                    )
+                elif perps_tx.get("skipped"):
+                    # Perps disabled / skipped — treat as skipped overall.
+                    skipped += 1
+                    tx = perps_tx
+                    _log(
+                        state,
+                        "WAIT",
+                        f"sodex · {sym} perps skip ({perps_tx.get('reason')})",
+                    )
+                else:
+                    errors += 1
+                    tx = perps_tx
+                    _log(
+                        state,
+                        "WAIT",
+                        f"sodex · {sym} perps error: {perps_tx.get('error')}",
+                    )
+                break  # cascade is a single attempt — no inner retry loop
+
+            else:  # give_up
+                if tx.get("skipped"):
+                    skipped += 1
+                    _log(state, "WAIT", f"sodex · skip {sym} ({tx.get('reason')})")
+                else:
+                    errors += 1
+                    _log(state, "WAIT", f"sodex · error {sym}: {tx.get('error')}")
+                break
+
+        # Accumulate per-asset result for Feature 2 track-record write-path.
+        tx["_sym"] = sym
+        sodex_txs.append(tx)
         txs.append(tx)
         total_latency += int(tx.get("latency_ms") or 0)
-        if tx.get("ok"):
-            placed += 1
-            _log(
-                state,
-                "ACT",
-                f"sodex · {sym} order #{tx.get('order_id')} {tx.get('quantity')} @ {tx.get('limit_price')}",
-                url=tx.get("external_url"),
-            )
-        elif tx.get("skipped"):
-            skipped += 1
-            _log(state, "WAIT", f"sodex · skip {sym} ({tx.get('reason')})")
-        else:
-            errors += 1
-            _log(state, "WAIT", f"sodex · error {sym}: {tx.get('error')}")
 
-    state["sodex_txs"] = txs
+    state["sodex_txs"] = sodex_txs  # Feature 2 consumes this list
     avg = (total_latency / len(txs) / 1000) if txs else 0.0
     return _log(
         state,

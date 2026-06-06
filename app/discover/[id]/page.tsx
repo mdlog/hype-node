@@ -20,10 +20,11 @@ import { notFound } from "next/navigation";
 import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
-import type { PbEarningRow, PbProposalRow } from "@/lib/supabase/types";
-import { getDemoProposalById } from "@/lib/demo/seed";
+import type { PbEarningRow, PbProposalRow, PtRebalanceRow } from "@/lib/supabase/types";
+import { getDemoProposalById, getDemoRebalancesByTicker } from "@/lib/demo/seed";
 import { getOptionalUser } from "@/lib/supabase/auth";
 import { SubscribePanel } from "./SubscribePanel";
+import { BacktestVsRealized } from "./BacktestVsRealized";
 
 export const dynamic = "force-dynamic";
 
@@ -146,12 +147,18 @@ const STATUS_COLOR: Record<PbProposalRow["status"], string> = {
 };
 
 export default async function DiscoverDetailPage({ params }: Ctx) {
-  // Read the session to know if we're in demo mode (for CTA gating).
+  // Session flag — used only to gate the subscribe CTA (a demo-session user
+  // cannot subscribe regardless of which proposal they're viewing).
   const user = await getOptionalUser();
   const isDemo = !!user?.demo;
 
+  // Data-source flag — true only when the rebalances come from the demo seed,
+  // i.e. the URL itself is a demo-* id.  This is what BacktestVsRealized uses
+  // to show (or hide) the "DEMO data" badge.
+  const dataIsDemo = params.id.startsWith("demo-");
+
   // Short-circuit: demo-* ids never hit Supabase — serve from seed data.
-  if (params.id.startsWith("demo-")) {
+  if (dataIsDemo) {
     const demoProposal = getDemoProposalById(params.id);
     if (!demoProposal) notFound();
     const demoStats: EarningsStats = {
@@ -163,8 +170,12 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
     };
     const demoConstituents = parseConstituents(demoProposal.constituents);
     const demoTotalWeight = demoConstituents.reduce((s, r) => s + (r.weight ?? 0), 0);
-    // Demo proposals always gate the subscribe CTA.
-    return renderDetailJsx(demoProposal, demoStats, demoConstituents, demoTotalWeight, null, true);
+    const demoRebalances = demoProposal.ssi_ticker
+      ? getDemoRebalancesByTicker(demoProposal.ssi_ticker)
+      : [];
+    // Demo proposals always gate the subscribe CTA (isDemo=true);
+    // data source is also demo (dataIsDemo=true).
+    return renderDetailJsx(demoProposal, demoStats, demoConstituents, demoTotalWeight, null, true, demoRebalances, true);
   }
 
   const { data: proposalRaw, error: proposalErr } = await db
@@ -196,8 +207,8 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
     notFound();
   }
 
-  // Parallelize earnings + share-link lookup.
-  const [earningsRes, shareRes] = await Promise.all([
+  // Parallelize earnings + share-link + rebalances lookup.
+  const [earningsRes, shareRes, rebalancesRes] = await Promise.all([
     db
       .from("pb_earnings")
       .select("*")
@@ -209,6 +220,14 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
           .select("short_code")
           .eq("run_id", proposal.source_run_id)
           .maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    proposal.ssi_ticker
+      ? db
+          .from("pt_rebalances")
+          .select("*")
+          .eq("ssi_ticker", proposal.ssi_ticker)
+          .order("created_at", { ascending: false })
+          .limit(100)
       : Promise.resolve({ data: null, error: null }),
   ]);
 
@@ -222,10 +241,15 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
       ? null
       : (shareRes.data as { short_code: string } | null)?.short_code ?? null;
 
+  const rebalances: PtRebalanceRow[] =
+    rebalancesRes && !rebalancesRes.error
+      ? ((rebalancesRes.data ?? []) as PtRebalanceRow[])
+      : [];
+
   const constituents = parseConstituents(proposal.constituents);
   const totalWeight = constituents.reduce((s, r) => s + (r.weight ?? 0), 0);
 
-  return renderDetailJsx(proposal, stats, constituents, totalWeight, shareCode, isDemo);
+  return renderDetailJsx(proposal, stats, constituents, totalWeight, shareCode, isDemo, rebalances, false);
 }
 
 function renderDetailJsx(
@@ -235,6 +259,8 @@ function renderDetailJsx(
   totalWeight: number,
   shareCode: string | null,
   isDemo = false,
+  rebalances: PtRebalanceRow[] = [],
+  dataIsDemo = false,
 ) {
   return (
     <div className="px-6 py-5 flex flex-col gap-3 max-w-6xl mx-auto">
@@ -390,6 +416,14 @@ function renderDetailJsx(
               </Mono>
             )}
           </Card>
+
+          <BacktestVsRealized
+            backtestReturn={proposal.backtest_return}
+            backtestSharpe={proposal.backtest_sharpe}
+            backtestMaxDd={proposal.backtest_max_dd}
+            rebalances={rebalances}
+            isDemo={dataIsDemo}
+          />
 
           <Card pad={16}>
             <Label>EARNINGS · PUBLIC LEDGER</Label>
