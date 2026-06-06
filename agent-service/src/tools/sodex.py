@@ -617,6 +617,201 @@ async def execute_trade(
     }
 
 
+async def execute_perps_trade(
+    symbol_out: str,
+    amount_in_usdc: float,
+    leverage: int = 1,
+    slippage_bps: int = 50,
+) -> dict[str, Any]:
+    """Server-signed perps BUY order for the autonomous rebalance loop.
+
+    Degrades safely (returns a structured skip) when either:
+      - SODEX_PRIVATE_KEY is not set, or
+      - SODEX_AUTONOMOUS_TRADE is not truthy
+    so the agent never blocks on missing credentials.
+
+    Mirrors execute_trade's return envelope so exec_node can treat both
+    uniformly. Uses the perps gateway (PERPS_BASE, domain "futures", flat
+    newOrder params — NOT the spot batchNewOrder shape).
+    """
+    started = time.time()
+    skip_base = {
+        "ok": False,
+        "skipped": True,
+        "symbol_in": "USDC",
+        "symbol_out": symbol_out,
+        "amount_in": amount_in_usdc,
+        "slippage_bps": slippage_bps,
+        "gas_val": 0.0,
+        "mode": "perps",
+        "latency_ms": int((time.time() - started) * 1000),
+    }
+
+    # Guard: require both the signing key and the autonomous-trade flag.
+    if not SODEX_PRIVATE_KEY or not SODEX_AUTONOMOUS_TRADE:
+        return {**skip_base, "reason": "perps autonomous trading disabled"}
+
+    sym = await resolve_perps_symbol(symbol_out)
+    if sym is None:
+        return {**skip_base, "reason": f"no SoDEX perps pair for {symbol_out}"}
+    if sym.get("status") != "TRADING":
+        return {**skip_base, "reason": f"perps pair {sym['name']} status={sym.get('status')}"}
+
+    tickers = await _load_perps_tickers()
+    tk = tickers.get(sym["name"]) or {}
+    ref_px_str = tk.get("markPrice") or tk.get("lastPx") or "0"
+    ref_px = float(ref_px_str)
+    if ref_px <= 0:
+        return {**skip_base, "reason": f"no reference price for perps {sym['name']}"}
+
+    # BUY: limit sits above mark to cross asks (same as execute_trade's market logic).
+    target_px = ref_px * (1 + slippage_bps / 10_000)
+    tick_str = str(sym["tickSize"])
+    step_str = str(sym["stepSize"])
+    target_px = _quantize(target_px, float(tick_str))
+    if target_px <= 0:
+        return {**skip_base, "reason": "computed perps price below tick"}
+
+    # Convert USDC notional → contract quantity (accounting for leverage).
+    quantity = _quantize((amount_in_usdc * leverage) / target_px, float(step_str))
+    min_qty = float(sym.get("minQuantity") or "0")
+    if quantity < min_qty:
+        return {
+            **skip_base,
+            "reason": f"perps quantity {quantity} below minQuantity {min_qty} on {sym['name']}",
+        }
+    notional = target_px * quantity
+    min_notional = float(sym.get("minNotional") or "0")
+    if notional < min_notional:
+        return {
+            **skip_base,
+            "reason": f"perps notional {notional:.2f} < min {min_notional} on {sym['name']}",
+        }
+
+    chosen_leverage = leverage or int(sym.get("initLeverage") or 1)
+    max_lev = int(sym.get("maxLeverage") or chosen_leverage)
+    if chosen_leverage > max_lev:
+        chosen_leverage = max_lev
+
+    cl_ord_id = f"agent-p-{symbol_out[:10]}-{int(time.time() * 1000)}"
+    price_s = _decimal_str(target_px, tick_str)
+    qty_s = _decimal_str(quantity, step_str)
+
+    try:
+        account_id = await get_account_id()
+    except RuntimeError as exc:
+        return {**skip_base, "skipped": False, "ok": False, "error": str(exc)}
+
+    # Perps newOrder params: flat (not wrapped in `orders: [...]`).
+    # Key order must match SoDEX Go SDK PerpsNewOrderRequest struct field order.
+    order_params: dict[str, Any] = {
+        "accountID": account_id,
+        "symbolID": int(sym["id"]),
+        "clOrdID": cl_ord_id,
+        "side": 1,              # Buy
+        "type": 1,              # Limit
+        "timeInForce": 1,       # GTC
+        "price": price_s,
+        "quantity": qty_s,
+        "reduceOnly": False,
+        "leverage": chosen_leverage,
+    }
+    action = {"type": "newOrder", "params": order_params}
+
+    try:
+        result = await submit_action(
+            "futures", PERPS_BASE, "/trade/orders", action,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": str(exc),
+            "symbol_in": "USDC",
+            "symbol_out": symbol_out,
+            "amount_in": amount_in_usdc,
+            "pair": sym["name"],
+            "limit_price": price_s,
+            "quantity": qty_s,
+            "gas_val": 0.0,
+            "mode": "perps",
+            "latency_ms": int((time.time() - started) * 1000),
+            "external_url": _perps_explorer_url(sym["name"]),
+        }
+
+    # Perps newOrder returns a single object (not a list) under "data".
+    data = result.get("data") or {}
+    order_id = data.get("orderID") or data.get("id")
+
+    # Check for per-item reject in the perps response.
+    item_status = (data.get("status") or "").upper()
+    item_code = data.get("code")
+    if item_status == "REJECTED" or (item_code is not None and int(item_code) != 0):
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": f"SoDEX perps item reject: {item_status}/{item_code}",
+            "symbol_in": "USDC",
+            "symbol_out": symbol_out,
+            "amount_in": amount_in_usdc,
+            "pair": sym["name"],
+            "limit_price": price_s,
+            "quantity": qty_s,
+            "gas_val": 0.0,
+            "mode": "perps",
+            "latency_ms": int((time.time() - started) * 1000),
+            "external_url": _perps_explorer_url(sym["name"]),
+        }
+
+    fee_pct = float(sym.get("takerFee") or "0.0004")
+    return {
+        "ok": True,
+        "skipped": False,
+        "order_id": order_id,
+        "cl_ord_id": cl_ord_id,
+        "pair": sym["name"],
+        "symbol_in": "USDC",
+        "symbol_out": symbol_out,
+        "amount_in": amount_in_usdc,
+        "limit_price": price_s,
+        "last_price": str(ref_px),
+        "quantity": qty_s,
+        "notional": round(notional, 4),
+        "gas_val": round(notional * fee_pct, 4),
+        "mode": "perps",
+        "latency_ms": int((time.time() - started) * 1000),
+        "external_url": _perps_explorer_url(sym["name"]),
+        "status": "submitted",
+    }
+
+
+async def poll_spot_fill(cl_ord_id: str, pair: str) -> dict[str, Any]:
+    """Best-effort check on a resting spot order's fill status.
+
+    Calls list_open_spot_orders and looks for the order by clOrdID.
+    Returns:
+      {"resting": True/False, "cum_qty": float, "quantity": float, "filled_pct": float}
+    when found, or {"resting": None} on any error / missing key.
+    """
+    try:
+        orders = await list_open_spot_orders()
+        for o in orders:
+            if o.get("clOrdID") == cl_ord_id or o.get("origClOrdID") == cl_ord_id:
+                cum_qty = float(o.get("cumQty") or o.get("cumQuantity") or 0)
+                qty = float(o.get("quantity") or o.get("qty") or 0)
+                filled_pct = (cum_qty / qty * 100) if qty > 0 else 0.0
+                return {
+                    "resting": True,
+                    "cum_qty": cum_qty,
+                    "quantity": qty,
+                    "filled_pct": round(filled_pct, 2),
+                }
+        # Order not in open book — either fully filled or cancelled.
+        return {"resting": False, "cum_qty": None, "quantity": None, "filled_pct": None}
+    except Exception:  # noqa: BLE001
+        return {"resting": None}
+
+
 async def cancel_spot_order(symbol_id: int, order_id: int) -> dict[str, Any]:
     """Cancel a single resting spot order.
 
