@@ -21,6 +21,7 @@ import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
 import type { PbEarningRow, PbProposalRow } from "@/lib/supabase/types";
+import { getDemoProposalById } from "@/lib/demo/seed";
 import { SubscribePanel } from "./SubscribePanel";
 
 export const dynamic = "force-dynamic";
@@ -144,6 +145,22 @@ const STATUS_COLOR: Record<PbProposalRow["status"], string> = {
 };
 
 export default async function DiscoverDetailPage({ params }: Ctx) {
+  // Short-circuit: demo-* ids never hit Supabase — serve from seed data.
+  if (params.id.startsWith("demo-")) {
+    const demoProposal = getDemoProposalById(params.id);
+    if (!demoProposal) notFound();
+    const demoStats: EarningsStats = {
+      total_earned: 3_200,
+      last_30d_earned: 840,
+      subscribers: 47,
+      latest_aum: 125_000,
+      count: 1,
+    };
+    const demoConstituents = parseConstituents(demoProposal.constituents);
+    const demoTotalWeight = demoConstituents.reduce((s, r) => s + (r.weight ?? 0), 0);
+    return renderDetailJsx(demoProposal, demoStats, demoConstituents, demoTotalWeight, null);
+  }
+
   const { data: proposalRaw, error: proposalErr } = await db
     .from("pb_proposals")
     .select("*")
@@ -202,6 +219,16 @@ export default async function DiscoverDetailPage({ params }: Ctx) {
   const constituents = parseConstituents(proposal.constituents);
   const totalWeight = constituents.reduce((s, r) => s + (r.weight ?? 0), 0);
 
+  return renderDetailJsx(proposal, stats, constituents, totalWeight, shareCode);
+}
+
+function renderDetailJsx(
+  proposal: PbProposalRow,
+  stats: EarningsStats,
+  constituents: ConstituentRow[],
+  totalWeight: number,
+  shareCode: string | null,
+) {
   return (
     <div className="px-6 py-5 flex flex-col gap-3 max-w-6xl mx-auto">
       <Crumbs ticker={proposal.ssi_ticker} title={proposal.title ?? proposal.id.slice(0, 8)} />

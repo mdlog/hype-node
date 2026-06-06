@@ -1,6 +1,8 @@
 import { isAddress, type Address } from "viem";
 import { NextResponse, type NextRequest } from "next/server";
 import { getUserPortfolio } from "@/lib/api/portfolio";
+import { isDemoAddress } from "@/lib/demo/demo";
+import { makeDemoPortfolio } from "@/lib/demo/seed";
 
 // Force dynamic — every request must re-query on-chain registry + SoDEX.
 // Cache layer can be added later via a server-side memoizer if needed (the
@@ -24,6 +26,13 @@ export async function GET(req: NextRequest) {
       { ok: false, error: "invalid EVM address" },
       { status: 400 },
     );
+  }
+
+  // Short-circuit for the demo sentinel — return seeded data immediately,
+  // skipping the slow on-chain RPC scan and SoDEX fetch.
+  if (isDemoAddress(param)) {
+    const portfolio = makeDemoPortfolio(new Date().toISOString());
+    return NextResponse.json({ ok: true, ...portfolio });
   }
 
   const portfolio = await getUserPortfolio(param as Address);
