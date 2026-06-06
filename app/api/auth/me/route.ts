@@ -12,5 +12,6 @@ export async function GET() {
     address: session.address ?? null,
     chainId: session.chainId ?? null,
     role: session.preferredRole ?? null,
+    demo: session.demo ?? false,
   });
 }

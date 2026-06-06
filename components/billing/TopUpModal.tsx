@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { tokens } from "@/lib/tokens";
+import { useDemoMode } from "@/components/demo/DemoProvider";
 
 const PAL = {
   bg: "#07090C",
@@ -31,6 +32,7 @@ type Props = {
 };
 
 export function TopUpModal({ open, onClose, onSuccess }: Props) {
+  const { isDemo } = useDemoMode();
   const [amount, setAmount] = useState<number>(5);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -203,6 +205,27 @@ export function TopUpModal({ open, onClose, onSuccess }: Props) {
           />
         </label>
 
+        {isDemo && (
+          <div
+            style={{
+              padding: "8px 12px",
+              background: `${tokens.amber}14`,
+              border: `1px solid ${tokens.amber}50`,
+              borderRadius: 6,
+              fontSize: 12,
+              color: tokens.amber,
+              marginBottom: 12,
+              fontFamily: '"JetBrains Mono", monospace',
+            }}
+          >
+            Top-up is disabled in demo mode.{" "}
+            <a href="/" style={{ color: tokens.amber, textDecoration: "underline" }}>
+              Connect a wallet
+            </a>{" "}
+            for real billing.
+          </div>
+        )}
+
         {error && (
           <div
             style={{
@@ -258,7 +281,7 @@ export function TopUpModal({ open, onClose, onSuccess }: Props) {
           <button
             type="button"
             onClick={submit}
-            disabled={busy || amount <= 0}
+            disabled={isDemo || busy || amount <= 0}
             style={{
               padding: "8px 16px",
               borderRadius: 6,
@@ -267,9 +290,9 @@ export function TopUpModal({ open, onClose, onSuccess }: Props) {
               color: PAL.bg,
               fontSize: 13,
               fontWeight: 600,
-              cursor: busy || amount <= 0 ? "not-allowed" : "pointer",
+              cursor: isDemo || busy || amount <= 0 ? "not-allowed" : "pointer",
               fontFamily: "inherit",
-              opacity: busy || amount <= 0 ? 0.6 : 1,
+              opacity: isDemo || busy || amount <= 0 ? 0.6 : 1,
             }}
           >
             {busy ? "Simulating…" : `Simulate top-up ($${amount.toFixed(2)})`}

@@ -63,6 +63,14 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+  // Demo sessions must not create durable thread rows — /api/chat works
+  // without a thread ID (stateless proxy), so blocking thread creation is safe.
+  if (auth.user.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
   const userAddress = auth.user.address;
 
   const body = (await req.json().catch(() => null)) as { title?: string | null } | null;

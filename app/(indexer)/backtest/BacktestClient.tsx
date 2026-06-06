@@ -27,6 +27,7 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { Btn, Card, Mono, Toggle } from "@/components/ui";
+import { useDemoMode } from "@/components/demo/DemoProvider";
 import { formatSyncLabel, useAutoRefetch } from "@/lib/hooks/useAutoRefetch";
 import { tokens } from "@/lib/tokens";
 import type {
@@ -230,6 +231,8 @@ function daysUnderwater(dd: number[]): number {
 }
 
 export function BacktestClient(props: BacktestClientProps) {
+  const { isDemo } = useDemoMode();
+
   const [strategy, setStrategy] = useState(props.initialStrategy);
   const [days, setDays] = useState<Period>(props.initialDays);
   const [rebalance, setRebalance] = useState<Rebalance>(7);
@@ -1238,25 +1241,29 @@ export function BacktestClient(props: BacktestClientProps) {
               small
               onClick={handleSave}
               disabled={
+                isDemo ||
                 !result || status !== "ok" || saveStatus === "saving" || saveStatus === "saved"
               }
               style={
+                isDemo ||
                 !result || status !== "ok" || saveStatus === "saving" || saveStatus === "saved"
                   ? { opacity: 0.4, cursor: "not-allowed" }
                   : undefined
               }
+              title={isDemo ? "Demo — connect a wallet to save" : undefined}
             >
-              ⌂ Save as preset
+              {isDemo ? "Demo — connect a wallet" : "⌂ Save as preset"}
             </Btn>
             <Btn
               small
               onClick={handleShare}
-              disabled={!savedRunId || shareStatus === "creating"}
+              disabled={isDemo || !savedRunId || shareStatus === "creating"}
               style={
-                !savedRunId || shareStatus === "creating"
+                isDemo || !savedRunId || shareStatus === "creating"
                   ? { opacity: 0.4, cursor: "not-allowed" }
                   : undefined
               }
+              title={isDemo ? "Demo — connect a wallet to share" : undefined}
             >
               ⇪ Share
             </Btn>

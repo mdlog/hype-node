@@ -25,10 +25,60 @@ const VAULT_CHAIN_ID = 138565;
 export function SubscribePanel({
   indexId,
   ticker,
+  isDemo = false,
 }: {
   indexId: string | null;
   ticker: string;
+  /** When true (demo session), show a connect-wallet prompt instead of the live CTA. */
+  isDemo?: boolean;
 }) {
+  // Demo mode: no live wallet — show a connect-wallet notice instead.
+  if (isDemo) {
+    return (
+      <Card pad={14}>
+        <Label>SUBSCRIBE</Label>
+        <div style={{ fontSize: 13, fontWeight: 600, marginTop: 6 }}>
+          Mint into this index
+        </div>
+        <Mono size={10} color={tokens.textDim} className="block mt-1">
+          Deposit USDC → receive HYPE-{ticker} shares.
+        </Mono>
+        <div
+          style={{
+            marginTop: 10,
+            padding: "10px 14px",
+            background: `${tokens.amber}10`,
+            border: `1px dashed ${tokens.amber}60`,
+            borderRadius: 6,
+            textAlign: "center",
+          }}
+        >
+          <Mono size={11} color={tokens.amber}>
+            Demo mode — connect a wallet to subscribe for real
+          </Mono>
+        </div>
+        <Btn
+          small
+          disabled
+          style={{
+            marginTop: 8,
+            width: "100%",
+            justifyContent: "center",
+            opacity: 0.45,
+          }}
+        >
+          Subscribe (demo — read-only)
+        </Btn>
+        <Mono size={10} color={tokens.textFaint} className="block mt-2">
+          <a href="/" style={{ color: tokens.cyan, textDecoration: "underline" }}>
+            Connect a wallet
+          </a>{" "}
+          to subscribe with real USDC.
+        </Mono>
+      </Card>
+    );
+  }
+
   // Fallback: env not set → honest "not deployed" card
   if (!VAULT_ADDRESS || !USDC_ADDRESS) {
     return (

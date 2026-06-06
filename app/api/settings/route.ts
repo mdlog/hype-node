@@ -44,6 +44,27 @@ function sanitizePatch(body: unknown): SysUserSettingsUpdate {
 export async function GET(req: NextRequest) {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+
+  // Demo session: return the default settings shape without touching the DB.
+  if (auth.user.demo) {
+    const demoDefaults: SysUserSettingsRow = {
+      user_address: auth.user.address,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      theme: "dark",
+      default_period: "30d",
+      default_strategy: "ssiDePIN",
+      email: null,
+      notify_on_drawdown: false,
+      notify_on_rebalance: false,
+      notify_on_publish: false,
+      display_name: null,
+      twitter_handle: null,
+      bio: null,
+    };
+    return NextResponse.json(demoDefaults);
+  }
+
   const userAddress = auth.user.address;
 
   // Try select first; if no row, upsert a default and return.
@@ -75,6 +96,12 @@ export async function GET(req: NextRequest) {
 async function applyPatch(req: NextRequest): Promise<NextResponse> {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+  if (auth.user.demo) {
+    return NextResponse.json(
+      { ok: false, error: "Demo mode is read-only — connect a wallet." },
+      { status: 403 },
+    );
+  }
   const userAddress = auth.user.address;
 
   let body: unknown;

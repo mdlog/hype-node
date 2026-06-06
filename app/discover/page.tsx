@@ -14,6 +14,8 @@ import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { db } from "@/lib/supabase/server";
 import type { PbEarningRow, PbProposalRow, PbSubscriptionRow } from "@/lib/supabase/types";
+import { getOptionalUser } from "@/lib/supabase/auth";
+import { DEMO_PROPOSALS } from "@/lib/demo/seed";
 
 import { DiscoverFilters, type SortKey } from "./DiscoverFilters";
 
@@ -146,6 +148,9 @@ export default async function DiscoverPage({
   const sortParam = parseSort(searchParams?.sort);
   const creatorParam = singleString(searchParams?.creator).toLowerCase();
 
+  // Demo mode: read the session so we can prepend demo items.
+  const user = await getOptionalUser();
+
   // Pull all public proposals first — we need the full set so the sector
   // chips reflect every available ticker even when one is filtered.
   const proposalsRes = await db
@@ -154,7 +159,10 @@ export default async function DiscoverPage({
     .in("status", [...PUBLIC_STATUSES])
     .order("updated_at", { ascending: false })
     .limit(200);
-  if (proposalsRes.error) {
+  // Non-demo: a feed-load failure is fatal — show the error card. Demo mode is
+  // resilient: it falls back to an empty live feed so the seeded DEMO items
+  // still render even when Supabase is unreachable.
+  if (proposalsRes.error && !user?.demo) {
     return (
       <div className="px-6 py-8 max-w-5xl mx-auto">
         <Card pad={20}>
@@ -166,7 +174,7 @@ export default async function DiscoverPage({
       </div>
     );
   }
-  const allProposals = (proposalsRes.data ?? []) as PbProposalRow[];
+  const allProposals = (proposalsRes.error ? [] : (proposalsRes.data ?? [])) as PbProposalRow[];
 
   // Filter the loaded set in JS — sector + creator. Sector chips need the
   // unfiltered ticker set, so derive it before applying any filter.
@@ -224,7 +232,19 @@ export default async function DiscoverPage({
   }
 
   const enriched = aggregateEarnings(filtered, earnings, subCountsByIndexId);
-  const items = sortItems(enriched, sortParam);
+  let items = sortItems(enriched, sortParam);
+
+  // Demo mode: prepend seeded DEMO items so they're always visible at the top.
+  // Map PbProposalRow → DiscoverItem with demo-appropriate stats.
+  if (user?.demo) {
+    const demoItems: DiscoverItem[] = DEMO_PROPOSALS.map((p) => ({
+      ...p,
+      latest_earning: { aum_usd_at_accrual: 125_000, subscriber_count: 47 },
+      total_earned_usd: 3_200,
+      live_subscriber_count: 0, // on_chain_index_id is null → not yet deployed
+    }));
+    items = [...demoItems, ...items];
+  }
 
   return (
     <div className="px-6 py-5 flex flex-col gap-3.5 max-w-7xl mx-auto">

@@ -18,6 +18,8 @@ export type AuthedUser = {
   address: string;
   chainId?: number;
   preferredRole?: "indexer" | "publisher";
+  /** True when this is a demo-mode session (no wallet, read-only). */
+  demo?: boolean;
 };
 
 /**
@@ -31,6 +33,7 @@ export async function getOptionalUser(): Promise<AuthedUser | null> {
     address: session.address.toLowerCase(),
     chainId: session.chainId,
     preferredRole: session.preferredRole,
+    demo: session.demo ?? false,
   };
 }
 
@@ -49,6 +52,7 @@ export async function getRequestUser(
     address: session.address.toLowerCase(),
     chainId: session.chainId,
     preferredRole: session.preferredRole,
+    demo: session.demo ?? false,
   };
 }
 
