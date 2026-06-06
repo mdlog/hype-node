@@ -14,9 +14,6 @@ from typing import Any
 
 import httpx
 
-_SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
-_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-
 
 def _headers() -> dict[str, str]:
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()

@@ -122,8 +122,12 @@ export function creatorLeaderboard(
     });
   }
 
-  // Sort descending by score.
-  rows.sort((a, b) => b.score - a.score);
+  // Sort descending by score; break ties alphabetically by creator address.
+  rows.sort((a, b) => {
+    const scoreDiff = b.score - a.score;
+    if (scoreDiff !== 0) return scoreDiff;
+    return a.creator < b.creator ? -1 : a.creator > b.creator ? 1 : 0;
+  });
 
   // Attach 1-based rank.
   return rows.map((r, i) => ({ ...r, rank: i + 1 }));

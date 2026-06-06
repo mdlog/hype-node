@@ -183,4 +183,23 @@ describe("creatorLeaderboard", () => {
     expect(rows[0].rank).toBe(1);
     expect(rows[1].rank).toBe(2);
   });
+
+  it("handles null backtest_sharpe — avgBacktestSharpe is null and score has no NaN", () => {
+    const nullSharpeProposal: PbProposalRow = {
+      ...BASE_PROPOSAL,
+      id: "p-null-sharpe",
+      creator_address: "0xCreatorC",
+      ssi_ticker: "ssiNULL",
+      backtest_sharpe: null,
+    };
+    const rows = creatorLeaderboard([nullSharpeProposal], []);
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    // A proposal with null sharpe contributes nothing to the average.
+    expect(row.avgBacktestSharpe).toBeNull();
+    // Score must be a finite number — no NaN or Infinity.
+    expect(Number.isFinite(row.score)).toBe(true);
+    // Score falls back to 0 * 0.6 + log1p(0) * 0.4 = 0
+    expect(row.score).toBeCloseTo(0, 10);
+  });
 });
