@@ -210,6 +210,55 @@ export type PbEarningInsert = Omit<PbEarningRow, "id" | "accrued_at"> & {
   accrued_at?: string;
 };
 
+// ---------- pt_rebalances ----------
+export type PtRebalanceRow = {
+  id: string;
+  created_at: string;
+  sector: string;
+  ssi_ticker: string | null;
+  creator_address: string | null;
+  basket_before: Json | null;
+  basket_after: Json | null;
+  strategy_source: string | null;
+  sentiment_score: number | null;
+  risk_verdict: string | null;
+  ssi_tx_hash: string | null;
+  sodex_placed: number;
+  sodex_skipped: number;
+  sodex_errors: number;
+  emergency: boolean;
+};
+export type PtRebalanceInsert = Omit<PtRebalanceRow, "id" | "created_at"> & {
+  id?: string;
+  created_at?: string;
+};
+
+// ---------- pt_trades ----------
+export type PtTradeRow = {
+  id: string;
+  rebalance_id: string;
+  created_at: string;
+  symbol: string | null;
+  weight: number | null;
+  amount_in_usdc: number | null;
+  limit_price: string | null;
+  last_price: string | null;
+  quantity: string | null;
+  notional: number | null;
+  gas_val: number | null;
+  latency_ms: number | null;
+  order_id: string | null;
+  cl_ord_id: string | null;
+  pair: string | null;
+  mode: string | null;
+  status: string | null;
+  error: string | null;
+};
+export type PtTradeInsert = Omit<PtTradeRow, "id" | "created_at"> & {
+  id?: string;
+  created_at?: string;
+};
+
 // ---------- sys_risk_audit ----------
 export type SysRiskAuditRow = {
   id: string;
@@ -359,6 +408,25 @@ export type Database = {
         Insert: SysUserSettingsInsert;
         Update: SysUserSettingsUpdate;
         Relationships: [];
+      };
+      pt_rebalances: {
+        Row: PtRebalanceRow;
+        Insert: PtRebalanceInsert;
+        Update: Partial<PtRebalanceInsert>;
+        Relationships: [];
+      };
+      pt_trades: {
+        Row: PtTradeRow;
+        Insert: PtTradeInsert;
+        Update: Partial<PtTradeInsert>;
+        Relationships: [
+          {
+            foreignKeyName: "pt_trades_rebalance_id_fkey";
+            columns: ["rebalance_id"];
+            referencedRelation: "pt_rebalances";
+            referencedColumns: ["id"];
+          },
+        ];
       };
     };
     Views: EmptyMap;
