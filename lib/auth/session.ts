@@ -1,5 +1,7 @@
 import type { SessionOptions } from "iron-session";
 
+import { resolveSessionPassword } from "./sessionPassword";
+
 export type SessionData = {
   // Set after a successful SIWE verify. Address is lowercased.
   address?: string;
@@ -17,16 +19,10 @@ export type SessionData = {
   demoStartedAt?: number;
 };
 
-const password =
-  process.env.SESSION_PASSWORD ??
-  // Dev-only fallback so first-run works without env setup. Production MUST
-  // set SESSION_PASSWORD to a 32+ char random string — the cookie can't be
-  // trusted otherwise.
-  "dev_only_change_me_____________________________";
-
-if (password.length < 32) {
-  throw new Error("SESSION_PASSWORD must be at least 32 characters");
-}
+// Resolves the seal password and HARD-FAILS in production if it is missing or
+// left at the public dev fallback — otherwise sessions would be forgeable.
+// See lib/auth/sessionPassword.ts for the rule + tests.
+const password = resolveSessionPassword();
 
 export const sessionOptions: SessionOptions = {
   password,

@@ -11,7 +11,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getRequestUser, requireUser } from "@/lib/supabase/auth";
+import { demoWriteBlocked, getRequestUser, requireUser } from "@/lib/supabase/auth";
 import { db } from "@/lib/supabase/server";
 import type {
   Json,
@@ -178,6 +178,8 @@ function optString(v: unknown): string | null {
 export async function POST(req: NextRequest) {
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
+  const demo = demoWriteBlocked(auth.user);
+  if (demo) return demo;
   const userAddress = auth.user.address;
 
   let body: CreateBody;

@@ -1,15 +1,21 @@
-// Creator earnings ledger — list + manual insert.
+// Creator earnings ledger — list + trusted insert.
 //
 // GET returns every accrual for the caller, optionally filtered by proposal /
 // time window. Auth + creator_address scope is enforced on every query.
 //
-// POST is a manual entry escape-hatch (admin tooling, migration, manual
-// reconciliation). The eventual production fill path is an on-chain indexer
-// listening for SSI Protocol fee events — see `event_type` enum.
+// POST is the fee-event fill path. Writers are the settlement keeper /
+// on-chain indexer (KEEPER_SECRET header) or an authenticated operator doing
+// manual reconciliation — NEVER an ordinary creator. This matters because the
+// figures here surface on the PUBLIC /discover cards (TOTAL EARNED / AUM /
+// SUBSCRIBERS); letting creators post their own earnings would make those
+// numbers self-fabricable. creator_address is taken from the proposal row,
+// not from the caller.
 
 import { NextResponse, type NextRequest } from "next/server";
 
 import { requireUser } from "@/lib/supabase/auth";
+import { requireOperator } from "@/lib/auth/operator";
+import { isKeeperRequest } from "@/lib/auth/keeper";
 import { db } from "@/lib/supabase/server";
 import type { PbEarningInsert, PbEarningRow } from "@/lib/supabase/types";
 
@@ -100,9 +106,14 @@ function optInt(v: unknown): number | null {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireUser(req);
-  if (!auth.user) return auth.res;
-  const userAddress = auth.user.address;
+  // Writer auth: keeper/indexer via shared secret, else an authed operator.
+  // Ordinary creators cannot write earnings (would be self-fabricable).
+  let cookieSource: NextResponse | null = null;
+  if (!isKeeperRequest(req)) {
+    const auth = await requireOperator(req);
+    if (!auth.user) return auth.res;
+    cookieSource = auth.res;
+  }
 
   let body: CreateBody;
   try {
@@ -135,8 +146,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Ownership check: the proposal must belong to the caller. We also use the
-  // lookup to confirm the row exists before writing the ledger entry.
+  // Resolve the proposal so we can attribute the earning to ITS creator
+  // (not the keeper/operator making the request) and confirm it exists.
   const proposal = await db
     .from("pb_proposals")
     .select("id, creator_address")
@@ -146,8 +157,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: proposal.error.message }, { status: 500 });
   }
   const propRow = proposal.data as { id: string; creator_address: string } | null;
-  if (!propRow || propRow.creator_address !== userAddress) {
-    // Same response for "doesn't exist" and "not yours" so we don't leak ids.
+  if (!propRow) {
     return NextResponse.json({ error: "proposal not found" }, { status: 404 });
   }
 
@@ -159,7 +169,7 @@ export async function POST(req: NextRequest) {
 
   const insert: PbEarningInsert = {
     proposal_id: body.proposal_id,
-    creator_address: userAddress,
+    creator_address: propRow.creator_address,
     event_type: body.event_type as PbEarningRow["event_type"],
     amount_usd: body.amount_usd,
     accrued_at: accruedAt,
@@ -183,8 +193,10 @@ export async function POST(req: NextRequest) {
   }
 
   const out = NextResponse.json(data as PbEarningRow);
-  for (const cookie of auth.res.cookies.getAll()) {
-    out.cookies.set(cookie);
+  if (cookieSource) {
+    for (const cookie of cookieSource.cookies.getAll()) {
+      out.cookies.set(cookie);
+    }
   }
   return out;
 }

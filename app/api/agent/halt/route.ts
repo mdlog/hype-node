@@ -1,7 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { haltAgent } from "@/lib/api/agent";
+import { requireOperator } from "@/lib/auth/operator";
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const auth = await requireOperator(req);
+  if (!auth.user) return auth.res;
+
   const result = await haltAgent();
   if (!result.ok) {
     return NextResponse.json(
