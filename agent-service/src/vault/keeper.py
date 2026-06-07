@@ -84,12 +84,44 @@ class Keeper:
     # Per-request processing
     # ------------------------------------------------------------------
 
-    def process_deposit(self, request_id: int) -> None:
+    def process_deposit(self, request_id: int, store: Any = None) -> None:
         d = self.vault.functions.pendingDeposits(request_id).call()
         idx_bytes, who, usdc_in, _min_shares, _ts, pulled = d
         if who == "0x0000000000000000000000000000000000000000":
             return
         idx_hex = self._idx_hex(idx_bytes)
+
+        # ── Cancel-before-pull check ──────────────────────────────────────────
+        # If the subscriber has requested cancellation (via /api/vault/cancel-deposit)
+        # and pullForDeposit has not yet been called, honor the cancellation instead
+        # of proceeding.  This is a best-effort window (~1 keeper tick, ~seconds).
+        # Wrapping in try/except so a store outage never crashes the tick.
+        if store is not None and not pulled:
+            try:
+                from src.vault.rebalance import should_cancel_before_pull
+                pending = store.pending_cancel_ids()
+                if should_cancel_before_pull(request_id, pending):
+                    log.info(
+                        "deposit %d: cancel request found — calling cancelDeposit(id, 0) pre-pull",
+                        request_id,
+                    )
+                    try:
+                        # Pre-pull refund path: pass 0 as returnedUsdc
+                        # (no USDC has been pulled yet so vault refunds from escrow).
+                        self._send(self.vault.functions.cancelDeposit(request_id, 0))
+                        store.mark_cancel_honored(request_id)
+                        log.info("deposit %d: cancellation honored", request_id)
+                    except Exception as cancel_exc:
+                        log.error(
+                            "deposit %d: cancelDeposit(0) failed: %s", request_id, cancel_exc
+                        )
+                    return
+            except Exception as store_exc:  # noqa: BLE001
+                log.warning(
+                    "deposit %d: store check for cancel request failed: %s — proceeding with pull",
+                    request_id, store_exc,
+                )
+
         try:
             if not pulled:
                 self._send(self.vault.functions.pullForDeposit(request_id))
@@ -137,8 +169,17 @@ class Keeper:
     # Poll loop
     # ------------------------------------------------------------------
 
-    def poll_once(self) -> None:
-        """Scan all pending request ids and dispatch any unseen ones."""
+    def poll_once(self, store: Any = None) -> None:
+        """Scan all pending request ids and dispatch any unseen ones.
+
+        Parameters
+        ----------
+        store
+            Optional store instance (IndexerStore).  When provided, process_deposit
+            will check pb_cancel_requests before pulling — if the subscriber has
+            requested cancellation, cancelDeposit(id, 0) is called instead.
+            Passing None disables the cancel-before-pull check (safe default).
+        """
         current_block = self.w3.eth.block_number
         next_id = self.vault.functions.nextRequestId().call()
 
@@ -149,7 +190,7 @@ class Keeper:
                 who_d = d[1]
                 if who_d != "0x0000000000000000000000000000000000000000":
                     self._seen_deposits.add(req_id)
-                    self.process_deposit(req_id)
+                    self.process_deposit(req_id, store=store)
                 elif req_id in self._seen_deposits:
                     pass  # already settled/cancelled
 

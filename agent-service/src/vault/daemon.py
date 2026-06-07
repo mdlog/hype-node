@@ -167,7 +167,10 @@ class VaultDaemon:
 
     def tick(self) -> dict:
         self.reconcile_vaults()
-        self.keeper.poll_once()
+        # Pass the store so process_deposit can check pb_cancel_requests
+        # before pulling — if the subscriber has requested cancellation the
+        # keeper honors it (cancelDeposit instead of pull+settle).
+        self.keeper.poll_once(store=self.store)
         self.rebalance_due()   # after settlement, before accrue — gated by VAULT_REBALANCE_ENABLED
         self.accrue_due()
         return self.index_new_blocks()

@@ -1,10 +1,11 @@
-"""TDD tests for diff_basket (pure) and keeper rebalance orchestration.
+"""TDD tests for diff_basket (pure), should_cancel_before_pull (pure),
+and keeper rebalance orchestration.
 
 These tests are written FIRST; run them before implementation to see them fail,
 then implement to pass.  The orchestration tests use fake executor + fake store.
 """
 import pytest
-from src.vault.rebalance import diff_basket
+from src.vault.rebalance import diff_basket, should_cancel_before_pull
 
 
 # ── diff_basket pure tests ────────────────────────────────────────────────────
@@ -105,6 +106,26 @@ def test_diff_basket_exact_balance_no_trade():
 
     trades = diff_basket(current_value, target_weights, total)
     assert trades == []
+
+
+# ── should_cancel_before_pull pure tests ─────────────────────────────────────
+
+def test_should_cancel_returns_true_when_id_in_set():
+    assert should_cancel_before_pull(42, {42, 99}) is True
+
+
+def test_should_cancel_returns_false_when_id_not_in_set():
+    assert should_cancel_before_pull(7, {42, 99}) is False
+
+
+def test_should_cancel_returns_false_for_empty_set():
+    assert should_cancel_before_pull(1, set()) is False
+
+
+def test_should_cancel_type_strict_int_match():
+    """deposit_id is always int — set lookup must match."""
+    assert should_cancel_before_pull(5, {5}) is True
+    assert should_cancel_before_pull(0, {0}) is True
 
 
 # ── Rebalance orchestration tests (fake executor + fake store) ────────────────
@@ -344,7 +365,7 @@ class _DaemonFakeKeeper:
         self.rebalance_calls: list[str] = []
         self._sign_nav_calls: list = []
 
-    def poll_once(self):
+    def poll_once(self, store=None):
         pass
 
     def open_vault(self, idx_bytes, creator):
@@ -437,3 +458,208 @@ def test_daemon_tick_includes_rebalance_step():
         d.tick()
 
     assert IDX in keeper.rebalance_calls
+
+
+# ── Keeper cancel-before-pull integration test ────────────────────────────────
+
+from src.vault.store import InMemoryStore
+
+
+class _CancelFakeVaultFns:
+    """Fake vault functions that record pull/cancel/settle calls."""
+    def __init__(self, pulled=False):
+        self.pulled = pulled
+        self.pull_calls: list[int] = []
+        self.cancel_calls: list[tuple] = []
+        self.settle_calls: list[int] = []
+        self._owner = None  # back-reference set after construction
+
+    def pendingDeposits(self, req_id):
+        pulled = self.pulled
+        idx_bytes = bytes(32)
+        who = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        result = (idx_bytes, who, 1_000_000, 0, 0, pulled)
+        # Return a callable object whose .call() returns the tuple
+        class _R:
+            def call(_self): return result
+        return _R()
+
+    def pullForDeposit(self, req_id):
+        self.pull_calls.append(req_id)
+        self.pulled = True  # mark as pulled after the call
+        class _R:
+            def build_transaction(_self, _tx): return {}
+        return _R()
+
+    def cancelDeposit(self, req_id, returned):
+        self.cancel_calls.append((req_id, returned))
+        class _R:
+            def build_transaction(_self, _tx): return {}
+        return _R()
+
+    def settleDeposit(self, req_id, nav, bval, signed_at, sig):
+        self.settle_calls.append(req_id)
+        class _R:
+            def build_transaction(_self, _tx): return {}
+        return _R()
+
+    def build_transaction(self, _):
+        return {}
+
+    def nextRequestId(self):
+        outer_self = self
+        class _R:
+            def call(_self): return 2  # one deposit (id=1)
+        return _R()
+
+
+class _CancelFakeVaultContract:
+    def __init__(self, pulled=False):
+        self.functions = _CancelFakeVaultFns(pulled=pulled)
+
+
+class _CancelFakeW3:
+    class eth:
+        block_number = 100
+
+        @staticmethod
+        def get_block(_): return {"timestamp": 9999}
+
+        @staticmethod
+        def gas_price(): return 1
+
+        @staticmethod
+        def get_transaction_count(_): return 0
+
+        @staticmethod
+        def send_raw_transaction(_): return b"\x00" * 32
+
+        @staticmethod
+        def wait_for_transaction_receipt(_):
+            class R:
+                status = 1
+            return R()
+
+
+def _make_cancel_keeper(pulled=False):
+    """Build a minimal Keeper-like object for cancel-before-pull tests without Web3."""
+    from src.vault.keeper import Keeper
+    from unittest.mock import MagicMock
+    from eth_account import Account
+
+    cfg = MagicMock()
+    cfg.rpc_url = "http://localhost:8545"
+    cfg.vault_address = "0x" + "aa" * 20
+    cfg.usdc_address = "0x" + "bb" * 20
+    cfg.chain_id = 1
+
+    fake_vault = _CancelFakeVaultContract(pulled=pulled)
+    fake_w3 = MagicMock()
+    fake_w3.eth.block_number = 100
+    fake_w3.eth.get_block.return_value = {"timestamp": 9999}
+    fake_w3.eth.get_transaction_count.return_value = 0
+    fake_w3.eth.gas_price = 1
+    fake_w3.eth.send_raw_transaction.return_value = b"\x00" * 32
+    fake_w3.eth.wait_for_transaction_receipt.return_value = MagicMock(status=1)
+
+    keeper_acct = Account.from_key(b"\xcc" * 32)
+    signer_acct = Account.from_key(b"\xdd" * 32)
+
+    k = object.__new__(Keeper)
+    k.cfg = cfg
+    k.executor = MagicMock()
+    k.nav_engine = MagicMock()
+    k.w3 = fake_w3
+    k.vault = fake_vault
+    k.usdc = MagicMock()
+    k.keeper_acct = keeper_acct
+    k.signer_acct = signer_acct
+    k._last_block = 0
+    k._seen_deposits = set()
+    k._seen_redeems = set()
+
+    return k, fake_vault
+
+
+def test_keeper_cancel_before_pull_honors_request():
+    """When a cancel request exists and deposit is not yet pulled,
+    keeper calls cancelDeposit(id, 0) and marks it honored."""
+    store = InMemoryStore()
+    store.add_cancel_request(1)  # deposit id 1 is pending cancel
+
+    k, fake_vault = _make_cancel_keeper(pulled=False)
+
+    # Override _send to directly invoke the function object (record calls).
+    called = []
+    def fake_send(fn):
+        called.append(fn)
+        return fn
+    k._send = fake_send
+
+    k.process_deposit(1, store=store)
+
+    # cancelDeposit(1, 0) must have been called
+    assert fake_vault.functions.cancel_calls == [(1, 0)], (
+        f"Expected cancelDeposit(1, 0), got {fake_vault.functions.cancel_calls}"
+    )
+    # pullForDeposit must NOT have been called
+    assert fake_vault.functions.pull_calls == []
+    # Store must have marked the request honored
+    assert 1 not in store.pending_cancel_ids()
+
+
+def test_keeper_cancel_before_pull_skips_when_no_request():
+    """When no cancel request exists, process_deposit proceeds normally."""
+    store = InMemoryStore()
+    # No cancel request registered
+
+    k, fake_vault = _make_cancel_keeper(pulled=False)
+
+    calls = []
+    def fake_send(fn):
+        calls.append(fn)
+        return fn
+    k._send = fake_send
+    # Make executor + nav_engine safe to call
+    k.executor.execute_deposit_swap.return_value = 1_000_000
+    k.nav_engine.quote_deposit.return_value = (1_000_000, 0)
+    k.nav_engine.on_deposit_settled.return_value = None
+
+    # vault.functions.vaults needs to return a proper tuple
+    k.vault.functions.vaults = lambda _: type("F", (), {"call": lambda self: [True, "0x" + "aa" * 20, 0, 0, 0, 0, 0]})()
+
+    # Override _sign_nav so it doesn't need the chain
+    k._sign_nav = lambda idx_bytes, nav: (9999, b"\x00" * 65)
+
+    k.process_deposit(1, store=store)
+
+    # pullForDeposit must have been called (normal path)
+    assert fake_vault.functions.pull_calls == [1]
+    # cancelDeposit must NOT have been called via cancel-before-pull
+    assert fake_vault.functions.cancel_calls == []
+
+
+def test_keeper_cancel_skips_when_already_pulled():
+    """When the deposit is already pulled, cancel-before-pull does not apply."""
+    store = InMemoryStore()
+    store.add_cancel_request(1)  # request exists but deposit was already pulled
+
+    k, fake_vault = _make_cancel_keeper(pulled=True)
+
+    calls = []
+    def fake_send(fn):
+        calls.append(fn)
+        return fn
+    k._send = fake_send
+    k.executor.execute_deposit_swap.return_value = 1_000_000
+    k.nav_engine.quote_deposit.return_value = (1_000_000, 0)
+    k.nav_engine.on_deposit_settled.return_value = None
+    k.vault.functions.vaults = lambda _: type("F", (), {"call": lambda self: [True, "0x" + "aa" * 20, 0, 0, 0, 0, 0]})()
+    k._sign_nav = lambda idx_bytes, nav: (9999, b"\x00" * 65)
+
+    k.process_deposit(1, store=store)
+
+    # cancel-before-pull should NOT have fired (already pulled)
+    # The normal settle path should proceed
+    assert fake_vault.functions.pull_calls == []  # pulled=True so no pull call
+    assert fake_vault.functions.cancel_calls == []  # no pre-pull cancel

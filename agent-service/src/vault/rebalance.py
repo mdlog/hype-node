@@ -85,6 +85,29 @@ def diff_basket(
     return sells + buys
 
 
+# ── Cancel-before-pull helper ─────────────────────────────────────────────────
+
+def should_cancel_before_pull(deposit_id: int, pending_cancel_ids: set) -> bool:
+    """Return True when this deposit has a pending cancel request.
+
+    Pure — no I/O, no side effects.  The keeper calls this before pullForDeposit
+    to decide whether to honor a subscriber's cancellation request instead.
+
+    Parameters
+    ----------
+    deposit_id
+        The on-chain deposit request id.
+    pending_cancel_ids
+        Set of deposit ids that have a pending cancel request (status='pending')
+        in pb_cancel_requests.  Supplied by the caller from the store.
+
+    Returns
+    -------
+    True when deposit_id is in pending_cancel_ids, False otherwise.
+    """
+    return deposit_id in pending_cancel_ids
+
+
 # ── Keeper rebalance orchestration ────────────────────────────────────────────
 
 def rebalance_once(

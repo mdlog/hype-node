@@ -24,6 +24,8 @@ class IndexerStore(Protocol):
     def published_indices(self) -> list[dict]: ...
     def get_checkpoint(self, key: str) -> Optional[int]: ...
     def set_checkpoint(self, key: str, block: int) -> None: ...
+    def pending_cancel_ids(self) -> set[int]: ...
+    def mark_cancel_honored(self, deposit_id: int) -> None: ...
 
 
 class InMemoryStore:
@@ -33,6 +35,8 @@ class InMemoryStore:
         self._earning_keys: set[tuple] = set()
         self.subscriptions: dict[tuple, dict] = {}
         self.checkpoints: dict[str, int] = {}
+        self._pending_cancels: set[int] = set()
+        self._honored_cancels: set[int] = set()
 
     def add_proposal(self, p: dict) -> None:
         self.proposals[p["on_chain_index_id"].lower()] = p
@@ -67,6 +71,17 @@ class InMemoryStore:
 
     def set_checkpoint(self, key: str, block: int) -> None:
         self.checkpoints[key] = block
+
+    def pending_cancel_ids(self) -> set[int]:
+        return set(self._pending_cancels)
+
+    def mark_cancel_honored(self, deposit_id: int) -> None:
+        self._pending_cancels.discard(deposit_id)
+        self._honored_cancels.add(deposit_id)
+
+    # Test-only helper: register a pending cancel request.
+    def add_cancel_request(self, deposit_id: int) -> None:
+        self._pending_cancels.add(deposit_id)
 
 
 class SupabaseRestStore:
@@ -128,3 +143,34 @@ class SupabaseRestStore:
             timeout=15,
         )
         r.raise_for_status()
+
+    def pending_cancel_ids(self) -> set[int]:
+        """Return the set of deposit_ids with status='pending' in pb_cancel_requests.
+
+        Returns an empty set (safe no-op) when Supabase is unavailable.
+        """
+        try:
+            r = httpx.get(
+                f"{self._base}/pb_cancel_requests",
+                params={"status": "eq.pending", "select": "deposit_id"},
+                headers=self._h,
+                timeout=10,
+            )
+            r.raise_for_status()
+            return {row["deposit_id"] for row in r.json()}
+        except Exception:
+            return set()
+
+    def mark_cancel_honored(self, deposit_id: int) -> None:
+        """Update the cancel request row to status='honored'. Best-effort — never raises."""
+        try:
+            r = httpx.patch(
+                f"{self._base}/pb_cancel_requests",
+                params={"deposit_id": f"eq.{deposit_id}"},
+                json={"status": "honored"},
+                headers={**self._h, "Prefer": "return=minimal"},
+                timeout=10,
+            )
+            r.raise_for_status()
+        except Exception:
+            pass
