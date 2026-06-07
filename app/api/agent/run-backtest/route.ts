@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runBacktest, type BacktestCostParams } from "@/lib/api/agent";
+import { requireUser } from "@/lib/supabase/auth";
+import { canSend } from "@/lib/billing";
+import { rateLimit } from "@/lib/rateLimit";
 
 // Forward the basket → POST /run-backtest on the FastAPI agent service.
 // The Python side replays SoSoValue klines for each constituent, computes
@@ -20,6 +23,20 @@ const COST_KEYS: Array<keyof BacktestCostParams> = [
 ];
 
 export async function POST(req: NextRequest) {
+  // Metered cost action (replays klines server-side). Require an authenticated
+  // wallet + pre-flight the billing quota so anonymous callers can't burn it.
+  const limited = rateLimit(req, "agent:run-backtest", 30, 60_000);
+  if (limited) return limited;
+  const auth = await requireUser(req);
+  if (!auth.user) return auth.res;
+  const gate = canSend(auth.user.address);
+  if (!gate.allowed) {
+    return NextResponse.json(
+      { ok: false, error: "limit_reached", reason: gate.reason },
+      { status: 402 },
+    );
+  }
+
   let payload: {
     constituents?: Array<{ currency_id: string; symbol?: string; weight: number }>;
     days?: number;
@@ -56,5 +73,7 @@ export async function POST(req: NextRequest) {
       { status: 502 },
     );
   }
-  return NextResponse.json(result);
+  const out = NextResponse.json(result);
+  for (const cookie of auth.res.cookies.getAll()) out.cookies.set(cookie);
+  return out;
 }

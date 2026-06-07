@@ -57,6 +57,28 @@ export async function getRequestUser(
 }
 
 /**
+ * Demo-write guard. Demo sessions are a read-only sandbox keyed to a shared
+ * sentinel address — they must never mutate real shared rows. Call right after
+ * requireUser on any state-changing route:
+ *
+ *   const auth = await requireUser(req);
+ *   if (!auth.user) return auth.res;
+ *   const demo = demoWriteBlocked(auth.user);
+ *   if (demo) return demo;
+ *
+ * Returns a 403 NextResponse when the session is demo, otherwise null.
+ */
+export function demoWriteBlocked(user: AuthedUser): NextResponse | null {
+  if (user.demo) {
+    return NextResponse.json(
+      { error: "Demo mode is read-only — connect a wallet to make changes." },
+      { status: 403 },
+    );
+  }
+  return null;
+}
+
+/**
  * Convenience wrapper: returns either { user, res } on success or just
  * { res } with a 401 on failure. Caller pattern:
  *

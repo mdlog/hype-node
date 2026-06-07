@@ -9,6 +9,37 @@ import Link from "next/link";
 import { Btn, Card, Label, Metric, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import type { PbProposalRow } from "@/lib/supabase/types";
+import type { IndexSpec } from "@/lib/api/ssi";
+import { PublishActions } from "./PublishActions";
+
+// Standard creator fee structure baked into the on-chain registration when a
+// proposal is published. Matches the vault constants (1%/yr mgmt, 10% perf).
+const DEFAULT_MGMT_FEE_BPS = 100;
+const DEFAULT_PERF_FEE_BPS = 1000;
+
+// Build the registerIndex spec from a proposal, or explain why it can't publish.
+function buildSpec(proposal: PbProposalRow): IndexSpec | { error: string } {
+  const rows = parseConstituents(proposal.constituents).filter(
+    (r) => r.weight !== null && r.weight > 0,
+  );
+  if (rows.length === 0) {
+    return { error: "Add weighted constituents before publishing on-chain." };
+  }
+  if (!proposal.ssi_ticker.trim()) {
+    return { error: "A ticker/symbol is required to publish on-chain." };
+  }
+  const weights: Record<string, number> = {};
+  for (const r of rows) weights[r.symbol] = r.weight as number;
+  return {
+    symbol: proposal.ssi_ticker.trim(),
+    name: proposal.title?.trim() || proposal.ssi_ticker.trim(),
+    base: "USDC",
+    weights,
+    managementFeeBps: DEFAULT_MGMT_FEE_BPS,
+    performanceFeeBps: DEFAULT_PERF_FEE_BPS,
+    rebalanceCron: "",
+  };
+}
 
 const STATUS_COLOR: Record<PbProposalRow["status"], string> = {
   draft: tokens.textDim,
@@ -136,6 +167,35 @@ export function ProposalDetailClient({ id }: { id: string }) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setWorking(null);
+    }
+  }
+
+  // On-chain publish: persist the tx + deterministic index id and flip the
+  // status to published in one PATCH. Called by PublishActions after the
+  // registerIndex tx confirms — this replaces the old status-only flip so a
+  // "published" proposal is always actually on-chain.
+  async function persistOnChainPublish(
+    txHash: `0x${string}`,
+    indexId: `0x${string}`,
+  ) {
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/proposals/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          status: "published",
+          on_chain_tx: txHash,
+          on_chain_index_id: indexId,
+        }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error ?? `publish persist failed (${res.status})`);
+      }
+      setProposal((await res.json()) as PbProposalRow);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -407,18 +467,34 @@ export function ProposalDetailClient({ id }: { id: string }) {
               </Mono>
             )}
             <div className="flex flex-col gap-1.5">
-              {transitions.map((t) => (
-                <Btn
-                  key={t.to}
-                  primary={t.to !== "rejected"}
-                  small
-                  disabled={working !== null}
-                  onClick={() => transition(t.to)}
-                  style={{ justifyContent: "center" }}
-                >
-                  {working === t.to ? "…" : t.label}
-                </Btn>
-              ))}
+              {/* signed → published goes ON-CHAIN (registerIndex) here, not a
+                  status-only flip. The other transitions stay plain PATCHes. */}
+              {proposal.status === "signed" && (
+                (() => {
+                  const spec = buildSpec(proposal);
+                  return "error" in spec ? (
+                    <Mono size={10} color={tokens.amber} className="block">
+                      {spec.error}
+                    </Mono>
+                  ) : (
+                    <PublishActions spec={spec} onPublished={persistOnChainPublish} />
+                  );
+                })()
+              )}
+              {transitions
+                .filter((t) => !(proposal.status === "signed" && t.to === "published"))
+                .map((t) => (
+                  <Btn
+                    key={t.to}
+                    primary={t.to !== "rejected"}
+                    small
+                    disabled={working !== null}
+                    onClick={() => transition(t.to)}
+                    style={{ justifyContent: "center" }}
+                  >
+                    {working === t.to ? "…" : t.label}
+                  </Btn>
+                ))}
               <Btn
                 small
                 disabled={working !== null}
