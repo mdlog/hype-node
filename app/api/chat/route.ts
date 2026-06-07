@@ -64,7 +64,10 @@ export async function POST(req: NextRequest) {
     if (reply.usage) {
       const u = reply.usage;
       const toolCalls = reply.tool_calls?.length ?? 0;
-      const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+      // Price by the model the agent actually ran (it reports it per-turn),
+      // so OpenAI usage is billed at OpenAI rates instead of a hardcoded
+      // Claude id. LLM config lives in agent-service/.env, not the web app.
+      const model = u.model ?? "claude-sonnet-4-5";
       const snapshot = recordUsage(
         address,
         model,

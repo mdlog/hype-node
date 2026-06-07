@@ -1466,6 +1466,15 @@ def _openai_base_url() -> str | None:
     return url or None
 
 
+def _chat_model_for(provider: str) -> str:
+    """Model id the chat loop runs for `provider`, read from env. Single source
+    of truth so the model reported in ChatUsage.model matches what's actually
+    sent to the API (and the /state badge). Mirrors main._active_model_label."""
+    if provider == "openai":
+        return os.getenv("OPENAI_MODEL", "gpt-4o")
+    return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+
+
 async def _run_anthropic_loop(
     turns: list[ChatTurn],
 ) -> tuple[str, list[ToolCallTrace], ChatUsage]:
@@ -1477,10 +1486,10 @@ async def _run_anthropic_loop(
         raise RuntimeError("ANTHROPIC_API_KEY not set")
 
     client = AsyncAnthropic(api_key=api_key)
-    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+    model = _chat_model_for("anthropic")
     messages = _to_anthropic_messages(turns)
     if not messages:
-        return "No usable user turn found in history.", [], ChatUsage()
+        return "No usable user turn found in history.", [], ChatUsage(model=model)
 
     # `cache_control` on the LAST system block caches everything from the
     # start of the rendered prompt through that block — i.e. tools + system
@@ -1495,7 +1504,7 @@ async def _run_anthropic_loop(
     ]
 
     traces: list[ToolCallTrace] = []
-    usage = ChatUsage()
+    usage = ChatUsage(model=model)
 
     for _ in range(MAX_TOOL_ITER):
         resp = await client.messages.create(
@@ -1597,12 +1606,12 @@ async def _run_openai_loop(
         raise RuntimeError("OPENAI_API_KEY not set")
 
     client = AsyncOpenAI(api_key=api_key, base_url=_openai_base_url())
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    model = _chat_model_for("openai")
     messages: list[dict[str, Any]] = _to_openai_messages(turns, SYSTEM_PROMPT)
     tools = _openai_tools()
 
     traces: list[ToolCallTrace] = []
-    usage = ChatUsage()
+    usage = ChatUsage(model=model)
 
     for _ in range(MAX_TOOL_ITER):
         resp = await client.chat.completions.create(
@@ -1721,7 +1730,7 @@ async def run_agentic_chat(req: ChatRequest) -> ChatTurn:
 
     started = time.monotonic()
     traces: list[ToolCallTrace] = []
-    usage = ChatUsage()
+    usage = ChatUsage(model=_chat_model_for(provider))
 
     try:
         if provider == "openai":
