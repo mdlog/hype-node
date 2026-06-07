@@ -300,6 +300,73 @@ def test_rebalance_once_missing_proposal_is_noop():
     assert not nav_called
 
 
+def test_rebalance_once_unknown_holdings_sentinel_no_trades():
+    """When current_basket is the {"_total": ...} sentinel (unknown per-symbol
+    holdings), rebalance_once must NOT emit any trades — only the NAV checkpoint
+    should run.  Fabricating trades from a total-only figure would be misleading.
+    """
+    proposal = _make_proposal({"BTC": 0.40, "ETH": 0.60})
+    store = _make_store(proposal, {})
+
+    keeper = FakeKeeper()
+    executor = FakeExecutor()
+
+    # Pass the sentinel — no live per-symbol data available.
+    sentinel_basket = {"_total": 10_000.0}
+
+    trades, nav_called = rebalance_once(
+        index_id=IDX,
+        store=store,
+        keeper=keeper,
+        executor=executor,
+        current_basket=sentinel_basket,
+        total_value_usdc=10_000.0,
+    )
+
+    # No trades must be emitted — holdings are unknown.
+    assert trades == [], f"expected no trades with unknown-holdings sentinel, got {trades}"
+    assert executor.deposit_calls == [], "executor.execute_deposit_swap must not be called"
+    assert executor.redeem_calls == [], "executor.execute_redeem_swap must not be called"
+
+    # NAV checkpoint must still have run.
+    assert nav_called, "updateNav (NAV checkpoint) must still be called even with unknown holdings"
+    assert len(keeper._sign_nav_calls) == 1, "_sign_nav must be called once for the checkpoint"
+
+
+def test_rebalance_once_real_basket_emits_trades():
+    """Counterpart: when a real per-symbol basket is provided (60/40 → 40/60),
+    trades are emitted and the executor is called, confirming the gate only
+    suppresses the sentinel path.
+    """
+    proposal = _make_proposal({"BTC": 0.40, "ETH": 0.60})
+    current_basket = {"BTC": 6_000.0, "ETH": 4_000.0}
+    store = _make_store(proposal, current_basket)
+
+    keeper = FakeKeeper()
+    executor = FakeExecutor()
+
+    trades, nav_called = rebalance_once(
+        index_id=IDX,
+        store=store,
+        keeper=keeper,
+        executor=executor,
+        current_basket=current_basket,
+        total_value_usdc=10_000.0,
+    )
+
+    # Trades must be generated (sell BTC, buy ETH).
+    assert len(trades) == 2
+    sides = {t["side"] for t in trades}
+    assert sides == {"sell", "buy"}
+
+    # Executor must have been called for both trades.
+    assert len(executor.redeem_calls) == 1, "sell should call execute_redeem_swap"
+    assert len(executor.deposit_calls) == 1, "buy should call execute_deposit_swap"
+
+    # NAV checkpoint must also run.
+    assert nav_called
+
+
 # ── VaultDaemon rebalance_due orchestration tests ─────────────────────────────
 # These tests inject fake executor + store and assert the trade list and that
 # updateNav is eventually invoked.  Uses monkeypatching of VAULT_REBALANCE_ENABLED

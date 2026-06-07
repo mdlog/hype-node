@@ -264,9 +264,12 @@ class Keeper:
             # Compute total portfolio value from nav_engine.
             total_value_usdc = float(self.nav_engine.basket_usd(index_id))
 
-            # When no explicit basket is provided, treat the entire basket as
-            # a single "portfolio" placeholder — rebalance_once will compute
-            # the real per-symbol diff from the proposal's constituents.
+            # When no explicit per-symbol basket is provided, pass the sentinel
+            # {"_total": ...}.  rebalance_once detects this and skips trade
+            # execution — fabricating trades from a total-only figure would be
+            # misleading.  Only the NAV checkpoint (sign + updateNav) will run.
+            # Full incremental rebalancing requires live per-symbol holdings
+            # from the SoDEX balance bridge (pending integration).
             basket = current_basket or {"_total": total_value_usdc}
 
             trades, nav_called = _rebalance_once(
@@ -286,7 +289,8 @@ class Keeper:
                 )
             else:
                 log.debug(
-                    "rebalance_once %s: no trades (within threshold), updateNav=%s",
+                    "rebalance_once %s: no trades (within threshold or holdings unknown),"
+                    " updateNav=%s",
                     index_id, nav_called,
                 )
 

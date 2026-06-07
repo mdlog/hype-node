@@ -13,6 +13,14 @@ rebalance_once
     diff_basket, executes trades via the executor (Simulated by default), then
     calls keeper._sign_nav + vault.updateNav as a NAV checkpoint.
 
+    IMPORTANT — trade-emission guard:
+    When the caller does not have live per-symbol holdings (e.g. the SoDEX
+    balance bridge is not yet wired), current_basket is passed as the sentinel
+    {"_total": <usdc>}.  In that case rebalance_once skips trade execution
+    entirely and only performs the NAV checkpoint (sign + updateNav).  Emitting
+    diff-basket trades from a "_total" sentinel would be fabricated and
+    misleading.  Full incremental rebalancing requires real per-symbol data.
+
 All autonomous paths are env-gated — this module never triggers live network
 calls unless VAULT_REBALANCE_ENABLED is truthy (enforced in daemon.tick).
 """
@@ -110,6 +118,17 @@ def should_cancel_before_pull(deposit_id: int, pending_cancel_ids: set) -> bool:
 
 # ── Keeper rebalance orchestration ────────────────────────────────────────────
 
+def _is_unknown_holdings(current_basket: dict[str, float]) -> bool:
+    """Return True when current_basket is the sentinel for unknown per-symbol holdings.
+
+    The sentinel {"_total": <usdc>} is injected by keeper.rebalance_once when
+    live per-symbol balance data is unavailable (SoDEX bridge not yet wired).
+    Emitting diff-basket trades from this sentinel would fabricate trade
+    activity — so the caller must skip trade execution in that case.
+    """
+    return set(current_basket.keys()) == {"_total"}
+
+
 def rebalance_once(
     index_id: str,
     store: Any,
@@ -124,10 +143,12 @@ def rebalance_once(
     Steps
     -----
     1. Read target weights from pb_proposals.constituents (via store).
-    2. Compute diff_basket(current_basket, target_weights, total_value_usdc).
-    3. Execute each sell via executor.execute_redeem_swap and each buy via
-       executor.execute_deposit_swap (amount in USDC integer micro-units).
-    4. Sign a new NAV attestation and call vault.functions.updateNav.
+    2. If live per-symbol holdings are available (current_basket is NOT the
+       {"_total": ...} sentinel), compute diff_basket and execute trades.
+       If holdings are UNKNOWN (sentinel), skip trade execution entirely —
+       fabricating trades from a total-only figure would be misleading.
+    3. Sign a new NAV attestation and call vault.functions.updateNav regardless
+       of whether trades were executed (NAV checkpoint always runs).
 
     Parameters
     ----------
@@ -140,7 +161,9 @@ def rebalance_once(
     executor
         SodexExecutor with .execute_deposit_swap / .execute_redeem_swap.
     current_basket
-        {symbol: usdc_value} — current simulated holdings.
+        {symbol: usdc_value} — current live holdings in USDC terms.
+        Pass {"_total": total} as a sentinel when per-symbol data is unknown;
+        in that case trade execution is skipped (NAV checkpoint still runs).
     total_value_usdc
         Total USDC value of the basket (sum of current_basket values).
     threshold_bps
@@ -149,6 +172,7 @@ def rebalance_once(
     Returns
     -------
     (trades, nav_called) — the trade list and whether updateNav was invoked.
+    trades is always [] when current_basket is the unknown-holdings sentinel.
     """
     # 1. Fetch target weights from the store.
     proposal = store.proposal_for_index(index_id)
@@ -167,22 +191,33 @@ def rebalance_once(
         if c.get("symbol") and c.get("weight") is not None
     }
 
-    # 2. Compute trade list.
-    trades = diff_basket(current_basket, target_weights, total_value_usdc, threshold_bps)
+    # 2. Compute and execute trades — only when real per-symbol holdings are known.
+    #    When current_basket is the {"_total": ...} sentinel (no live balance data
+    #    from SoDEX), skip trade emission entirely.  Generating diff-basket trades
+    #    from a total-only figure would fabricate buys/sells that don't correspond
+    #    to real holdings and must not be submitted.
+    trades: list[dict] = []
+    if _is_unknown_holdings(current_basket):
+        log.info(
+            "rebalance_once %s: live per-symbol holdings unavailable (pending SoDEX bridge)"
+            " — skipping trade execution, performing NAV checkpoint only",
+            index_id,
+        )
+    else:
+        trades = diff_basket(current_basket, target_weights, total_value_usdc, threshold_bps)
+        for trade in trades:
+            amount_int = max(1, int(trade["usdc_amount"]))
+            try:
+                if trade["side"] == "sell":
+                    executor.execute_redeem_swap(index_id, amount_int)
+                else:
+                    executor.execute_deposit_swap(index_id, amount_int)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("rebalance_once: trade %s failed: %s", trade, exc)
 
-    # 3. Execute trades via the executor.
-    usdc_int = int(total_value_usdc)  # convert to micro-USDC integer for executor API
-    for trade in trades:
-        amount_int = max(1, int(trade["usdc_amount"]))
-        try:
-            if trade["side"] == "sell":
-                executor.execute_redeem_swap(index_id, amount_int)
-            else:
-                executor.execute_deposit_swap(index_id, amount_int)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("rebalance_once: trade %s failed: %s", trade, exc)
-
-    # 4. NAV checkpoint — sign and update on-chain regardless of trade count.
+    # 3. NAV checkpoint — sign and update on-chain regardless of trade count.
+    #    This runs even when holdings are unknown so the vault's recorded NAV
+    #    stays fresh from the engine's computation.
     try:
         from web3 import Web3  # local import to avoid hard dep in pure tests
         idx_bytes = Web3.to_bytes(hexstr=index_id)
