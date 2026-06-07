@@ -279,26 +279,28 @@ const AUTH_BACKOFF_MS = Number(process.env.SOSOVALUE_AUTH_BACKOFF_MS ?? 6 * 3600
 // per-path. A missing ticker doesn't mean other endpoints are broken.
 const NOT_FOUND_TTL_MS = Number(process.env.SOSOVALUE_NOT_FOUND_TTL_MS ?? 60 * 60_000);
 
-// Per-path TTL overrides matching the upstream refresh frequency documented
-// at https://sosovalue-1.gitbook.io/sosovalue-api-doc/endpoint-overview.
-// Caching longer than the source refresh is wasteful; caching shorter wastes
-// quota. Patterns are checked against the path prefix (case-insensitive).
+// Per-path TTL overrides. These are aligned to OUR page render cadence, not to
+// the upstream tick: every consumer of these high-fan-out paths is an ISR page
+// (`revalidate=60`) or a ~60 s client poll feeding browse / benchmark / sparkline
+// views — none of which need sub-minute freshness. A TTL shorter than that
+// cadence means the cache never hits and every cycle is a cold refetch that
+// burns SoSoValue quota for no UX benefit, so we cache at least one render
+// window (5 min) with headroom. Patterns match the path prefix (case-insensitive).
 const PATH_TTL_RULES: Array<[RegExp, number]> = [
-  // Real-time refresh upstream → keep cache short (30 s).
-  [/\/currencies\/[^/]+\/klines/i, 30_000],
-  [/\/crypto-stocks\/[^/]+\/klines/i, 30_000],
-  [/\/news(\/(hot|featured|search))?(\?|$)/i, 30_000],
-  // 30 s upstream → 60 s client cache (one-tick safety).
-  [/\/market-snapshot(\?|$)/i, 60_000],
-  [/\/currencies\/[^/]+\/pairs/i, 60_000],
-  // 5 min upstream → 5 min client cache.
+  // Charts: 90-day daily klines for benchmark / NAV sparklines — 5 min is plenty.
+  [/\/currencies\/[^/]+\/klines/i, 300_000],
+  [/\/crypto-stocks\/[^/]+\/klines/i, 300_000],
+  // News feed panels poll every ~60 s; 2 min keeps it fresh with cache headroom.
+  [/\/news(\/(hot|featured|search))?(\?|$)/i, 120_000],
+  // Price / mcap / volume snapshots move <2% intraday — 5 min for browse/dashboard.
+  [/\/market-snapshot(\?|$)/i, 300_000],
+  [/\/currencies\/[^/]+\/pairs/i, 300_000],
+  // 5 min for token-economics and currency details (rarely change).
   [/\/currencies\/[^/]+\/token-economics/i, 300_000],
-  // 5 min upstream for currency details (path is /currencies/{id} with no
-  // suffix). Keep a generous TTL since these rarely change.
   [/\/currencies\/[^/]+(\?|$)(?!\/)/i, 300_000],
 ];
 
-function ttlFor(path: string): number {
+export function ttlFor(path: string): number {
   for (const [re, ttl] of PATH_TTL_RULES) {
     if (re.test(path)) return ttl;
   }

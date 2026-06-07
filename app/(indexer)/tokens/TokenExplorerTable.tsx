@@ -96,11 +96,22 @@ function fmtPct(n: number | undefined): string {
   return `${sign}${(n * 100).toFixed(2)}%`;
 }
 
-export function TokenExplorerTable({ rows }: { rows: CurrencyListItem[] }) {
+export function TokenExplorerTable({
+  rows,
+  initialSnapshots = {},
+}: {
+  rows: CurrencyListItem[];
+  // Server-rendered snapshots for the default first page (see tokens/page.tsx).
+  // Seeding these means the default view fetches nothing client-side — the
+  // snapshot fan-out below only runs for ids still `undefined` (pages 2+ / sorts).
+  initialSnapshots?: Record<string, CurrencySnapshot>;
+}) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortKey>("default");
-  const [snapshots, setSnapshots] = useState<Record<string, Snap>>({});
+  const [snapshots, setSnapshots] = useState<Record<string, Snap>>(
+    () => ({ ...initialSnapshots }),
+  );
 
   // Search filter first — same behavior as before.
   const filtered = useMemo(() => {
