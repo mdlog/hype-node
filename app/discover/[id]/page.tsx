@@ -24,6 +24,8 @@ import type { PbEarningRow, PbProposalRow, PtRebalanceRow } from "@/lib/supabase
 import { getDemoProposalById, getDemoRebalancesByTicker } from "@/lib/demo/seed";
 import { getOptionalUser } from "@/lib/supabase/auth";
 import { SubscribePanel } from "./SubscribePanel";
+import { RedeemPanel } from "@/components/vault/RedeemPanel";
+import { ClaimFeesPanel } from "@/components/vault/ClaimFeesPanel";
 import { BacktestVsRealized } from "./BacktestVsRealized";
 
 export const dynamic = "force-dynamic";
@@ -450,6 +452,17 @@ function renderDetailJsx(
             indexId={proposal.on_chain_index_id}
             ticker={proposal.ssi_ticker}
             isDemo={isDemo}
+          />
+
+          <RedeemPanel
+            indexId={proposal.on_chain_index_id}
+            ticker={proposal.ssi_ticker}
+            isDemo={isDemo}
+          />
+
+          <ClaimFeesPanel
+            indexId={proposal.on_chain_index_id}
+            ticker={proposal.ssi_ticker}
           />
 
           <Card pad={14}>
