@@ -63,7 +63,7 @@ A personal trader or quant can **research → execute → monitor** a strategy w
 | **Risk page real wiring** | ✅ Done | Risk-gate config persistent + per-rule toggles + manual override. |
 | **Backtest page (standalone)** | ✅ Done | Page exists (~358 lines). |
 | **Settings page** | ✅ Done | Page exists (~457 lines). |
-| **Chat page wiring** | ✅ Done (far exceeds scope) | **22 tools** registered — see "Beyond original scope" for detail. |
+| **Chat page wiring** | ✅ Done (far exceeds scope) | **24 tools** registered — see "Beyond original scope" for detail. |
 | **Per-asset USD price aggregation in Portfolio** | ✅ Done at snapshot level | `buildPriceLookup` + price-aware `buildSnapshotPositions` in `lib/api/portfolio-snapshot.ts`. Cron route batches one price lookup across all wallets (union of symbols → single `/currencies` walk + per-symbol snapshot fetch). Manual snapshot endpoint prices the user's own balances. Indices still `usd_value: null` pending the Wave 2 vault NAV. Live `BalanceTable` USD column is a small follow-up. |
 | **Logos + sponsor on token detail** | ✅ Done | — |
 | **Empty state per tab on token detail** | ✅ Done | — |
@@ -518,7 +518,7 @@ Today: 5 May (Wave 1 day 5/12)                                                �
 - ⬅️ Wave 1 builder + portfolio must be stable.
 - ⬅️ SSI Registry contract ABI must not change.
 - ⬅️ SoDEX integration already verified working — ✅ done in Wave 1 (browser-sign EIP-712 + signed-envelope relay).
-- ⬅️ Chat-agent tool surface already comprehensive (22 tools incl. SoDEX trading) — ✅ done in Wave 1.
+- ⬅️ Chat-agent tool surface already comprehensive (24 tools incl. SoDEX trading) — ✅ done in Wave 1.
 
 **Wave 3 dependencies:**
 - ⬅️ Wave 2 vault contract finalized + audited.

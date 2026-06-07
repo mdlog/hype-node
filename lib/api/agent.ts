@@ -58,6 +58,9 @@ export type ToolCallTrace = {
 };
 
 export type ChatUsage = {
+  // Model the agent actually ran this turn (provider-aware). Drives billing
+  // pricing on the Next.js side. Optional for older transcripts / error turns.
+  model?: string | null;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;

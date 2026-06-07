@@ -63,6 +63,10 @@ class ToolCallTrace(BaseModel):
 class ChatUsage(BaseModel):
     """Per-turn cost & latency surfaced back to the UI for the model badge."""
 
+    # Model id the agent actually ran this turn (provider-aware). The Next.js
+    # billing meter prices the turn by this so GPT-4o usage isn't billed at
+    # Claude rates. None on error turns where no model was reached.
+    model: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
