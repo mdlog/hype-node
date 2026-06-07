@@ -30,6 +30,7 @@ from .state import AgentNode, AgentState, ChatRequest, ChatTurn, ReasoningEntry 
 from . import store  # noqa: E402
 from . import strategy_agent  # noqa: E402
 from . import pt_store  # noqa: E402
+from . import draft as draft_module  # noqa: E402
 from .tools import basket as basket_tool  # noqa: E402
 from .tools import real_backtest  # noqa: E402
 from .tools import terminal  # noqa: E402
@@ -97,6 +98,20 @@ if not AGENT_API_KEY:
         "the proxy can forward it. Run: "
         "python -c 'import secrets; print(secrets.token_hex(48))'"
     )
+
+# --- Hype-Radar auto-draft config -------------------------------------------
+#
+# When AGENT_AUTODRAFT_ENABLED=true AND the sentiment score is >= DRAFT_THRESHOLD
+# the runner writes a "hype_radar" draft to pb_proposals via PostgREST.
+# Disabled by default so nothing fires without explicit opt-in.
+#
+# Dedup: _DRAFTED_TODAY is an in-memory set of (sector, utc_date) pairs that
+# received a draft this process run.  Cleared only on process restart (fine:
+# one draft per sector/day is the goal; no persistence needed).
+_AUTODRAFT_ENABLED: bool = os.environ.get("AGENT_AUTODRAFT_ENABLED", "").lower() in {"1", "true", "yes"}
+_DRAFT_THRESHOLD: float = float(os.environ.get("DRAFT_THRESHOLD", "60"))
+_AGENT_CREATOR_ADDRESS: str = os.environ.get("AGENT_CREATOR_ADDRESS", "").strip()
+_DRAFTED_TODAY: set[tuple[str, str]] = set()
 
 # Paths that should be reachable without the API key. Keep this list short —
 # anything here is publicly callable, so don't leak business state.
@@ -434,6 +449,71 @@ async def _runner() -> None:
                         ts=datetime.now(timezone.utc),
                         kind="WAIT",
                         text=f"track-record · persist failed: {exc}",
+                    )
+                )
+            # Hype-Radar auto-draft: env-gated (AGENT_AUTODRAFT_ENABLED), deduped
+            # per (sector, utc_date). No-op when disabled or Supabase/creator unset.
+            # Never crashes the loop.
+            try:
+                if _AUTODRAFT_ENABLED:
+                    utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    draft_key = (sector, utc_date)
+                    sentiment_data = state.get("sentiment") or {}
+                    sentiment_score = float(sentiment_data.get("score") or 0.0)
+                    already = draft_key in _DRAFTED_TODAY
+                    if draft_module.should_draft(sentiment_score, _DRAFT_THRESHOLD, already):
+                        # Build basket_result from state. The LangGraph runner stores
+                        # the strategy weights dict in state["basket"]
+                        # (e.g. {"RNDR": 0.35, "FIL": 0.25, ...}).
+                        # propose_basket() output is richer; adapt from weights dict
+                        # so build_proposal_row receives the expected shape.
+                        raw_basket = state.get("basket") or {}
+                        ssi_ticker = state.get("ssi_ticker") or f"ssi{sector}"
+                        # Construct a basket_result-shaped dict from available state.
+                        basket_result: dict[str, Any] = {
+                            "ok": bool(raw_basket),
+                            "ticker": ssi_ticker,
+                            "weighting": state.get("strategy_source", "score"),
+                            "n_pool": len(raw_basket),
+                            "n_picked": len(raw_basket),
+                            "constituents": [
+                                {"symbol": sym, "weight": round(float(w), 4)}
+                                for sym, w in raw_basket.items()
+                            ],
+                            "skipped": [],
+                            "summary": {
+                                "symbols": list(raw_basket.keys()),
+                                "weights_pct": [
+                                    round(float(w) * 100, 1) for w in raw_basket.values()
+                                ],
+                            },
+                        }
+                        if basket_result["ok"]:
+                            row = draft_module.build_proposal_row(
+                                sector=sector,
+                                basket_result=basket_result,
+                                sentiment=sentiment_data,
+                                creator_address=_AGENT_CREATOR_ADDRESS,
+                                source="hype_radar",
+                            )
+                            await draft_module.insert_pb_proposal(row)
+                            _DRAFTED_TODAY.add(draft_key)
+                            LATEST_LOG.append(
+                                ReasoningEntry(
+                                    ts=datetime.now(timezone.utc),
+                                    kind="ACT",
+                                    text=(
+                                        f"auto-draft · hype_radar proposal queued for "
+                                        f"{sector} (score={sentiment_score:.1f})"
+                                    ),
+                                )
+                            )
+            except Exception as exc:  # noqa: BLE001 — never crash the loop
+                LATEST_LOG.append(
+                    ReasoningEntry(
+                        ts=datetime.now(timezone.utc),
+                        kind="WAIT",
+                        text=f"auto-draft · error (non-fatal): {exc}",
                     )
                 )
         except Exception as exc:  # noqa: BLE001
