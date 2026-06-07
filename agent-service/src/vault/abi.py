@@ -336,6 +336,59 @@ VAULT_ABI = [
     },
     {
         "type": "function",
+        "name": "updateNav",
+        "inputs": [
+            {
+                "name": "indexId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+            },
+            {
+                "name": "navPerShare",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "signedAt",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "sig",
+                "type": "bytes",
+                "internalType": "bytes"
+            }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+    },
+    {
+        "type": "event",
+        "name": "NavUpdated",
+        "inputs": [
+            {
+                "name": "indexId",
+                "type": "bytes32",
+                "indexed": True,
+                "internalType": "bytes32"
+            },
+            {
+                "name": "navPerShare",
+                "type": "uint256",
+                "indexed": False,
+                "internalType": "uint256"
+            },
+            {
+                "name": "signedAt",
+                "type": "uint256",
+                "indexed": False,
+                "internalType": "uint256"
+            }
+        ],
+        "anonymous": False
+    },
+    {
+        "type": "function",
         "name": "verifyNavExposed",
         "inputs": [
             {

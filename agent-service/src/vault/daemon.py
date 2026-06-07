@@ -5,10 +5,13 @@ Each tick:
                          vault isn't active yet (openVault is keeper-only).
   2. settle            — keeper.poll_once(): pull+settle pending deposits and
                          settle pending redeems.
-  3. accrue_due        — accrue the 1%/yr mgmt fee for each active vault
+  3. rebalance_due     — [GATED] when VAULT_REBALANCE_ENABLED=true and the
+                         per-index daily cadence allows, call keeper.rebalance_once
+                         to diff target(pb_proposals) → trades → updateNav.
+  4. accrue_due        — accrue the 1%/yr mgmt fee for each active vault
                          (contract is idempotent per UTC day; reverts are
                          swallowed).
-  4. index_new_blocks  — read vault events from the persisted block checkpoint
+  5. index_new_blocks  — read vault events from the persisted block checkpoint
                          to the confirmed head and write pb_earnings /
                          pb_subscriptions (idempotent), then advance the
                          checkpoint.
@@ -20,11 +23,17 @@ Run it as a long-lived process (see scripts/run_keeper.py).
 from __future__ import annotations
 
 import logging
+import os
 import time
+from datetime import datetime, timezone
 
 from web3 import Web3
 
 log = logging.getLogger(__name__)
+
+# Rebalance env gate — also checked inside keeper.rebalance_once, but we read
+# it here to guard the per-index daily cadence tracking in daemon.
+_REBALANCE_ENABLED = os.getenv("VAULT_REBALANCE_ENABLED", "false").lower() in {"true", "1", "yes"}
 
 CHECKPOINT_KEY = "vault_earnings_indexer"
 ZERO = "0x0000000000000000000000000000000000000000"
@@ -49,6 +58,9 @@ class VaultDaemon:
         self.confirmations = max(0, confirmations)
         self.poll_interval = poll_interval
         self.max_block_span = max_block_span
+        # Per-index daily rebalance cadence: {index_id: utc_date_str}
+        # Prevents churning multiple times in the same UTC day.
+        self._last_rebalance_day: dict[str, str] = {}
 
     # -- helpers --------------------------------------------------------
     @property
@@ -118,9 +130,45 @@ class VaultDaemon:
         log.info("indexed blocks %d..%d → %s", from_block, to_block, counts)
         return counts
 
+    def rebalance_due(self) -> int:
+        """Rebalance each active vault at most once per UTC day.
+
+        Env-gated: no-ops when VAULT_REBALANCE_ENABLED is not truthy.
+        Exceptions per-index are swallowed so one bad index can't block others.
+        """
+        if not _REBALANCE_ENABLED:
+            return 0
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        rebalanced = 0
+
+        for p in self.store.published_indices():
+            idx_hex = p.get("on_chain_index_id")
+            if not idx_hex:
+                continue
+
+            # Daily cadence guard — skip if already rebalanced today.
+            if self._last_rebalance_day.get(idx_hex) == today:
+                log.debug("rebalance_due: %s already rebalanced today (%s)", idx_hex, today)
+                continue
+
+            try:
+                trades = self.keeper.rebalance_once(idx_hex, self.store)
+                self._last_rebalance_day[idx_hex] = today
+                rebalanced += 1
+                log.info(
+                    "rebalance_due: %s rebalanced on %s (%d trades)",
+                    idx_hex, today, len(trades),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("rebalance_due: %s failed: %s", idx_hex, exc)
+
+        return rebalanced
+
     def tick(self) -> dict:
         self.reconcile_vaults()
         self.keeper.poll_once()
+        self.rebalance_due()   # after settlement, before accrue — gated by VAULT_REBALANCE_ENABLED
         self.accrue_due()
         return self.index_new_blocks()
 

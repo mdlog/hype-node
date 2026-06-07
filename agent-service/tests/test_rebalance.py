@@ -277,3 +277,163 @@ def test_rebalance_once_missing_proposal_is_noop():
 
     assert trades == []
     assert not nav_called
+
+
+# ── VaultDaemon rebalance_due orchestration tests ─────────────────────────────
+# These tests inject fake executor + store and assert the trade list and that
+# updateNav is eventually invoked.  Uses monkeypatching of VAULT_REBALANCE_ENABLED
+# so the gate is bypassed in tests without changing real env.
+
+from unittest.mock import patch
+from src.vault.daemon import VaultDaemon
+
+
+PROP_LIVE = {
+    "id": "p1",
+    "creator_address": "0x" + "aa" * 20,
+    "on_chain_index_id": IDX,
+    "status": "live",
+    "constituents": [
+        {"symbol": "BTC", "weight": 0.40},
+        {"symbol": "ETH", "weight": 0.60},
+    ],
+}
+
+
+class _DaemonFakeW3:
+    class eth:
+        block_number = 1000
+
+        @staticmethod
+        def get_block(_):
+            return {"timestamp": 9999}
+
+
+class _DaemonFakeVaultFns:
+    def __init__(self):
+        self.update_nav_calls: list = []
+
+    def vaults(self, idx_bytes):
+        class _F:
+            def call(self_):
+                return [True, "0x" + "aa" * 20, 0, 0, 0, 0, 0]
+        return _F()
+
+    def updateNav(self, idx_bytes, nav, signed_at, sig):
+        self.update_nav_calls.append((idx_bytes, nav, signed_at, sig))
+        return self
+
+
+class _DaemonFakeVaultContract:
+    def __init__(self):
+        self.functions = _DaemonFakeVaultFns()
+
+
+class _DaemonFakeNavEngine:
+    def basket_usd(self, index_id: str) -> int:
+        return 10_000  # simulated total basket value
+
+
+class _DaemonFakeKeeper:
+    """Keeper-like object for daemon tests — records rebalance_once calls."""
+    def __init__(self):
+        self.w3 = _DaemonFakeW3()
+        self.vault = _DaemonFakeVaultContract()
+        self.nav_engine = _DaemonFakeNavEngine()
+        self.executor = FakeExecutor()
+        self.rebalance_calls: list[str] = []
+        self._sign_nav_calls: list = []
+
+    def poll_once(self):
+        pass
+
+    def open_vault(self, idx_bytes, creator):
+        pass
+
+    def accrue(self, idx_bytes):
+        pass
+
+    def _sign_nav(self, idx_bytes: bytes, nav: int) -> tuple[int, bytes]:
+        self._sign_nav_calls.append((idx_bytes, nav))
+        return 9999, b"\x00" * 65
+
+    def _send(self, fn):
+        if hasattr(fn, "_called"):
+            fn._called = True
+        return fn
+
+    def rebalance_once(self, index_id: str, store) -> list[dict]:
+        self.rebalance_calls.append(index_id)
+        return [{"symbol": "BTC", "side": "sell", "usdc_amount": 2000.0}]
+
+
+class _DaemonFakeStore:
+    def published_indices(self):
+        return [PROP_LIVE]
+
+    def proposal_for_index(self, index_id: str):
+        return PROP_LIVE
+
+    def get_checkpoint(self, key: str):
+        return 999
+
+    def set_checkpoint(self, key: str, block: int):
+        pass
+
+
+class _DaemonFakeIndexer:
+    def index_range(self, a, b):
+        return {}
+
+
+def test_daemon_rebalance_due_calls_keeper_when_enabled():
+    """When VAULT_REBALANCE_ENABLED=true, daemon.rebalance_due calls keeper.rebalance_once."""
+    keeper = _DaemonFakeKeeper()
+    store = _DaemonFakeStore()
+    d = VaultDaemon(keeper, _DaemonFakeIndexer(), store)
+
+    with patch("src.vault.daemon._REBALANCE_ENABLED", True):
+        count = d.rebalance_due()
+
+    assert count == 1
+    assert IDX in keeper.rebalance_calls
+
+
+def test_daemon_rebalance_due_skips_when_disabled():
+    """When VAULT_REBALANCE_ENABLED is off (default), rebalance_due is a no-op."""
+    keeper = _DaemonFakeKeeper()
+    store = _DaemonFakeStore()
+    d = VaultDaemon(keeper, _DaemonFakeIndexer(), store)
+
+    with patch("src.vault.daemon._REBALANCE_ENABLED", False):
+        count = d.rebalance_due()
+
+    assert count == 0
+    assert keeper.rebalance_calls == []
+
+
+def test_daemon_rebalance_due_daily_cadence():
+    """rebalance_due does not re-run the same index on the same UTC day."""
+    keeper = _DaemonFakeKeeper()
+    store = _DaemonFakeStore()
+    d = VaultDaemon(keeper, _DaemonFakeIndexer(), store)
+
+    with patch("src.vault.daemon._REBALANCE_ENABLED", True):
+        first = d.rebalance_due()
+        second = d.rebalance_due()  # same day → should skip
+
+    assert first == 1
+    assert second == 0   # already rebalanced today
+    assert len(keeper.rebalance_calls) == 1  # only called once
+
+
+def test_daemon_tick_includes_rebalance_step():
+    """daemon.tick with rebalance enabled → rebalance_once is invoked mid-tick."""
+    keeper = _DaemonFakeKeeper()
+    store = _DaemonFakeStore()
+    d = VaultDaemon(keeper, _DaemonFakeIndexer(), store, confirmations=0)
+
+    with patch("src.vault.daemon._REBALANCE_ENABLED", True):
+        d.tick()
+
+    assert IDX in keeper.rebalance_calls
