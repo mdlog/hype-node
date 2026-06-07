@@ -6,11 +6,12 @@
 // flow audit table. One card per ticker, each pulled independently from
 // `GET /etfs/{ticker}/market-snapshot` via `getEtfSnapshot`.
 //
-// Polls every 60s — matches the 60s minimum gap enforced by the canonical
-// `request<T>` helper, so each tick either hits the per-path cache or the
-// upstream once per minute. When SOSOVALUE_API_KEY is unset (or any backoff
-// window is active) the underlying lib serves a deterministic IBIT-shaped
-// synthetic — the per-card "live / synthetic" pill makes that obvious.
+// Polls every 60s WHILE THE TAB IS VISIBLE (paused on document.hidden — see the
+// effect below). Each tick mostly hits the per-path cache (market-snapshot TTL
+// is 5 min), so a visible tab costs roughly one upstream refresh per ticker per
+// 5 min, and a backgrounded tab costs nothing. When SOSOVALUE_API_KEY is unset
+// (or any backoff window is active) the underlying lib serves a deterministic
+// IBIT-shaped synthetic — the per-card "live / synthetic" pill makes that obvious.
 //
 // Visual contract:
 //   - Ticker (large mono, top-left).
@@ -29,6 +30,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Card, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
+import { useTabActivity } from "@/lib/hooks/useTabActivity";
 import {
   getEtfSnapshot,
   type EtfSnapshot,
@@ -100,6 +102,7 @@ function looksLive(snap: EtfSnapshot): boolean {
 // -- component ---------------------------------------------------------------
 
 export function EtfSnapshotPanel({ tickers }: { tickers: string[] }) {
+  const { hidden } = useTabActivity();
   const [states, setStates] = useState<Record<string, CardState>>(() => {
     const init: Record<string, CardState> = {};
     for (const t of tickers) init[t] = { kind: "loading" };
@@ -128,7 +131,15 @@ export function EtfSnapshotPanel({ tickers }: { tickers: string[] }) {
     }
   }, []);
 
+  // Pause polling while the tab is hidden so a backgrounded /history tab does
+  // not burn SoSoValue quota 24/7. On returning to visible we fire one
+  // immediate refresh and resume the interval — mirrors useAutoRefetch's
+  // visibility behaviour (the agent-decision poll on this page already paused
+  // on hidden; this ETF panel previously did not, and was the worst offender:
+  // 5 tickers × every 60s with no pause could approach the monthly cap from a
+  // single forgotten tab).
   useEffect(() => {
+    if (hidden) return;
     let cancelled = false;
     const tick = () => {
       for (const t of tickers) {
@@ -142,7 +153,7 @@ export function EtfSnapshotPanel({ tickers }: { tickers: string[] }) {
       cancelled = true;
       clearInterval(iv);
     };
-  }, [tickers, loadOne]);
+  }, [tickers, loadOne, hidden]);
 
   return (
     <div
