@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   useAccount,
   useChainId,
@@ -8,6 +8,7 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { parseEventLogs } from "viem";
 import { Card, Label, Mono, Btn } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import { HYPE_INDEX_VAULT_ABI } from "@/lib/contracts/hypeIndexVaultAbi";
@@ -183,11 +184,54 @@ function SubscribePanelLive({
 
   const [amount, setAmount] = useState("100");
   const [localError, setLocalError] = useState<string | null>(null);
+  // Deposit ID parsed from the DepositRequested event after the tx confirms.
+  const [depositId, setDepositId] = useState<bigint | null>(null);
+  // Cancel request state
+  const [cancelState, setCancelState] = useState<"idle" | "loading" | "done" | "error">("idle");
 
   const wrongChain = isConnected && chainId !== VAULT_CHAIN_ID;
   const pending = approving || signing || switching || confirming;
   const succeeded = receipt?.status === "success";
   const failed = receipt?.status === "reverted" || !!writeError || !!approveError || !!receiptError;
+
+  // Parse the deposit ID from the DepositRequested event once we have a receipt.
+  // Use an effect so state is updated after render, not during.
+  useEffect(() => {
+    if (!succeeded || !receipt?.logs || depositId !== null) return;
+    try {
+      const events = parseEventLogs({
+        abi: HYPE_INDEX_VAULT_ABI,
+        logs: receipt.logs,
+        eventName: "DepositRequested",
+      });
+      const id = events[0]?.args?.id ?? null;
+      if (id !== null) setDepositId(id);
+    } catch {
+      // Logs may not match ABI (e.g. vault not yet deployed) — safe to ignore.
+    }
+  }, [succeeded, receipt, depositId]);
+
+  const handleRequestCancel = useCallback(async () => {
+    if (depositId === null) return;
+    setCancelState("loading");
+    try {
+      const res = await fetch("/api/vault/cancel-deposit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ depositId: Number(depositId), indexId }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({})) as { error?: string };
+        setCancelState("error");
+        setLocalError(j.error ?? "Cancellation request failed.");
+      } else {
+        setCancelState("done");
+      }
+    } catch (err) {
+      setCancelState("error");
+      setLocalError(String(err));
+    }
+  }, [depositId, indexId]);
 
   const errorMsg =
     localError ??
@@ -259,19 +303,64 @@ function SubscribePanelLive({
       </Mono>
 
       {succeeded ? (
-        <div
-          style={{
-            marginTop: 10,
-            padding: "10px 14px",
-            background: tokens.bgElev2,
-            border: `1px solid ${tokens.emerald}`,
-            borderRadius: 6,
-          }}
-        >
-          <Mono size={11} color={tokens.emerald}>
-            Deposit requested — shares mint after keeper settlement.
-          </Mono>
-        </div>
+        <>
+          <div
+            style={{
+              marginTop: 10,
+              padding: "10px 14px",
+              background: tokens.bgElev2,
+              border: `1px solid ${tokens.emerald}`,
+              borderRadius: 6,
+            }}
+          >
+            <Mono size={11} color={tokens.emerald}>
+              {depositId !== null
+                ? `Deposit #${depositId} requested — shares mint after keeper settlement.`
+                : "Deposit requested — shares mint after keeper settlement."}
+            </Mono>
+          </div>
+
+          {/* Cancel request section — pre-settlement only */}
+          {cancelState === "done" ? (
+            <div
+              style={{
+                marginTop: 8,
+                padding: "8px 10px",
+                background: `${tokens.amber}10`,
+                border: `1px solid ${tokens.amber}60`,
+                borderRadius: 6,
+              }}
+            >
+              <Mono size={10} color={tokens.amber}>
+                Cancellation requested. The keeper will honor it if settlement has not yet occurred.
+              </Mono>
+            </div>
+          ) : (
+            <>
+              <Btn
+                small
+                onClick={handleRequestCancel}
+                disabled={cancelState === "loading" || depositId === null}
+                style={{
+                  marginTop: 8,
+                  width: "100%",
+                  justifyContent: "center",
+                  opacity: depositId === null ? 0.45 : 1,
+                }}
+              >
+                {cancelState === "loading" ? "Requesting…" : "Request cancellation"}
+              </Btn>
+              <Mono size={10} color={tokens.textFaint} className="block mt-1">
+                Cancellation is keeper-mediated and only possible before settlement (~seconds).
+              </Mono>
+              {cancelState === "error" && localError && (
+                <Mono size={10} color={tokens.red} className="block mt-1" style={{ wordBreak: "break-word" }}>
+                  {localError}
+                </Mono>
+              )}
+            </>
+          )}
+        </>
       ) : (
         <>
           <div style={{ marginTop: 10 }}>
