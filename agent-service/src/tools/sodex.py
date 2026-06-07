@@ -621,6 +621,176 @@ async def execute_trade(
     }
 
 
+async def execute_sell_trade(
+    symbol_in: str,
+    amount_in: float,
+    slippage_bps: int = 25,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Server-signed asset→USDC sell on SoDEX spot.
+
+    Mirror of execute_trade (USDC→asset buy) but inverts the direction:
+    `symbol_in` is the asset being sold; the quote currency is always USDC.
+
+    Env-guarded by SODEX_PRIVATE_KEY + SODEX_AUTONOMOUS_TRADE — when either
+    is absent the function returns a structured skip so the keeper never
+    crashes a tick due to missing credentials.
+
+    Pricing modes:
+      - "market"    — limit price = last × (1 − slippage_bps/10000). Crosses bids.
+      - "defensive" — limit price = last × 2.0. Order rests, won't fill.
+      - None        — follow SODEX_AUTONOMOUS_TRADE env (true=market, else=defensive).
+    """
+    started = time.time()
+    skip_base = {
+        "ok": False,
+        "skipped": True,
+        "symbol_in": symbol_in,
+        "symbol_out": "USDC",
+        "amount_in": amount_in,
+        "slippage_bps": slippage_bps,
+        "gas_val": 0.0,
+        "latency_ms": int((time.time() - started) * 1000),
+    }
+
+    # Env guard — safe-skip when credentials are absent.
+    if not SODEX_PRIVATE_KEY or not SODEX_AUTONOMOUS_TRADE:
+        return {**skip_base, "reason": "sell autonomous trading disabled (SODEX_PRIVATE_KEY or SODEX_AUTONOMOUS_TRADE unset)"}
+
+    sym = await resolve_spot_symbol(symbol_in)
+    if sym is None:
+        return {**skip_base, "reason": f"no SoDEX spot pair for {symbol_in}"}
+    if sym.get("status") != "TRADING":
+        return {**skip_base, "reason": f"pair {sym['name']} status={sym.get('status')}"}
+
+    tickers = await _load_spot_tickers()
+    last_str = (tickers.get(sym["name"]) or {}).get("lastPx") or "0"
+    last_px = float(last_str)
+    if last_px <= 0:
+        return {**skip_base, "reason": f"no last price for {sym['name']}"}
+
+    # Pricing: explicit mode wins, else fall back to env-driven default.
+    if mode == "market":
+        use_market = True
+    elif mode == "defensive":
+        use_market = False
+    else:
+        use_market = SODEX_AUTONOMOUS_TRADE
+
+    # SELL limit: must sit BELOW the last price to cross bids (opposite of buy).
+    if use_market:
+        target_px = last_px * (1 - slippage_bps / 10_000)
+    else:
+        target_px = last_px * 2.0  # defensive: rests above market, won't fill
+
+    tick_str = str(sym["tickSize"])
+    step_str = str(sym["stepSize"])
+    target_px = _quantize(target_px, float(tick_str))
+    if target_px <= 0:
+        return {**skip_base, "reason": "computed sell price below tick"}
+
+    # `amount_in` is the asset quantity to sell (not USDC notional).
+    quantity = _quantize(amount_in, float(step_str))
+    notional = target_px * quantity
+    min_notional = float(sym.get("minNotional") or "0")
+    if notional < min_notional:
+        return {
+            **skip_base,
+            "reason": f"sell notional {notional:.2f} < min {min_notional} on {sym['name']}",
+        }
+
+    cl_ord_id = f"agent-sell-{symbol_in[:10]}-{int(time.time() * 1000)}"
+    price_s = _decimal_str(target_px, tick_str)
+    qty_s = _decimal_str(quantity, step_str)
+
+    # Spot batchNewOrder item — side=2 (Sell).
+    order_item: dict[str, Any] = {
+        "symbolID": int(sym["id"]),
+        "clOrdID": cl_ord_id,
+        "side": 2,            # Sell
+        "type": 1,            # Limit
+        "timeInForce": 1,     # GTC
+        "price": price_s,
+        "quantity": qty_s,
+    }
+    account_id = await get_account_id()
+    action = {
+        "type": "batchNewOrder",
+        "params": {"accountID": account_id, "orders": [order_item]},
+    }
+
+    try:
+        result = await submit_action(
+            "spot", SPOT_BASE, "/trade/orders/batch", action,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": str(exc),
+            "symbol_in": symbol_in,
+            "symbol_out": "USDC",
+            "amount_in": amount_in,
+            "pair": sym["name"],
+            "limit_price": price_s,
+            "quantity": qty_s,
+            "gas_val": 0.0,
+            "latency_ms": int((time.time() - started) * 1000),
+            "external_url": _explorer_url(sym["name"]),
+        }
+
+    items = result.get("data") or []
+    first = items[0] if items else {}
+    order_id = first.get("orderID")
+
+    # Per-item reject guard (same as execute_trade).
+    item_status = first.get("status") or ""
+    item_code = first.get("code")
+    try:
+        code_nonzero = item_code is not None and int(item_code) != 0
+    except (TypeError, ValueError):
+        code_nonzero = True
+    if item_status.upper() == "REJECTED" or code_nonzero:
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": f"SoDEX sell item reject: {item_status}/{item_code}",
+            "symbol_in": symbol_in,
+            "symbol_out": "USDC",
+            "amount_in": amount_in,
+            "pair": sym["name"],
+            "limit_price": price_s,
+            "quantity": qty_s,
+            "gas_val": 0.0,
+            "latency_ms": int((time.time() - started) * 1000),
+            "external_url": _explorer_url(sym["name"]),
+        }
+
+    fee_pct = float(sym.get("takerFee") or "0.001")
+    usdc_received = round(notional * (1 - fee_pct), 4)
+
+    return {
+        "ok": True,
+        "skipped": False,
+        "order_id": order_id,
+        "cl_ord_id": cl_ord_id,
+        "pair": sym["name"],
+        "symbol_in": symbol_in,
+        "symbol_out": "USDC",
+        "amount_in": amount_in,
+        "limit_price": price_s,
+        "last_price": str(last_px),
+        "quantity": qty_s,
+        "notional": round(notional, 4),
+        "usdc_received": usdc_received,
+        "gas_val": round(notional * fee_pct, 4),  # estimated taker fee
+        "latency_ms": int((time.time() - started) * 1000),
+        "external_url": _explorer_url(sym["name"]),
+        "status": "submitted" if use_market else "resting",
+        "mode": "market" if use_market else "defensive",
+    }
+
+
 async def execute_perps_trade(
     symbol_out: str,
     amount_in_usdc: float,

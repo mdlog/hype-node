@@ -5,6 +5,7 @@ Supports SimulatedExecutor out of the box; swap for LiveSodexExecutor when ready
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from eth_account import Account
@@ -15,6 +16,10 @@ from src.vault.attestation import sign_attestation
 from src.vault.config import KeeperConfig
 
 log = logging.getLogger(__name__)
+
+# Env gate: rebalance loop is disabled by default.
+# Set VAULT_REBALANCE_ENABLED=true to activate on ticks.
+_REBALANCE_ENABLED = os.getenv("VAULT_REBALANCE_ENABLED", "false").lower() in {"true", "1", "yes"}
 
 
 class Keeper:
@@ -79,12 +84,44 @@ class Keeper:
     # Per-request processing
     # ------------------------------------------------------------------
 
-    def process_deposit(self, request_id: int) -> None:
+    def process_deposit(self, request_id: int, store: Any = None) -> None:
         d = self.vault.functions.pendingDeposits(request_id).call()
         idx_bytes, who, usdc_in, _min_shares, _ts, pulled = d
         if who == "0x0000000000000000000000000000000000000000":
             return
         idx_hex = self._idx_hex(idx_bytes)
+
+        # ── Cancel-before-pull check ──────────────────────────────────────────
+        # If the subscriber has requested cancellation (via /api/vault/cancel-deposit)
+        # and pullForDeposit has not yet been called, honor the cancellation instead
+        # of proceeding.  This is a best-effort window (~1 keeper tick, ~seconds).
+        # Wrapping in try/except so a store outage never crashes the tick.
+        if store is not None and not pulled:
+            try:
+                from src.vault.rebalance import should_cancel_before_pull
+                pending = store.pending_cancel_ids()
+                if should_cancel_before_pull(request_id, pending):
+                    log.info(
+                        "deposit %d: cancel request found — calling cancelDeposit(id, 0) pre-pull",
+                        request_id,
+                    )
+                    try:
+                        # Pre-pull refund path: pass 0 as returnedUsdc
+                        # (no USDC has been pulled yet so vault refunds from escrow).
+                        self._send(self.vault.functions.cancelDeposit(request_id, 0))
+                        store.mark_cancel_honored(request_id)
+                        log.info("deposit %d: cancellation honored", request_id)
+                    except Exception as cancel_exc:
+                        log.error(
+                            "deposit %d: cancelDeposit(0) failed: %s", request_id, cancel_exc
+                        )
+                    return
+            except Exception as store_exc:  # noqa: BLE001
+                log.warning(
+                    "deposit %d: store check for cancel request failed: %s — proceeding with pull",
+                    request_id, store_exc,
+                )
+
         try:
             if not pulled:
                 self._send(self.vault.functions.pullForDeposit(request_id))
@@ -132,8 +169,17 @@ class Keeper:
     # Poll loop
     # ------------------------------------------------------------------
 
-    def poll_once(self) -> None:
-        """Scan all pending request ids and dispatch any unseen ones."""
+    def poll_once(self, store: Any = None) -> None:
+        """Scan all pending request ids and dispatch any unseen ones.
+
+        Parameters
+        ----------
+        store
+            Optional store instance (IndexerStore).  When provided, process_deposit
+            will check pb_cancel_requests before pulling — if the subscriber has
+            requested cancellation, cancelDeposit(id, 0) is called instead.
+            Passing None disables the cancel-before-pull check (safe default).
+        """
         current_block = self.w3.eth.block_number
         next_id = self.vault.functions.nextRequestId().call()
 
@@ -144,7 +190,7 @@ class Keeper:
                 who_d = d[1]
                 if who_d != "0x0000000000000000000000000000000000000000":
                     self._seen_deposits.add(req_id)
-                    self.process_deposit(req_id)
+                    self.process_deposit(req_id, store=store)
                 elif req_id in self._seen_deposits:
                     pass  # already settled/cancelled
 
@@ -169,3 +215,87 @@ class Keeper:
     def accrue(self, idx_bytes: bytes) -> None:
         self._send(self.vault.functions.accrueMgmt(idx_bytes))
         log.info("accrued mgmt fee for %s", self._idx_hex(idx_bytes))
+
+    # ------------------------------------------------------------------
+    # Rebalance (env-gated, VAULT_REBALANCE_ENABLED=true required)
+    # ------------------------------------------------------------------
+
+    def rebalance_once(
+        self,
+        index_id: str,
+        store: Any,
+        *,
+        current_basket: dict[str, float] | None = None,
+        threshold_bps: int = 50,
+    ) -> list[dict]:
+        """Execute one rebalance cycle for `index_id`.
+
+        Reads target weights from pb_proposals.constituents (via store),
+        diffs against current_basket (falls back to nav_engine.basket_usd
+        as simulated total), executes trades via self.executor, then signs
+        a NAV attestation and calls vault.updateNav.
+
+        Env-gated: safe-skips when VAULT_REBALANCE_ENABLED is not truthy.
+        Never raises — exceptions are logged and the tick continues.
+
+        Parameters
+        ----------
+        index_id
+            Hex index identifier, e.g. "0xabc...".
+        store
+            Object with .proposal_for_index(index_id) -> dict | None.
+        current_basket
+            {symbol: usdc_value}.  When None, falls back to a single-asset
+            proxy using nav_engine.basket_usd (simulated total).
+        threshold_bps
+            Dead-band passed to diff_basket.
+
+        Returns
+        -------
+        List of trade dicts generated by diff_basket (empty when no-op).
+        """
+        if not _REBALANCE_ENABLED:
+            log.debug("rebalance_once: VAULT_REBALANCE_ENABLED is off — skipping %s", index_id)
+            return []
+
+        try:
+            from src.vault.rebalance import rebalance_once as _rebalance_once
+
+            # Compute total portfolio value from nav_engine.
+            total_value_usdc = float(self.nav_engine.basket_usd(index_id))
+
+            # When no explicit per-symbol basket is provided, pass the sentinel
+            # {"_total": ...}.  rebalance_once detects this and skips trade
+            # execution — fabricating trades from a total-only figure would be
+            # misleading.  Only the NAV checkpoint (sign + updateNav) will run.
+            # Full incremental rebalancing requires live per-symbol holdings
+            # from the SoDEX balance bridge (pending integration).
+            basket = current_basket or {"_total": total_value_usdc}
+
+            trades, nav_called = _rebalance_once(
+                index_id=index_id,
+                store=store,
+                keeper=self,
+                executor=self.executor,
+                current_basket=basket,
+                total_value_usdc=total_value_usdc,
+                threshold_bps=threshold_bps,
+            )
+
+            if trades:
+                log.info(
+                    "rebalance_once %s: executed %d trades, updateNav=%s",
+                    index_id, len(trades), nav_called,
+                )
+            else:
+                log.debug(
+                    "rebalance_once %s: no trades (within threshold or holdings unknown),"
+                    " updateNav=%s",
+                    index_id, nav_called,
+                )
+
+            return trades
+
+        except Exception as exc:  # noqa: BLE001 — never crash a tick
+            log.warning("rebalance_once %s failed: %s", index_id, exc)
+            return []
