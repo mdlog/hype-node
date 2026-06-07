@@ -71,6 +71,7 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
     event RedeemRequested(uint256 indexed id, bytes32 indexed indexId, address indexed who, uint256 shares);
     event Redeemed(uint256 indexed id, bytes32 indexed indexId, address indexed who, uint256 netUsdc, uint256 perfFeeUsdc);
     event FeesClaimed(bytes32 indexed indexId, address indexed creator, uint256 shares);
+    event NavUpdated(bytes32 indexed indexId, uint256 navPerShare, uint256 signedAt);
 
     // --- errors ---
     error NotKeeper();
@@ -153,6 +154,20 @@ contract HypeIndexVault is EIP712, Ownable, ReentrancyGuard {
             uint256 lo = last * (10_000 - MAX_DEV_BPS) / 10_000;
             if (navPerShare > hi || navPerShare < lo) revert NavDeviation();
         }
+    }
+
+    // --- NAV checkpoint (keeper-only, signature-verified) ---
+
+    /// @notice Stores a signed NAV checkpoint on-chain without settling any position.
+    ///         Used by the keeper's rebalance loop to record the current NAV between
+    ///         deposit/redeem cycles. Applies the same EIP-712 attestation verification
+    ///         and deviation guard as settleDeposit.
+    function updateNav(bytes32 indexId, uint256 navPerShare, uint256 signedAt, bytes calldata sig)
+        external onlyKeeper
+    {
+        _verifyNav(indexId, navPerShare, signedAt, sig);
+        vaults[indexId].lastNav = navPerShare;
+        emit NavUpdated(indexId, navPerShare, signedAt);
     }
 
     // --- vault lifecycle ---

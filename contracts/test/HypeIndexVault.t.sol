@@ -564,4 +564,91 @@ contract HypeIndexVaultTest is Test {
         vm.expectRevert(HypeIndexVault.ZeroAddress.selector);
         vault.openVault(keccak256("ZERO"), address(0));
     }
+
+    // ---- UNIT A: updateNav ----
+
+    /// @notice Happy path: keeper calls updateNav with a valid signed NAV → emits NavUpdated
+    ///         and stores the NAV in vaults[indexId].lastNav.
+    function testUpdateNav_happyPath_emitsNavUpdated() public {
+        _open();
+        // First settle a deposit so lastNav is set (1e6) before the guard kicks in.
+        _deposit(alice, 200e6, 1e6, 0);
+
+        uint256 newNav  = 11e5; // 1.1e6 — within ±20% of 1e6
+        uint256 signedAt = block.timestamp;
+        bytes memory sig = _signNav(INDEX, newNav, signedAt);
+
+        vm.expectEmit(true, false, false, true);
+        emit HypeIndexVault.NavUpdated(INDEX, newNav, signedAt);
+
+        vm.prank(keeper);
+        vault.updateNav(INDEX, newNav, signedAt, sig);
+
+        // lastNav must be updated
+        (, , , , , , uint256 lastNav) = vault.vaults(INDEX);
+        assertEq(lastNav, newNav);
+    }
+
+    /// @notice Non-keeper cannot call updateNav.
+    function testUpdateNav_revertsNotKeeper() public {
+        _open();
+        bytes memory sig = _signNav(INDEX, 1e6, block.timestamp);
+        vm.prank(alice);
+        vm.expectRevert(HypeIndexVault.NotKeeper.selector);
+        vault.updateNav(INDEX, 1e6, block.timestamp, sig);
+    }
+
+    /// @notice Stale signature (> MAX_STALENESS) must revert.
+    function testUpdateNav_revertsStaleSignature() public {
+        _open();
+        uint256 t = 1_000_000;
+        vm.warp(t);
+        bytes memory sig = _signNav(INDEX, 1e6, t);
+        vm.warp(t + 6 minutes);          // > MAX_STALENESS (5 min)
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.StalePrice.selector);
+        vault.updateNav(INDEX, 1e6, t, sig);
+    }
+
+    /// @notice Wrong signer must revert.
+    function testUpdateNav_revertsBadSigner() public {
+        _open();
+        bytes32 structHash = keccak256(abi.encode(vault.PRICE_TYPEHASH(), INDEX, uint256(1e6), block.timestamp));
+        bytes32 digest = vault.hashTypedDataV4Exposed(structHash);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(uint256(0xBADBAD), digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.BadSigner.selector);
+        vault.updateNav(INDEX, 1e6, block.timestamp, sig);
+    }
+
+    /// @notice NAV deviation beyond ±20% must revert when a prior lastNav is set.
+    function testUpdateNav_revertsNavDeviation() public {
+        _open();
+        _deposit(alice, 200e6, 1e6, 0);   // lastNav = 1e6
+
+        uint256 wildNav = 2e6;             // +100% — beyond MAX_DEV_BPS
+        bytes memory sig = _signNav(INDEX, wildNav, block.timestamp);
+        vm.prank(keeper);
+        vm.expectRevert(HypeIndexVault.NavDeviation.selector);
+        vault.updateNav(INDEX, wildNav, block.timestamp, sig);
+    }
+
+    /// @notice When lastNav is 0 (no prior deposit), deviation guard is skipped.
+    function testUpdateNav_noDeviation_whenLastNavIsZero() public {
+        _open();
+        // No deposit yet → lastNav == 0 → deviation guard skipped
+        uint256 nav = 5e6;
+        uint256 signedAt = block.timestamp;
+        bytes memory sig = _signNav(INDEX, nav, signedAt);
+
+        vm.expectEmit(true, false, false, true);
+        emit HypeIndexVault.NavUpdated(INDEX, nav, signedAt);
+
+        vm.prank(keeper);
+        vault.updateNav(INDEX, nav, signedAt, sig);
+
+        (, , , , , , uint256 lastNav) = vault.vaults(INDEX);
+        assertEq(lastNav, nav);
+    }
 }
