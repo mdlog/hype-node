@@ -294,6 +294,19 @@ export type SysUserSettingsInsert = Partial<SysUserSettingsRow> & {
 };
 export type SysUserSettingsUpdate = Partial<SysUserSettingsInsert>;
 
+// ---------- pb_cancel_requests ----------
+export type PbCancelRequestRow = {
+  deposit_id: number;
+  subscriber_address: string;
+  index_id: string;
+  requested_at: string;
+  status: "pending" | "honored" | "expired";
+};
+export type PbCancelRequestInsert = Omit<PbCancelRequestRow, "requested_at" | "status"> & {
+  requested_at?: string;
+  status?: PbCancelRequestRow["status"];
+};
+
 // ---------- Database root ----------
 //
 // Shape mirrors what `supabase gen types typescript` would emit so postgrest-js's
@@ -396,6 +409,12 @@ export type Database = {
             referencedColumns: ["id"];
           },
         ];
+      };
+      pb_cancel_requests: {
+        Row: PbCancelRequestRow;
+        Insert: PbCancelRequestInsert;
+        Update: Partial<PbCancelRequestInsert>;
+        Relationships: [];
       };
       sys_risk_audit: {
         Row: SysRiskAuditRow;
