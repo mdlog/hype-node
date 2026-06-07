@@ -21,7 +21,9 @@ const VAULT_ADDRESS = process.env.NEXT_PUBLIC_HYPE_VAULT_ADDRESS as
 const USDC_ADDRESS = process.env.NEXT_PUBLIC_USDC_ADDRESS as
   | `0x${string}`
   | undefined;
-const VAULT_CHAIN_ID = 138565;
+// Vault chain — env-driven; defaults to Sepolia (11155111), where the vault
+// and the SSI Registry are co-deployed. Override per deployment.
+const VAULT_CHAIN_ID = Number(process.env.NEXT_PUBLIC_VAULT_CHAIN_ID ?? 11155111);
 
 export function SubscribePanel({
   indexId,
