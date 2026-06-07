@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount,
   useChainId,
@@ -9,6 +9,7 @@ import {
   useWriteContract,
 } from "wagmi";
 import { sepolia } from "wagmi/chains";
+import { keccak256, toBytes } from "viem";
 import { Btn, Mono, Tag } from "@/components/ui";
 import { tokens } from "@/lib/tokens";
 import type { IndexSpec } from "@/lib/api/ssi";
@@ -16,7 +17,18 @@ import { SSI_REGISTRY_ABI } from "@/lib/contracts/ssiRegistryAbi";
 
 type Props = {
   spec: IndexSpec;
+  /**
+   * Fired once when the registerIndex tx confirms. indexId is computed exactly
+   * as the contract does (`keccak256(bytes(symbol))`) so callers can persist it
+   * back to the proposal / link the vault.
+   */
+  onPublished?: (txHash: `0x${string}`, indexId: `0x${string}`) => void | Promise<void>;
 };
+
+// Must match SSIRegistry: `id = keccak256(bytes(symbol))`.
+export function computeIndexId(symbol: string): `0x${string}` {
+  return keccak256(toBytes(symbol));
+}
 
 const REGISTRY_ADDRESS = process.env.NEXT_PUBLIC_SSI_REGISTRY_ADDRESS as
   | `0x${string}`
@@ -70,7 +82,7 @@ function explorerTxUrl(chainId: number, hash: string): string | null {
   return null;
 }
 
-export function PublishActions({ spec }: Props) {
+export function PublishActions({ spec, onPublished }: Props) {
   const { isConnected } = useAccount();
   const chainId = useChainId();
   const { switchChainAsync, isPending: switching } = useSwitchChain();
@@ -136,6 +148,16 @@ export function PublishActions({ spec }: Props) {
 
   const submitting = signing || switching || confirming;
   const confirmed = receipt?.status === "success";
+
+  // Fire onPublished exactly once when the registerIndex tx confirms, with the
+  // tx hash + the deterministic on-chain index id so the caller can persist it.
+  const firedRef = useRef(false);
+  useEffect(() => {
+    if (confirmed && txHash && !firedRef.current) {
+      firedRef.current = true;
+      void onPublished?.(txHash, computeIndexId(spec.symbol));
+    }
+  }, [confirmed, txHash, onPublished, spec.symbol]);
   const failed =
     receipt?.status === "reverted" ||
     !!writeError ||
@@ -175,16 +197,6 @@ export function PublishActions({ spec }: Props) {
         }}
       >
         {buttonLabel}
-      </Btn>
-      <Btn small style={{ justifyContent: "center" }} disabled={locked}>
-        Edit weights
-      </Btn>
-      <Btn
-        small
-        style={{ justifyContent: "center", color: tokens.textDim }}
-        disabled={locked}
-      >
-        Reject proposal
       </Btn>
 
       {(txHash || confirmed) && (
