@@ -4,10 +4,15 @@ import { NextResponse, type NextRequest } from "next/server";
 import { SiweMessage } from "siwe";
 
 import { sessionOptions, type SessionData } from "@/lib/auth/session";
+import { rateLimit } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
+  // Throttle SIWE verifies per IP — signature spam / brute force.
+  const limited = rateLimit(req, "auth:verify", 20, 60_000);
+  if (limited) return limited;
+
   const session = await getIronSession<SessionData>(cookies(), sessionOptions);
 
   const { message, signature } = (await req.json()) as {

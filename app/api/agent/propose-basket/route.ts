@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { proposeBasket } from "@/lib/api/agent";
 import { requireUser } from "@/lib/supabase/auth";
 import { canSend } from "@/lib/billing";
+import { rateLimit } from "@/lib/rateLimit";
 
 // Proxies to the agent service's LLM-backed basket drafter — a metered cost
 // action. Require an authenticated wallet (so anonymous callers can't burn the
 // model key / DoS the wallet) and pre-flight the per-wallet billing quota.
 export async function GET(req: NextRequest) {
+  const limited = rateLimit(req, "agent:propose-basket", 30, 60_000);
+  if (limited) return limited;
   const auth = await requireUser(req);
   if (!auth.user) return auth.res;
   const gate = canSend(auth.user.address);
