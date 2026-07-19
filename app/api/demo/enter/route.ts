@@ -14,6 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { sessionOptions, type SessionData } from "@/lib/auth/session";
 import { DEMO_ADDRESS } from "@/lib/demo/demo";
+import { relativeRedirect } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +39,7 @@ async function handleEnter(req: NextRequest): Promise<NextResponse> {
   await session.save();
 
   const destination = ROLE_REDIRECTS[role] ?? "/dashboard";
-  return NextResponse.redirect(new URL(destination, req.url), { status: 303 });
+  return relativeRedirect(destination, 303);
 }
 
 export const GET = handleEnter;

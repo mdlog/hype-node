@@ -30,11 +30,14 @@ export async function middleware(req: NextRequest) {
   const res = NextResponse.next();
   const session = await getIronSession<SessionData>(req, res, sessionOptions);
   if (!session.address) {
-    const url = req.nextUrl.clone();
-    url.pathname = "/";
-    url.searchParams.set("auth", "required");
-    url.searchParams.set("from", pathname);
-    return NextResponse.redirect(url);
+    // Relative Location so the browser resolves it against the public origin
+    // it requested — a reverse proxy's internal Host (e.g. localhost:3002)
+    // must not leak into the redirect. Same reasoning as lib/http.ts.
+    const params = new URLSearchParams({ auth: "required", from: pathname });
+    return new NextResponse(null, {
+      status: 307,
+      headers: { Location: `/?${params.toString()}` },
+    });
   }
   return res;
 }

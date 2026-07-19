@@ -5,17 +5,18 @@
 
 import { getIronSession } from "iron-session";
 import { cookies } from "next/headers";
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 
 import { sessionOptions, type SessionData } from "@/lib/auth/session";
+import { relativeRedirect } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
-async function handleExit(req: NextRequest): Promise<NextResponse> {
+async function handleExit(): Promise<NextResponse> {
   const session = await getIronSession<SessionData>(cookies(), sessionOptions);
   session.destroy();
 
-  return NextResponse.redirect(new URL("/", req.url), { status: 303 });
+  return relativeRedirect("/", 303);
 }
 
 export const GET = handleExit;

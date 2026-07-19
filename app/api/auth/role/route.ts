@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { isRole, roleHomeHref } from "@/lib/auth/role";
 import { sessionOptions, type SessionData } from "@/lib/auth/session";
+import { relativeRedirect } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -50,7 +51,9 @@ export async function POST(req: NextRequest) {
 
   if (isForm) {
     // 303 forces the browser to follow with GET — correct for POST → page.
-    return NextResponse.redirect(new URL(safeRedirect, req.url), { status: 303 });
+    // Relative Location so a reverse proxy's internal Host (e.g.
+    // localhost:3002) can't leak into the redirect target.
+    return relativeRedirect(safeRedirect, 303);
   }
   return NextResponse.json({ ok: true, role, redirect: safeRedirect });
 }
