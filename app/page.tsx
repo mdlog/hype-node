@@ -200,10 +200,10 @@ function Hero() {
           }}
         >
           <span className="hype-title-grad">
-            Autonomous on-chain index
+            Autonomous on-chain index funds —
             <br />
           </span>
-          <span className="hype-accent-grad">research → execution.</span>
+          <span className="hype-accent-grad">from research to execution.</span>
         </h1>
         <p
           style={{
@@ -214,9 +214,9 @@ function Hero() {
             maxWidth: 640,
           }}
         >
-          A LangGraph agent monitors SoSoValue Terminal sentiment + ETF fund flows, drafts index
-          baskets, runs backtests, and ships to SSI Protocol via SoDEX — with a USSI emergency-exit
-          hedge wired to your risk gates.
+          HypeNode&rsquo;s AI agent reads the market — hype, sentiment, and ETF fund flows — then
+          builds, backtests, and deploys a token index on-chain. Hold it yourself, or publish it and
+          earn fees from subscribers. Every trade waits for your signature.
         </p>
         <div style={{ display: "flex", gap: 12, marginTop: 36, alignItems: "center", flexWrap: "wrap" }}>
           <SignInButton className="hype-btn primary lg" label="Start free trial →" />
@@ -642,11 +642,11 @@ function Products() {
   return (
     <section id="products" style={{ position: "relative", padding: "110px 0" }}>
       <Container>
-        <Eyebrow>Two products · one agent stack</Eyebrow>
-        <SectionTitle>Run your own indices, or publish them to others.</SectionTitle>
+        <Eyebrow>One research engine · two ways to use it</Eyebrow>
+        <SectionTitle>Hold your own indices — or publish them and earn.</SectionTitle>
         <SectionSub>
-          HypeNode ships as two purpose-built surfaces sharing one autonomous research engine. Pick
-          the one that matches how you operate.
+          Same engine underneath: the agent that finds the signal and builds the basket. The only
+          difference is whether you&rsquo;re holding the index yourself, or selling access to it.
         </SectionSub>
 
         <div
@@ -1075,8 +1075,8 @@ function Numbers() {
   const cells: Array<[string, string]> = [
     ["11", "Sectors monitored continuously"],
     ["7", "MCP tools the agent can call"],
-    ["2.14", "Avg Sharpe across published indices"],
-    ["< 4h", "From signal to live index, on average"],
+    ["2.14", "Sharpe · 90-day demo backtest"],
+    ["Sepolia", "Live on testnet · mainnet in Wave 3"],
   ];
   return (
     <section style={{ padding: 0 }}>
@@ -1086,7 +1086,7 @@ function Numbers() {
             display: "grid",
             gridTemplateColumns: "repeat(4, 1fr)",
             gap: 0,
-            margin: "80px 0",
+            margin: "80px 0 20px",
           }}
         >
           {cells.map(([v, k], i) => (
@@ -1113,6 +1113,18 @@ function Numbers() {
             </div>
           ))}
         </div>
+        <p
+          style={{
+            fontFamily: MONO_STACK,
+            fontSize: 11,
+            color: PALETTE.faint,
+            margin: "0 0 80px",
+            lineHeight: 1.5,
+          }}
+        >
+          Sharpe and NAV figures shown across the site are from backtests on Sepolia testnet — an
+          illustration of the workflow, not a live production track record.
+        </p>
       </Container>
     </section>
   );
