@@ -41,6 +41,7 @@ export default async function Landing() {
     <div style={{ background: PALETTE.bg, color: PALETTE.text, minHeight: "100vh" }}>
       <TopNav />
       <Hero />
+      <CoreLoop />
       <Products />
       <HowItWorks />
       <Architecture />
@@ -636,6 +637,94 @@ function Container({ children }: { children: React.ReactNode }) {
   );
 }
 
+/* ------------------------------ CORE LOOP -------------------------------- */
+
+// Plain-language, one-pass summary of the product loop — sits directly under
+// the hero so a first-time visitor grasps the core value before scrolling.
+// Deliberately lighter than <HowItWorks /> (no boxes, no stack chips): this is
+// the elevator pitch; the node-by-node technical breakdown lives further down.
+function CoreLoop() {
+  const steps = [
+    {
+      n: "01",
+      title: "Reads the market",
+      desc: "The agent tracks hype, sentiment, and ETF fund flows across 11 sectors — continuously.",
+    },
+    {
+      n: "02",
+      title: "Builds & backtests",
+      desc: "It drafts a token basket and backtests it against BTC, ETH, and sector benchmarks before anything touches the chain.",
+    },
+    {
+      n: "03",
+      title: "You sign — it deploys",
+      desc: "Approve in your wallet and the index goes live. Hold it yourself, or publish it and earn fees from subscribers.",
+    },
+  ];
+  return (
+    <section style={{ position: "relative", padding: "96px 0 0" }}>
+      <Container>
+        <Eyebrow>The core loop</Eyebrow>
+        <div
+          style={{
+            marginTop: 4,
+            display: "flex",
+            alignItems: "flex-start",
+            flexWrap: "wrap",
+            gap: 0,
+          }}
+        >
+          {steps.map((s, i) => (
+            <div
+              key={s.n}
+              style={{ display: "flex", alignItems: "flex-start", flex: "1 1 260px" }}
+            >
+              <div style={{ flex: 1, paddingRight: 28 }}>
+                <div
+                  style={{
+                    fontFamily: MONO_STACK,
+                    fontSize: 12,
+                    color: PALETTE.emerald,
+                    letterSpacing: "0.16em",
+                    marginBottom: 14,
+                  }}
+                >
+                  {s.n}
+                </div>
+                <h3
+                  style={{
+                    fontSize: 20,
+                    fontWeight: 700,
+                    letterSpacing: "-0.02em",
+                    marginBottom: 8,
+                  }}
+                >
+                  {s.title}
+                </h3>
+                <p style={{ fontSize: 14, color: PALETTE.dim, lineHeight: 1.55 }}>{s.desc}</p>
+              </div>
+              {i < steps.length - 1 && (
+                <div
+                  aria-hidden
+                  style={{
+                    marginTop: 26,
+                    paddingRight: 28,
+                    color: PALETTE.line2,
+                    fontFamily: MONO_STACK,
+                    fontSize: 20,
+                  }}
+                >
+                  →
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </Container>
+    </section>
+  );
+}
+
 /* ------------------------------- PRODUCTS -------------------------------- */
 
 function Products() {
@@ -662,12 +751,12 @@ function Products() {
             badge="INDEXER"
             pages="10 PAGES"
             title="HypeNode Autonomous Indexer"
-            desc="Manage your own indices end-to-end. Dashboard, agent console with LangGraph state graph, MCP chat, backtesting lab, risk control with emergency exit, full transaction history."
+            desc="Build and run your own on-chain index funds. Watch the agent reason step by step, steer it in plain English, backtest against BTC, ETH, and sectors, and set a drawdown limit that auto-exits to a hedge — with every trade signed by you."
             features={[
-              "LangGraph state-machine console with live reasoning",
-              "MCP chat — control the agent in natural language",
-              "Backtesting lab vs BTC, ETH, sector benchmarks",
-              "USSI emergency-exit hedge wired to drawdown gates",
+              "Live console — watch every agent decision as it happens",
+              "Chat to steer the agent in plain English",
+              "Backtest against BTC, ETH, and sector benchmarks",
+              "Auto-exit to a hedge when your drawdown limit is hit",
             ]}
             primaryHref="/dashboard"
             primaryLabel="Open Indexer →"
@@ -677,12 +766,12 @@ function Products() {
             badge="PUBLISHER"
             pages="6 PAGES"
             title="HypeIndex Publisher"
-            desc="Creator product. Hype Radar surfaces sector momentum, agent drafts proposals you approve, your published indices accrue management + performance fees streamed in USDC."
+            desc="Turn your indices into a product. The radar surfaces sectors heating up, the agent drafts index proposals for you to approve, and once published you earn management and performance fees in USDC from every subscriber."
             features={[
-              "Hype Radar — live sector spike detection",
-              "Agent drafts proposals · you approve before publish",
-              "Subscribers stream fees to your wallet in USDC",
-              "Creator rank, earnings dashboard, tax reports",
+              "Radar flags sector momentum the moment it spikes",
+              "Agent drafts proposals — you approve before publishing",
+              "Earn management + performance fees in USDC",
+              "Creator rank, earnings dashboard, and tax reports",
             ]}
             primaryHref="/publisher/radar"
             primaryLabel="Open Publisher →"
