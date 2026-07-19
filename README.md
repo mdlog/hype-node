@@ -18,7 +18,9 @@ Two products live in one app:
   via Privy → research → build basket → simulate → deploy to SSI Registry on
   Sepolia → monitor.
 - **Publisher** (`/publisher/radar`, `/publisher/proposals`, …) — agent drafts
-  hype-driven indices, you review & publish them on-chain to earn fees.
+  hype-driven indices, you review & publish them on-chain, and subscribers can
+  deposit into a custodial **HypeIndexVault** to earn you 1%/yr management +
+  10% performance fees. Currently on testnet (see [Publisher Vault](#publisher-vault-on-chain)).
 
 Public surface (no sign-in required): `/discover` marketplace, `/docs`,
 `/privacy`, `/status` (live endpoint probes).
@@ -34,11 +36,12 @@ overview see [`docs/dokumentasi-aplikasi.md`](docs/dokumentasi-aplikasi.md).
 | Frontend     | Next.js 14.2.32 App Router · React 18 · TypeScript · Tailwind 3     |
 | Wallet       | Privy (email / Google / Twitter / wallet) · wagmi · viem            |
 | Auth         | SIWE (Sign-In With Ethereum) · iron-session cookies                 |
-| API surface  | Next.js route handlers (`/app/api/*` — 56 endpoints)                |
+| API surface  | Next.js route handlers (`/app/api/*` — 59 endpoints)                |
 | Data         | SoSoValue OpenAPI v1 (rate-limited proxy + per-path TTL cache)      |
 | LLM agent    | Python 3.11 · FastAPI · LangGraph · MCP · pluggable Anthropic / OpenAI |
 | Storage      | Supabase Postgres (saved runs, threads, billing) · SQLite (`agent-service/data/hypenode.db` for risk config + decision log) |
 | Execution    | SSI Registry (Sepolia) via wagmi `useWriteContract` ·  SoDEX REST v1 |
+| Publisher vault | `HypeIndexVault.sol` (Solidity · Foundry) — custodial subscribe/redeem + share-dilution fee accrual, driven by a Python keeper/indexer. Testnet-stage |
 | Risk hedge   | Auto-route to USSI on threshold breach (planned for Wave 3)         |
 
 ## Repository layout
@@ -57,22 +60,27 @@ app/
     radar, proposals, proposals/[id], published, earnings, config
   (public)/                     Unauthenticated info surface
     docs, privacy, status (live endpoint probes every 30s)
-  discover, discover/[id]       Public marketplace (no sign-in)
+  discover, discover/[id]       Public marketplace (no sign-in). discover/[id]
+                                has SubscribePanel (deposit into the vault) +
+                                BacktestVsRealized (backtest vs live NAV)
   share/backtest/[code]         Public share link for a saved backtest run
-  api/                          56 route handlers
+  api/                          59 route handlers
     auth/{nonce,verify,me,logout,role}     SIWE sign-in flow
+    demo/{enter,exit}                      Read-only demo session toggle
     sosovalue/[...path]                    Catch-all proxy (browser → server)
     terminal/{sentiment,fund-flow,news,sectors}
     ssi/{list,wrap,snapshot/[ticker],constituents/[ticker],klines/[ticker]}
     currencies/[id]/klines · currencies-list
     etfs/[symbol]/{history,summary}
-    agent/{state,reasoning,history,step,pause,halt,reset,tools,
+    agent/{state,reasoning,history,step,pause,halt,reset,tools/health,
            propose-basket,run-backtest,risk-config}
-    backtest/{run, runs, runs/[id], share}      Saved runs + share links
+    backtest/{run, runs, runs/[id], share, share/[code]}   Saved runs + share links
     builder/drafts (+ [id])                     Builder draft persistence
-    chat/threads (+ [id]/messages)              Chat thread storage
-    portfolio + portfolio/snapshots             Wallet positions + snapshots
-    proposals (+ [id]) · publisher · risk · settings · sodex/submit
+    chat (+ threads, threads/[id]/messages)     Chat + thread storage
+    portfolio + portfolio/snapshots (+ [id])    Wallet positions + snapshots
+    proposals (+ [id]) · risk/audit · settings · sodex/submit
+    publisher/earnings (+ /summary)             Creator earnings ledger (keeper-written)
+    vault/cancel-deposit                        Cancel a pending vault deposit
     cron/portfolio-snapshot                     Periodic snapshot job
     asset-logos · stock-logos · billing/{usage,topup}
 components/
@@ -87,6 +95,8 @@ components/
   dashboard/                    SmartMoneyWidget, StablecoinFlowWidget,
                                 MacroCalendar, SsiCompositeLogo
   builder/, portfolio/, agent/, chat/, publisher/, live/, history/, research/,
+  vault/                        RedeemPanel + ClaimFeesPanel (wired into
+                                /discover/[id]) — subscriber redeem + creator fee claim
   billing/                      Inline + modal top-up flows
 lib/
   tokens.ts                     Design tokens (matches hifi-kit colors exactly)
@@ -107,7 +117,15 @@ lib/
   supabase/{server.ts, auth.ts, types.ts}   Postgres persistence client
   stock-logos.ts, project-slugs.ts   Curated logo mappings
 middleware.ts                   SIWE auth guard for protected routes
-supabase/migrations/            SQL migrations (bt_runs, chat_threads, etc.)
+supabase/migrations/            SQL migrations 0001–0006 (bt_runs, chat_threads,
+                                pb_subscriptions, pt_track_record, vault_indexer,
+                                pb_cancel_requests)
+contracts/                      Foundry project (forge, OZ v5.1.0)
+  src/HypeIndexVault.sol        Custodial vault — subscribe/redeem + fee accrual
+  src/SSIRegistry.sol           On-chain index registry
+  src/mocks/MockUSDC.sol        Testnet settlement token
+  script/Deploy.s.sol           Deploy scripts
+  deploy-vault.sh · DEPLOY-VAULT.md   Deploy helper + runbook
 agent-service/                  Python FastAPI + LangGraph + MCP
   src/
     main.py                     HTTP surface for Next.js (port 8001)
@@ -119,6 +137,10 @@ agent-service/                  Python FastAPI + LangGraph + MCP
     tools/                      terminal · ssi · sodex · risk · backtest ·
                                 real_backtest · basket · macro · treasuries ·
                                 rootdata
+    vault/                      Vault keeper stack — nav (EIP-712 NAV signing),
+                                attestation, executor, keeper, daemon
+                                (reconcile→settle→accrue→index), indexer
+                                (chain→Supabase), rebalance, store, config
     store.py                    SQLite-backed persistence
 docs/
   product-roadmap.md            Current 3-wave roadmap (MVP → Publisher → Production)
@@ -208,7 +230,7 @@ With the agent service running:
 npm run build && npm start
 ```
 
-The build produces ~90 routes (30 pages · 56 API handlers · landing · 404 +
+The build produces ~90 routes (30 pages · 59 API handlers · landing · 404 +
 chunked layout shells). `npm run typecheck` runs `tsc --noEmit` for a quick
 type sweep. `npm run lint` runs `next lint`.
 
@@ -250,6 +272,20 @@ See [`.env.example`](.env.example) for the canonical list. Highlights:
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY`             | _empty_                                             | Supabase anon key (browser-safe)         |
 | `SUPABASE_SERVICE_ROLE_KEY`                 | _empty_                                             | Server-only Supabase role for writes     |
 | `LANGGRAPH_CHECKPOINT_DIR`                  | `./.checkpoints`                                    | LangGraph state store                    |
+| `AGENT_OPERATORS`                           | _empty (prod fails closed)_                         | Comma-sep wallets allowed to drive agent control + `risk-config` routes |
+| `KEEPER_SECRET`                             | _empty → keeper writes disabled_                    | `x-keeper-secret` for keeper→earnings-ledger writes |
+| `NEXT_PUBLIC_VAULT_CHAIN_ID`                | `11155111` (Sepolia)                                | Chain the vault UI (`SubscribePanel`) targets |
+| `NEXT_PUBLIC_HYPE_VAULT_ADDRESS`            | _empty → "not deployed" fallback_                   | Deployed `HypeIndexVault` address (browser) |
+| `NEXT_PUBLIC_USDC_ADDRESS`                  | _empty_                                             | Settlement USDC / MockUSDC address (browser) |
+| `VAULT_CHAIN_ID` *(keeper)*                 | _required_                                          | EIP-712 domain chainId; must match deployment |
+| `VAULT_RPC_URL` *(keeper)*                  | `http://127.0.0.1:8545`                             | RPC endpoint for keeper + indexer        |
+| `VAULT_ADDRESS` / `VAULT_USDC_ADDRESS` *(keeper)* | _required_                                    | Deployed vault + settlement token addresses |
+| `VAULT_SIGNER_PRIVATE_KEY` *(keeper)*       | _required_                                          | EIP-712 NAV price-signer hot key         |
+| `VAULT_KEEPER_PRIVATE_KEY` *(keeper)*       | _required_                                          | Keeper tx key (settle / accrue)          |
+| `VAULT_REBALANCE_ENABLED` *(keeper)*        | _empty → off_                                       | Master switch for the daily rebalance loop |
+
+Vars marked *(keeper)* live in [`agent-service/.env`](agent-service/.env.example),
+not the root `.env`.
 
 ## SoSoValue OpenAPI v1
 
@@ -367,6 +403,49 @@ To deploy elsewhere (e.g. ValueChain L1 mainnet `286623`), override
 
 Copy [`.env.example`](.env.example) and [`agent-service/.env.example`](agent-service/.env.example).
 
+## Publisher Vault (on-chain)
+
+> **Testnet-stage.** The vault ships and works end-to-end on testnet, but it is
+> **not audited** and uses a **trusted-keeper custody model** (see caveats
+> below). Do not point it at real funds. Mainnet is gated on Wave 3.
+
+The Publisher revenue loop is backed by [`contracts/src/HypeIndexVault.sol`](contracts/src/HypeIndexVault.sol)
+— one shared custodial vault, keyed per index by `indexId = keccak256(symbol)`,
+settling in USDC:
+
+- **Subscribe / redeem** — subscribers deposit USDC via
+  [`SubscribePanel`](app/discover/[id]/SubscribePanel.tsx) on `/discover/[id]`;
+  because SoDEX swaps are off-chain/async, deposits **mint shares on fill**
+  (redeem is symmetric). A pending deposit can be pulled back through
+  [`vault/cancel-deposit`](app/api/vault/cancel-deposit/route.ts) before the
+  keeper settles it. Redeem + creator fee-claim UI live in
+  [`components/vault/`](components/vault) (`RedeemPanel`, `ClaimFeesPanel`).
+- **Shares** — an internal, non-transferable ledger (no ERC-20/1155 surface).
+- **Fees** — 1%/yr management + 10% performance, accrued by **share dilution**
+  (minting creator shares — no USDC moves per accrual), with a per-subscriber
+  high-water mark.
+- **NAV & keeper** — the Python keeper stack
+  ([`agent-service/src/vault/`](agent-service/src/vault)) signs NAV with an
+  EIP-712 price-signer (staleness + sanity band), and a daemon runs
+  reconcile → settle → accrue → index once per cycle. The indexer mirrors
+  on-chain events into Supabase (`pb_subscriptions`, earnings ledger) to feed
+  `/discover` and `/publisher/earnings`.
+
+Deploy with [`contracts/deploy-vault.sh`](contracts/deploy-vault.sh) — full
+runbook in [`contracts/DEPLOY-VAULT.md`](contracts/DEPLOY-VAULT.md). Set
+`NEXT_PUBLIC_VAULT_CHAIN_ID` / `NEXT_PUBLIC_HYPE_VAULT_ADDRESS` /
+`NEXT_PUBLIC_USDC_ADDRESS` on the frontend and the `VAULT_*` keys on the keeper
+(see [Environment variables](#environment-variables)). Until the vault address
+is set, `/discover/[id]` shows an honest "Vault not deployed yet" fallback.
+
+**Custody caveats (why this is testnet-only):** SoDEX settlement is off-chain,
+so a smart contract cannot be the SoDEX signer — funds are custodian-backed
+mirror tokens in a SoDEX account keyed to the **keeper EOA**, i.e. effective
+custody sits with the keeper, not the contract. The keeper's `basketValueUsdc`
+input is currently unsigned (a compromised keeper could mint arbitrary shares).
+Mainnet requires an external audit, custody re-architecture, and a multisig
+price-signer — all tracked in Wave 3.
+
 ## Use HypeNode inside Claude Desktop (Wave-1 delivered)
 
 The standalone MCP server ships as part of the `agent-service` package and exposes **17 read-only SoSoValue research tools** directly inside Claude Desktop — no API or custom UI required.
@@ -392,12 +471,16 @@ Three waves:
 
 1. **Wave 1 — Indexer MVP** (~95% complete) — single user can build → simulate
    → deploy → monitor end-to-end on Sepolia
-2. **Wave 2 — Publisher Revenue Loop** (vault contract, subscriber deposits,
-   USDC fee streaming, marketplace `/discover`)
+2. **Wave 2 — Publisher Revenue Loop** (custodial `HypeIndexVault`, subscriber
+   deposits, share-dilution fees, keeper/indexer, marketplace `/discover`) —
+   **built and working end-to-end on testnet** (see [Publisher Vault](#publisher-vault-on-chain)).
+   Not audited; trusted-keeper custody — mainnet is gated on Wave 3.
 3. **Wave 3 — Production Hardening** (mainnet migration, external audit,
-   observability, mobile-responsive, ToS/Privacy, pricing tiers)
+   vault custody re-architecture + multisig signer, observability,
+   mobile-responsive, ToS/Privacy, pricing tiers)
 
-Public launch target: 15 June 2026.
+Status: the app runs on public **testnet** today; mainnet launch follows the
+Wave 3 audit + custody re-architecture.
 
 Outstanding items at the README layer (not in the per-wave roadmap):
 
