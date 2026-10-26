@@ -1,3 +1,4 @@
+import { DynamicServerError } from "next/dist/client/components/hooks-server-context";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Regression guard for "menus hang 16–66 s while SoSoValue stalls": a fetch
@@ -82,6 +83,24 @@ describe("SoSoValue transport — upstream unreachable", () => {
     await new Promise((r) => setTimeout(r, 80));
     fetchMock.mockImplementation(jsonResponse({ code: 0, data: ["live"] }));
 
+    expect(await request("/macro/events", () => ["fallback"])).toEqual(["live"]);
+  });
+
+  it("hands Next's dynamic-usage signal back untouched — no retry, log, or backoff", async () => {
+    // During `next build`, Next's patched fetch throws DynamicServerError for a
+    // no-store request to mark the route dynamic. That is control flow, not an
+    // outage: treating it as one logged a false UPSTREAM UNREACHABLE per route.
+    const dynamicUsage = new DynamicServerError(
+      "no-store fetch https://openapi.sosovalue.com/openapi/v1/indices /backtest",
+    );
+    fetchMock.mockImplementationOnce(() => Promise.reject(dynamicUsage));
+    const { request } = await loadTransport();
+
+    await expect(request("/indices", () => [])).rejects.toBe(dynamicUsage);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(console.warn).not.toHaveBeenCalled();
+
+    fetchMock.mockImplementation(jsonResponse({ code: 0, data: ["live"] }));
     expect(await request("/macro/events", () => ["fallback"])).toEqual(["live"]);
   });
 

@@ -13,6 +13,8 @@
 //   - Currency  (/currencies/sector-spotlight)          sector momentum
 //   - Index     (/indices, /indices/{t}/constituents)   SSI reference baskets
 
+import { isDynamicServerError } from "next/dist/client/components/hooks-server-context";
+
 import { fakeSeries } from "@/lib/fake-data";
 import { cleanText, safeSlice } from "@/lib/text";
 
@@ -523,6 +525,8 @@ export async function request<T>(path: string, fallback: () => T): Promise<T> {
       try {
         res = await fetchOnce();
       } catch (transportErr) {
+        // Next's prerender signal, not a network failure (see outer catch).
+        if (isDynamicServerError(transportErr)) throw transportErr;
         // AbortError / TypeError / network — give the upstream one more
         // shot before surrendering. Subsequent failures fall through to
         // the outer catch below and return cache/fallback.
@@ -618,6 +622,11 @@ export async function request<T>(path: string, fallback: () => T): Promise<T> {
       });
       return data;
     } catch (err) {
+      // `next build` prerenders routes, and Next's patched fetch throws
+      // DynamicServerError on this no-store request to mark the route
+      // dynamic. That is control flow, not an outage: hand it back to Next
+      // untouched — no log, no backoff, no fallback.
+      if (isDynamicServerError(err)) throw err;
       // Stay quiet on every retry once we're in any backoff window — the
       // root-cause has already been logged once via warnOnce / threshold
       // checks above.
