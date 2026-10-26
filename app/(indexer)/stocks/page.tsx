@@ -6,7 +6,8 @@ import {
   getCryptoStockMarketSnapshot,
   getCryptoStockSectorIndex,
 } from "@/lib/api/sosovalue/crypto-stocks";
-import { StocksClient, type StockRow, type SectorIndexSeries } from "./StocksClient";
+import { loadStockRows } from "./loadStockRows";
+import { StocksClient, type SectorIndexSeries } from "./StocksClient";
 
 export const revalidate = 60;
 
@@ -52,33 +53,15 @@ function SectorMiniBar({
 }
 
 export default async function StocksPage() {
-  // Pull stock list + sector aggregates in parallel; per-stock snapshots run
-  // through the same `request` helper which dedupes / caches internally so the
-  // 8-fan-out is fine in synthetic mode and rate-limited correctly with a key.
+  // Pull stock list + sector aggregates in parallel. Per-stock snapshots are
+  // capped to the rows the table can show — the live list is ~3.7k tickers,
+  // not the 8 of synthetic mode (see loadStockRows).
   const [stocks, sectors] = await Promise.all([
     listCryptoStocks(),
     listCryptoStockSectors(),
   ]);
 
-  const snapshots = await Promise.all(
-    stocks.map((s) =>
-      getCryptoStockMarketSnapshot(s.ticker).catch(() => null),
-    ),
-  );
-
-  const rows: StockRow[] = stocks.map((s, i) => {
-    const snap = snapshots[i];
-    return {
-      ticker: s.ticker,
-      name: s.name,
-      sector: s.sector,
-      price: snap?.mkt_price ?? 0,
-      vol24h: snap?.turnover ?? 0,
-      marketcap: snap?.total_marketcap ?? 0,
-      pe: snap?.pe_ttm ?? 0,
-      pb: snap?.pb ?? 0,
-    };
-  });
+  const rows = await loadStockRows(stocks, getCryptoStockMarketSnapshot);
 
   // Pre-fetch the sector-index series for each known sector so the client can
   // toggle between them without a round-trip. Each series is independent and
@@ -121,7 +104,7 @@ export default async function StocksPage() {
             Crypto Stocks
           </div>
           <Mono size={11}>
-            Public companies with crypto exposure · {rows.length} listed · GET /crypto-stocks +
+            Public companies with crypto exposure · {stocks.length} listed · GET /crypto-stocks +
             /sector
           </Mono>
         </div>
