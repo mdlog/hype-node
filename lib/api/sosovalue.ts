@@ -272,6 +272,11 @@ const RATE_LIMIT_BACKOFF_MS = Number(process.env.SOSOVALUE_RATE_LIMIT_BACKOFF_MS
 // 5xx outages (e.g. 500 code=500001 during a subscription-tier propagation
 // delay or temporary degradation): back off 5 min instead of hammering.
 const TRANSIENT_BACKOFF_MS = Number(process.env.SOSOVALUE_TRANSIENT_BACKOFF_MS ?? 5 * 60_000);
+// Transport failures (timeout / reset / DNS on both the attempt and its retry)
+// get no envelope to classify. Back off briefly so the rest of the render's
+// sequential waves — and the next navigations — serve cache/fallback instead
+// of each waiting 2 × FETCH_TIMEOUT_MS. Short on purpose: usually a blip.
+const TRANSPORT_BACKOFF_MS = Number(process.env.SOSOVALUE_TRANSPORT_BACKOFF_MS ?? 30_000);
 // Auth errors (400101 invalid key, 400102 expired key, HTTP 401) — won't
 // resolve without an env change. Long backoff to avoid log floods.
 const AUTH_BACKOFF_MS = Number(process.env.SOSOVALUE_AUTH_BACKOFF_MS ?? 6 * 3600_000);
@@ -509,6 +514,10 @@ export async function request<T>(path: string, fallback: () => T): Promise<T> {
     if (waitMs > 0) {
       await new Promise<void>((r) => setTimeout(r, waitMs));
     }
+    // Hoisted so the catch below can tell a transport failure (no complete
+    // body ever arrived — dead before headers or stalled mid-stream) from an
+    // upstream error response.
+    let text: string | undefined;
     try {
       let res: Response;
       try {
@@ -524,7 +533,7 @@ export async function request<T>(path: string, fallback: () => T): Promise<T> {
           warnOnce(`retry:${path}`, `[sosovalue] retried ${path} after transport error: ${m}`);
         }
       }
-      const text = await res.text();
+      text = await res.text();
       let body: unknown;
       try {
         body = JSON.parse(text);
@@ -613,6 +622,20 @@ export async function request<T>(path: string, fallback: () => T): Promise<T> {
       // root-cause has already been logged once via warnOnce / threshold
       // checks above.
       const message = (err as Error).message;
+      if (text === undefined) {
+        if (state.transientErrorUntil < Date.now()) {
+          console.warn(
+            `[sosovalue] UPSTREAM UNREACHABLE ${path} (${message}) · ` +
+              `backing off ${Math.round(TRANSPORT_BACKOFF_MS / 1000)}s`,
+          );
+        }
+        state.transientErrorUntil = Math.max(
+          state.transientErrorUntil,
+          Date.now() + TRANSPORT_BACKOFF_MS,
+        );
+        if (cached) return cached.data;
+        return fallback();
+      }
       const inBackoff =
         / 4\d\d /.test(message) ||
         / 5\d\d /.test(message) ||
