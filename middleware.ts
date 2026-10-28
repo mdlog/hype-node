@@ -30,14 +30,18 @@ export async function middleware(req: NextRequest) {
   const res = NextResponse.next();
   const session = await getIronSession<SessionData>(req, res, sessionOptions);
   if (!session.address) {
-    // Relative Location so the browser resolves it against the public origin
-    // it requested — a reverse proxy's internal Host (e.g. localhost:3002)
-    // must not leak into the redirect. Same reasoning as lib/http.ts.
-    const params = new URLSearchParams({ auth: "required", from: pathname });
-    return new NextResponse(null, {
-      status: 307,
-      headers: { Location: `/?${params.toString()}` },
-    });
+    // Must be ABSOLUTE — unlike route handlers (lib/http.ts), middleware can't
+    // emit a relative Location: Next 14's adapter parses it with `new URL()`
+    // and no base, which throws "Invalid URL" → 500. Take the host from the
+    // Host header, not `req.nextUrl`: Next builds nextUrl from its listen
+    // address (https://localhost:3002 behind the tunnel), while cloudflared
+    // forwards the public Host untouched. The scheme is already correct —
+    // Next derives nextUrl's protocol from x-forwarded-proto.
+    const host = req.headers.get("host") ?? req.nextUrl.host;
+    const url = new URL(`${req.nextUrl.protocol}//${host}/`);
+    url.searchParams.set("auth", "required");
+    url.searchParams.set("from", pathname);
+    return NextResponse.redirect(url);
   }
   return res;
 }
